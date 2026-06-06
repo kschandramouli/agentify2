@@ -17,59 +17,74 @@ recommended — follow Step 0 below to replace it with short-lived SSO sessions.
 
 ---
 
-## Step 0 — Set up AWS IAM Identity Center (personal SSO, free, one-time)
+## Step 0 — Set up AWS IAM Identity Center (one-time)
 
 > Skip this if you already have a working `aws sso login` profile for your account.
 
-This gives you browser-based login with auto-expiring credentials — no keys in any
-file. Works on a personal AWS account with no corporate IdP required.
+IAM Identity Center gives you browser-based login with auto-expiring credentials.
+No long-lived keys, no corporate IdP required. **One manual click** is unavoidable
+(Terraform cannot create the IAM Identity Center instance itself); everything after
+that is fully Terraformed.
 
-### 0a — Enable IAM Identity Center in your account
+### 0a — Enable IAM Identity Center (one console click)
 
-1. Open the [AWS IAM Identity Center console](https://console.aws.amazon.com/singlesignon)
-2. Click **Enable** (if not already active) — choose your region (`ap-southeast-2`)
-3. Under **Settings**, note your **AWS access portal URL** (looks like
-   `https://d-xxxxxxxxxx.awsapps.com/start`)
+1. Open the [IAM Identity Center console](https://console.aws.amazon.com/singlesignon)
+2. Click **Enable** → confirm region `ap-southeast-2`
+3. That's it — the instance is ready. Terraform reads it as a data source.
 
-### 0b — Create a permission set and assign yourself
+You need temporary credentials to run the SSO module for the first time. Use your
+**root account** (temporarily) or any existing IAM user. After this step you'll
+never need them again.
 
-1. In IAM Identity Center → **Permission sets** → **Create permission set**
-2. Choose **Predefined policy** → `AdministratorAccess` (for bootstrap; scope down later)
-3. In **AWS accounts**, select your account and assign yourself + the permission set
+### 0b — Run the SSO Terraform module
+
+```bash
+cd infra/terraform/sso
+terraform init
+terraform apply \
+  -var="email=your@email.com" \
+  -var="first_name=Your" \
+  -var="last_name=Name"
+```
+
+This creates:
+- A permission set (`AgentifyAdmin` = AdministratorAccess; scope down later)
+- Your user in the built-in identity store
+- The account assignment binding them together
+
+AWS will send a **"Set your password"** email to the address you provided.
+Check it and set your password before continuing.
+
+The `terraform output` block prints the exact `aws configure sso` command to run.
 
 ### 0c — Configure the AWS CLI profile
 
 ```bash
-aws configure sso \
-  --profile agentify-dev
+aws configure sso --profile agentify-dev
 ```
 
-When prompted:
-- **SSO session name**: `agentify`
-- **SSO start URL**: your portal URL from 0a (e.g. `https://d-xxxxxxxxxx.awsapps.com/start`)
+When prompted, use the values from the Terraform output `sso_start_url`:
+- **SSO start URL**: value from `terraform output sso_start_url`
 - **SSO region**: `ap-southeast-2`
-- **CLI default region**: `ap-southeast-2`
-- **CLI default output format**: `json`
+- **Default region**: `ap-southeast-2`
+- **Default output**: `json`
 
-This writes a profile to `~/.aws/config` — no credentials file touched.
-
-### 0d — Test login
+### 0d — Login and verify
 
 ```bash
 aws sso login --profile agentify-dev
-# Opens browser, you approve → session valid for 8h (configurable)
+# Opens browser → click Allow → session valid 8h
 aws sts get-caller-identity --profile agentify-dev
-# Should return your account ID and assumed role ARN
+# Returns your account ID and the AgentifyAdmin role ARN
 ```
 
-### 0e — Tell Terraform to use this profile
+### 0e — Export the profile for all subsequent steps
 
 ```bash
 export AWS_PROFILE=agentify-dev
-# All subsequent aws / terraform commands in this shell use SSO credentials.
 ```
 
-Add to your shell profile (`~/.zshrc` or `~/.bash_profile`):
+Add to `~/.zshrc` (or `~/.bash_profile`) so it persists:
 ```bash
 export AWS_PROFILE=agentify-dev
 ```
