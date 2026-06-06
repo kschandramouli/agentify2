@@ -4,10 +4,82 @@ Architecture: all workloads (backend, agent, adapter) run on a single EKS cluste
 The frontend is a static Vite build served from S3 + CloudFront.
 See [ADR 0017](../context-mesh/decisions/0017-all-on-eks-topology.md).
 
+## Authentication model
+
+| Who/what needs AWS access | How |
+|---|---|
+| **GitHub Actions** (ongoing CI/CD) | OIDC — no stored credentials (already in `iam.tf`) |
+| **You, running bootstrap locally** | AWS IAM Identity Center SSO (browser login, auto-expiring session) |
+
+There are **no long-lived IAM user keys** in this setup. If you already have
+`~/.aws/credentials` with static keys, that works for bootstrap but is not
+recommended — follow Step 0 below to replace it with short-lived SSO sessions.
+
+---
+
+## Step 0 — Set up AWS IAM Identity Center (personal SSO, free, one-time)
+
+> Skip this if you already have a working `aws sso login` profile for your account.
+
+This gives you browser-based login with auto-expiring credentials — no keys in any
+file. Works on a personal AWS account with no corporate IdP required.
+
+### 0a — Enable IAM Identity Center in your account
+
+1. Open the [AWS IAM Identity Center console](https://console.aws.amazon.com/singlesignon)
+2. Click **Enable** (if not already active) — choose your region (`ap-southeast-2`)
+3. Under **Settings**, note your **AWS access portal URL** (looks like
+   `https://d-xxxxxxxxxx.awsapps.com/start`)
+
+### 0b — Create a permission set and assign yourself
+
+1. In IAM Identity Center → **Permission sets** → **Create permission set**
+2. Choose **Predefined policy** → `AdministratorAccess` (for bootstrap; scope down later)
+3. In **AWS accounts**, select your account and assign yourself + the permission set
+
+### 0c — Configure the AWS CLI profile
+
+```bash
+aws configure sso \
+  --profile agentify-dev
+```
+
+When prompted:
+- **SSO session name**: `agentify`
+- **SSO start URL**: your portal URL from 0a (e.g. `https://d-xxxxxxxxxx.awsapps.com/start`)
+- **SSO region**: `ap-southeast-2`
+- **CLI default region**: `ap-southeast-2`
+- **CLI default output format**: `json`
+
+This writes a profile to `~/.aws/config` — no credentials file touched.
+
+### 0d — Test login
+
+```bash
+aws sso login --profile agentify-dev
+# Opens browser, you approve → session valid for 8h (configurable)
+aws sts get-caller-identity --profile agentify-dev
+# Should return your account ID and assumed role ARN
+```
+
+### 0e — Tell Terraform to use this profile
+
+```bash
+export AWS_PROFILE=agentify-dev
+# All subsequent aws / terraform commands in this shell use SSO credentials.
+```
+
+Add to your shell profile (`~/.zshrc` or `~/.bash_profile`):
+```bash
+export AWS_PROFILE=agentify-dev
+```
+
+---
+
 ## Prerequisites
 
-- AWS CLI configured for `ap-southeast-2` with an account that can create EKS/RDS/IAM
-- Terraform ≥ 1.6 (`brew install terraform` or from releases.hashicorp.com)
+- AWS SSO profile configured (Step 0 above) — **no static keys needed**
+- Terraform ≥ 1.6 (download from [releases.hashicorp.com](https://releases.hashicorp.com/terraform/))
 - `kubectl` and `helm` installed locally
 - Docker (for local builds; CI builds in GitHub Actions)
 
@@ -15,7 +87,10 @@ See [ADR 0017](../context-mesh/decisions/0017-all-on-eks-topology.md).
 
 ## Step 1 — Bootstrap Terraform remote state (once)
 
+Make sure you're logged in: `aws sso login --profile agentify-dev` (if session expired).
+
 ```bash
+export AWS_PROFILE=agentify-dev    # or set in your shell profile
 cd infra/terraform/bootstrap
 terraform init
 terraform apply -var="aws_region=ap-southeast-2" -var="project=agentify"
