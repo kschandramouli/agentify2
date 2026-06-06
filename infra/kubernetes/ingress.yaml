@@ -1,0 +1,49 @@
+# ALB Ingress: exposes the backend API (ops UI + /api/*) to the internet.
+# Requires the AWS Load Balancer Controller (installed by Terraform).
+# The frontend is served from S3/CloudFront — not a K8s workload.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentify
+  namespace: agentify
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # Replace with your ACM certificate ARN for HTTPS:
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:ACCOUNT:certificate/...
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: agentify-backend
+            port:
+              number: 8080
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: agentify-backend
+            port:
+              number: 8080
+      - path: /admin
+        pathType: Prefix
+        backend:
+          service:
+            name: agentify-backend
+            port:
+              number: 8080
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: agentify-backend
+            port:
+              number: 8080

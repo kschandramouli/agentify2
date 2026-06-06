@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentify-agent
+  namespace: agentify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentify-agent
+  template:
+    metadata:
+      labels:
+        app: agentify-agent
+    spec:
+      serviceAccountName: agentify-agent
+      containers:
+      - name: agent
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/agent:latest
+        ports:
+        - containerPort: 8001
+        env:
+        - name: PORT
+          value: "8001"
+        - name: AWS_REGION
+          value: "ap-southeast-2"
+        - name: BACKEND_URL
+          value: "http://agentify-backend:8080"
+        # ANTHROPIC_API_KEY from Secrets Manager secret agentify/dev/anthropic
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: agentify-anthropic-secret
+              key: api_key
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentify-agent
+  namespace: agentify
+spec:
+  selector:
+    app: agentify-agent
+  ports:
+  - port: 8001
+    targetPort: 8001
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentify-agent
+  namespace: agentify
+  annotations:
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn"

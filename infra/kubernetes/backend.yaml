@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentify-backend
+  namespace: agentify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentify-backend
+  template:
+    metadata:
+      labels:
+        app: agentify-backend
+    spec:
+      serviceAccountName: agentify-backend
+      containers:
+      - name: backend
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/backend:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: ":8080"
+        - name: ENV
+          value: "prod"
+        - name: AWS_REGION
+          value: "ap-southeast-2"
+        - name: REGISTRY_BACKEND
+          value: "dynamodb"
+        - name: AGENT_SERVICE_URL
+          value: "http://agentify-agent:8001"
+        - name: ADAPTER_URL
+          value: "http://k8fy-adapter:8200"
+        # DB credentials from Secrets Manager secret agentify/dev/db
+        # Loaded via init container or External Secrets Operator; shown here as
+        # individual env vars for clarity.
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: agentify-db-secret
+              key: host
+        - name: DB_PORT
+          valueFrom:
+            secretKeyRef:
+              name: agentify-db-secret
+              key: port
+        - name: DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: agentify-db-secret
+              key: dbname
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: agentify-db-secret
+              key: username
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: agentify-db-secret
+              key: password
+        - name: ADAPTER_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: agentify-adapter-secret
+              key: token
+        - name: REDACTION_ENABLED
+          value: "true"
+        - name: EVENTS_RETENTION_DAYS
+          value: "30"
+        - name: INVESTIGATION_ENABLED
+          value: "false"   # opt-in; set to "true" and add INVESTIGATION_WEBHOOK_URL to enable
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentify-backend
+  namespace: agentify
+spec:
+  selector:
+    app: agentify-backend
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentify-backend
+  namespace: agentify
+  annotations:
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn"

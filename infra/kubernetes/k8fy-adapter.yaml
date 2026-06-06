@@ -16,16 +16,31 @@ spec:
       serviceAccountName: k8fy-adapter
       containers:
       - name: k8fy-adapter
-        image: agentify/k8fy-adapter:latest
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/k8fy-adapter:latest
+        ports:
+        - name: logserver
+          containerPort: 8200   # on-demand pod log server (spec 008)
+          protocol: TCP
         env:
         - name: BACKEND_URL
           value: "http://agentify-backend:8080"
         - name: K8S_NAMESPACE
-          value: "default"
+          value: "default"    # namespace to watch — override per deployment
         - name: SCRAPE_INTERVAL
           value: "30"
         - name: CERT_CHECK_INTERVAL
           value: "300"
+        - name: LOG_SERVER_PORT
+          value: "8200"
+        - name: MAX_TAIL_LINES
+          value: "200"
+        # ADAPTER_AUTH_TOKEN loaded from Secrets Manager via External Secrets Operator,
+        # or manually created as a K8s Secret and referenced here.
+        - name: ADAPTER_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: agentify-adapter-secret
+              key: token
         resources:
           requests:
             memory: "256Mi"
@@ -36,10 +51,28 @@ spec:
 
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: k8fy-adapter
+  namespace: agentify
+spec:
+  selector:
+    app: k8fy-adapter
+  ports:
+  - name: logserver
+    port: 8200
+    targetPort: 8200
+  type: ClusterIP
+
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: k8fy-adapter
   namespace: agentify
+  annotations:
+    # IRSA: replaced by the actual role ARN from Terraform output adapter_irsa_role_arn
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn"
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -53,6 +86,10 @@ rules:
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
+# Added: watch Deployments for change/rollout events (spec 007).
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["list", "watch", "get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

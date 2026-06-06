@@ -1,0 +1,52 @@
+output "cluster_name" {
+  value       = module.eks.cluster_name
+  description = "EKS cluster name — use with: aws eks update-kubeconfig --name <value>"
+}
+
+output "cluster_endpoint" {
+  value     = module.eks.cluster_endpoint
+  sensitive = true
+}
+
+output "ecr_backend_url" {
+  value = aws_ecr_repository.this["backend"].repository_url
+}
+
+output "ecr_agent_url" {
+  value = aws_ecr_repository.this["agent"].repository_url
+}
+
+output "ecr_adapter_url" {
+  value = aws_ecr_repository.this["k8fy-adapter"].repository_url
+}
+
+output "rds_endpoint" {
+  value     = aws_db_instance.this.address
+  sensitive = true
+}
+
+output "db_secret_arn" {
+  value = aws_secretsmanager_secret.db.arn
+}
+
+output "anthropic_secret_arn" {
+  value       = aws_secretsmanager_secret.anthropic.arn
+  description = "Fill this secret with your ANTHROPIC_API_KEY after apply."
+}
+
+output "ci_role_arn" {
+  value       = aws_iam_role.ci.arn
+  description = "Set as AWS_ROLE_ARN in GitHub Actions secrets."
+}
+
+output "backend_irsa_role_arn" {
+  value = module.backend_irsa.iam_role_arn
+}
+
+output "agent_irsa_role_arn" {
+  value = module.agent_irsa.iam_role_arn
+}
+
+output "adapter_irsa_role_arn" {
+  value = module.adapter_irsa.iam_role_arn
+}

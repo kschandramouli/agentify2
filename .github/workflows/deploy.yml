@@ -1,0 +1,113 @@
+# Deploy: build images, push to ECR, and roll out to EKS.
+# Triggered manually (workflow_dispatch) or on merge to main after CI passes.
+#
+# Required GitHub Actions secrets:
+#   AWS_ROLE_ARN        — from Terraform output ci_role_arn (OIDC, no long-lived key)
+#   AWS_REGION          — ap-southeast-2
+#   ECR_REGISTRY        — ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com
+#   EKS_CLUSTER_NAME    — from Terraform output cluster_name
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "infra/kubernetes/**"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  id-token: write   # required for OIDC → AWS
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build & Push images
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to ECR
+      id: ecr_login
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set image tag
+      id: meta
+      run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Build & push backend
+      uses: docker/build-push-action@v5
+      with:
+        context: src/backend
+        push: true
+        tags: |
+          ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ steps.meta.outputs.tag }}
+          ${{ secrets.ECR_REGISTRY }}/agentify/backend:latest
+
+    - name: Build & push agent
+      uses: docker/build-push-action@v5
+      with:
+        context: src/agent
+        push: true
+        tags: |
+          ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ steps.meta.outputs.tag }}
+          ${{ secrets.ECR_REGISTRY }}/agentify/agent:latest
+
+    - name: Build & push adapter
+      uses: docker/build-push-action@v5
+      with:
+        context: src/adapters/k8fy
+        push: true
+        tags: |
+          ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ steps.meta.outputs.tag }}
+          ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:latest
+
+  deploy:
+    name: Deploy to EKS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+    - name: Update image tags in manifests
+      # Replaces the `latest` tag placeholder with the commit SHA for immutability.
+      run: |
+        REGISTRY=${{ secrets.ECR_REGISTRY }}
+        TAG=${{ env.IMAGE_TAG }}
+        sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
+        sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
+        sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -f infra/kubernetes/backend.yaml
+        kubectl apply -f infra/kubernetes/agent.yaml
+        kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+        kubectl apply -f infra/kubernetes/ingress.yaml
+
+    - name: Wait for rollouts
+      run: |
+        kubectl rollout status deployment/agentify-backend -n agentify --timeout=180s
+        kubectl rollout status deployment/agentify-agent   -n agentify --timeout=180s
+        kubectl rollout status deployment/k8fy-adapter     -n agentify --timeout=180s
