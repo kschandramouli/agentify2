@@ -1,0 +1,21 @@
+{
+  "event_namespace": "k8fy.certificates",
+  "type": "cert_expiring",
+  "source": "kubernetes-api",
+  "timestamp": "2026-05-31T10:00:00Z",
+  "payload": {
+    "secret": "tls-cert-prod",
+    "namespace": "prod",
+    "expires_at": "2026-07-15T10:00:00Z",
+    "days_until_expiry": 45,
+    "should_renew": false
+  },
+  "traits": {
+    "shape": "structured",
+    "access_pattern": "point-lookup",
+    "temporality": "current-state",
+    "mutability": "mutable",
+    "authority": "derived",
+    "retention": "30d"
+  }
+}

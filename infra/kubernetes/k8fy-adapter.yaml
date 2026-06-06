@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8fy-adapter
+  namespace: agentify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8fy-adapter
+  template:
+    metadata:
+      labels:
+        app: k8fy-adapter
+    spec:
+      serviceAccountName: k8fy-adapter
+      containers:
+      - name: k8fy-adapter
+        image: agentify/k8fy-adapter:latest
+        env:
+        - name: BACKEND_URL
+          value: "http://agentify-backend:8080"
+        - name: K8S_NAMESPACE
+          value: "default"
+        - name: SCRAPE_INTERVAL
+          value: "30"
+        - name: CERT_CHECK_INTERVAL
+          value: "300"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8fy-adapter
+  namespace: agentify
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8fy-adapter
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "secrets", "events"]
+  verbs: ["list", "watch", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8fy-adapter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8fy-adapter
+subjects:
+- kind: ServiceAccount
+  name: k8fy-adapter
+  namespace: agentify

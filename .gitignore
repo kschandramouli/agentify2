@@ -1,0 +1,24 @@
+# Secrets / local environment — never commit real keys
+.env
+.env.local
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Go
+*.test
+coverage.out
+coverage.html
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store

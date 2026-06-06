@@ -1,0 +1,22 @@
+{
+  "event_namespace": "k8fy.live-state",
+  "type": "pod_restart",
+  "source": "kubernetes-api",
+  "timestamp": "2026-05-31T10:00:00Z",
+  "payload": {
+    "pod_id": "payment-svc-abc",
+    "namespace": "prod",
+    "phase": "Running",
+    "reason": "CrashLoopBackOff",
+    "message": "Connection refused to database 192.168.1.5:5432",
+    "restarts": 3
+  },
+  "traits": {
+    "shape": "semi-structured",
+    "access_pattern": "time-range-scan",
+    "temporality": "append-only",
+    "mutability": "immutable",
+    "authority": "derived",
+    "retention": "30d"
+  }
+}
