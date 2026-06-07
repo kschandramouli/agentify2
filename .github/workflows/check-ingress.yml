@@ -1,0 +1,59 @@
+# One-shot workflow to check ALB ingress status and controller health.
+# Trigger manually from Actions when the ALB address is missing after deploy.
+
+name: Check Ingress / ALB status
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+    - name: ALB controller pods
+      run: |
+        echo "=== ALB controller pods ==="
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o wide
+        echo ""
+        echo "=== ALB controller logs (last 30 lines) ==="
+        kubectl logs -n kube-system \
+          -l app.kubernetes.io/name=aws-load-balancer-controller \
+          --tail=30 2>/dev/null || echo "(no logs)"
+
+    - name: Ingress status
+      run: |
+        echo "=== Ingress object ==="
+        kubectl get ingress -n agentify -o wide
+        echo ""
+        echo "=== Ingress describe (events) ==="
+        kubectl describe ingress agentify -n agentify
+
+    - name: Check ALB in AWS
+      run: |
+        echo "=== ALBs in account ==="
+        aws elbv2 describe-load-balancers \
+          --query 'LoadBalancers[?contains(LoadBalancerName, `agentify`) || contains(LoadBalancerName, `k8s`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
+          --output table --region ${{ secrets.AWS_REGION }}
+
+    - name: All pods (health snapshot)
+      run: |
+        echo "=== All pods in agentify namespace ==="
+        kubectl get pods -n agentify -o wide
+        echo ""
+        echo "=== kube-system pods ==="
+        kubectl get pods -n kube-system | grep -E "alb|coredns|kube-proxy|vpc"
