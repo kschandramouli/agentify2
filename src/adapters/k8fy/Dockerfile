@@ -4,11 +4,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies first for better layer caching.
-COPY src/adapters/k8fy/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the adapter package, preserving the package path so relative imports work.
-COPY src/adapters/k8fy/ ./k8fy/
+COPY . ./k8fy/
 
 ENV K8S_NAMESPACE=default \
     SCRAPE_INTERVAL=30 \
