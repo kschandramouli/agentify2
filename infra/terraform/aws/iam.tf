@@ -182,6 +182,14 @@ resource "aws_iam_role_policy" "ci" {
         ]
         Resource = [for r in aws_ecr_repository.this : r.arn]
       },
+      # IAM: read role ARNs for IRSA substitution in manifests during deploy
+      {
+        Effect   = "Allow"
+        Action   = ["iam:GetRole"]
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.this.account_id}:role/agentify-dev-*",
+        ]
+      },
       # Secrets Manager: read secrets to sync into K8s during deploy
       {
         Effect = "Allow"

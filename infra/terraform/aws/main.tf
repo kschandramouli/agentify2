@@ -13,6 +13,8 @@ provider "aws" {
 # Providers for the EKS cluster are configured after the cluster is created
 # (in eks.tf) so kubectl/helm can reach it.
 
+data "aws_caller_identity" "this" {}
+
 data "aws_availability_zones" "available" {
   state = "available"
 }

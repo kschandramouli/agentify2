@@ -125,14 +125,32 @@ jobs:
 
         echo "K8s secrets synced from Secrets Manager"
 
-    - name: Update image tags in manifests
-      # Replaces the `latest` tag placeholder with the commit SHA for immutability.
+    - name: Update manifests (image tags + IRSA roles + registry)
       run: |
         REGISTRY=${{ secrets.ECR_REGISTRY }}
         TAG=${{ env.IMAGE_TAG }}
+
+        # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
+        for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml; do
+          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" "$f"
+        done
+
+        # 2. Pin images to the commit SHA (immutable tag).
         sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
         sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
         sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+
+        # 3. Substitute IRSA role ARN placeholders from live IAM (no hardcoding).
+        BACKEND_ROLE=$(aws iam get-role --role-name agentify-dev-backend --query 'Role.Arn' --output text)
+        AGENT_ROLE=$(aws iam get-role   --role-name agentify-dev-agent   --query 'Role.Arn' --output text)
+        ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter  --query 'Role.Arn' --output text)
+
+        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn|${BACKEND_ROLE}|g" infra/kubernetes/backend.yaml
+        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn|${AGENT_ROLE}|g"     infra/kubernetes/agent.yaml
+        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
+
+        echo "Manifests updated — sample backend image:"
+        grep "image:" infra/kubernetes/backend.yaml | head -1
 
     - name: Apply Kubernetes manifests
       run: |
@@ -143,6 +161,18 @@ jobs:
 
     - name: Wait for rollouts
       run: |
-        kubectl rollout status deployment/agentify-backend -n agentify --timeout=180s
-        kubectl rollout status deployment/agentify-agent   -n agentify --timeout=180s
-        kubectl rollout status deployment/k8fy-adapter     -n agentify --timeout=180s
+        kubectl rollout status deployment/agentify-backend -n agentify --timeout=300s
+        kubectl rollout status deployment/agentify-agent   -n agentify --timeout=300s
+        kubectl rollout status deployment/k8fy-adapter     -n agentify --timeout=300s
+
+    - name: Debug pod state (always runs — helps diagnose failures)
+      if: always()
+      run: |
+        echo "=== Pods ==="
+        kubectl get pods -n agentify -o wide
+        echo ""
+        echo "=== Recent events ==="
+        kubectl get events -n agentify --sort-by='.lastTimestamp' | tail -20
+        echo ""
+        echo "=== Backend pod logs (last 30 lines) ==="
+        kubectl logs -n agentify -l app=agentify-backend --tail=30 2>/dev/null || echo "(no logs yet)"
