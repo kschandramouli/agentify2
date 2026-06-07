@@ -57,5 +57,47 @@ jobs:
         echo "=== All pods in agentify namespace ==="
         kubectl get pods -n agentify -o wide
         echo ""
+        echo "=== pods in payments namespace ==="
+        kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
+        echo ""
         echo "=== kube-system pods ==="
         kubectl get pods -n kube-system | grep -E "alb|coredns|kube-proxy|vpc"
+
+    - name: Backend logs (ingest + errors)
+      run: |
+        echo "=== Backend logs — last 50 lines ==="
+        kubectl logs -n agentify -l app=agentify-backend --tail=50 2>/dev/null || echo "(no logs)"
+        echo ""
+        echo "=== Backend ServiceAccount IRSA annotation ==="
+        kubectl get serviceaccount agentify-backend -n agentify \
+          -o jsonpath='{.metadata.annotations}' | python3 -m json.tool
+
+    - name: Adapter logs (emit + watch errors)
+      run: |
+        echo "=== Adapter logs — last 50 lines ==="
+        kubectl logs -n agentify -l app=k8fy-adapter --tail=50 2>/dev/null || echo "(no logs)"
+        echo ""
+        echo "=== Adapter env vars (namespace + intervals) ==="
+        kubectl get deployment k8fy-adapter -n agentify \
+          -o jsonpath='{.spec.template.spec.containers[0].env}' | python3 -m json.tool
+
+    - name: Test ingest endpoint directly
+      run: |
+        echo "=== POST a test event to /api/ingest ==="
+        # Run from within the cluster to verify the endpoint is reachable and accepting events
+        kubectl run ingest-test --rm -i --restart=Never \
+          --image=curlimages/curl:8.5.0 \
+          -n agentify -- \
+          curl -s -X POST http://agentify-backend:8080/api/ingest \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "test-diag-001",
+              "timestamp": "2026-06-07T00:00:00Z",
+              "event_namespace": "k8fy.live-state",
+              "type": "pod_modified",
+              "source": "diagnostic",
+              "traits": {"shape":"structured","access_pattern":"point-lookup","temporality":"current-state","mutability":"mutable","authority":"derived","retention":"ephemeral"},
+              "payload": {"pod_id":"test-pod","namespace":"payments","phase":"Running","ready":true,"restarts":0},
+              "entity_key": "test-pod",
+              "tags": ["k8fy","payments"]
+            }' 2>&1 || echo "(test failed)"
