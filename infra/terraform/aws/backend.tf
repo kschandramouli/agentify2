@@ -26,10 +26,9 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
-    github = {
-      source  = "integrations/github"
-      version = "~> 6.0"
-    }
+    # github provider (integrations/github ~> 6.0) intentionally excluded —
+    # binary download is blocked by corporate proxy. GitHub secrets are set
+    # via scripts/set_github_secrets.py instead.
   }
 
   backend "s3" {

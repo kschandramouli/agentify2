@@ -182,6 +182,16 @@ resource "aws_iam_role_policy" "ci" {
         ]
         Resource = [for r in aws_ecr_repository.this : r.arn]
       },
+      # Secrets Manager: read secrets to sync into K8s during deploy
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = [
+          aws_secretsmanager_secret.db.arn,
+          aws_secretsmanager_secret.anthropic.arn,
+          aws_secretsmanager_secret.adapter.arn,
+        ]
+      },
       # EKS: kubectl + pause/resume (scale node group to 0 and back)
       {
         Effect = "Allow"

@@ -90,6 +90,41 @@ jobs:
     - name: Update kubeconfig
       run: aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
 
+    - name: Sync K8s secrets from AWS Secrets Manager
+      # Creates (or updates) the K8s secrets the pods depend on.
+      # Idempotent: --dry-run=client + apply pattern means safe to re-run.
+      run: |
+        REGION=${{ secrets.AWS_REGION }}
+
+        # DB credentials
+        DB=$(aws secretsmanager get-secret-value --secret-id agentify/dev/db \
+               --region $REGION --query SecretString --output text)
+        kubectl create secret generic agentify-db-secret -n agentify \
+          --from-literal=host=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['host'])") \
+          --from-literal=port=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['port'])") \
+          --from-literal=dbname=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['dbname'])") \
+          --from-literal=username=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['username'])") \
+          --from-literal=password=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['password'])") \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        # Adapter auth token
+        ADAPTER_TOKEN=$(aws secretsmanager get-secret-value --secret-id agentify/dev/adapter \
+          --region $REGION --query SecretString --output text | \
+          python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+        kubectl create secret generic agentify-adapter-secret -n agentify \
+          --from-literal=token=$ADAPTER_TOKEN \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        # Anthropic API key
+        ANTHROPIC_KEY=$(aws secretsmanager get-secret-value --secret-id agentify/dev/anthropic \
+          --region $REGION --query SecretString --output text | \
+          python3 -c "import sys,json;print(json.load(sys.stdin)['api_key'])")
+        kubectl create secret generic agentify-anthropic-secret -n agentify \
+          --from-literal=api_key=$ANTHROPIC_KEY \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        echo "K8s secrets synced from Secrets Manager"
+
     - name: Update image tags in manifests
       # Replaces the `latest` tag placeholder with the commit SHA for immutability.
       run: |
