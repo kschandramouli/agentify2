@@ -45,10 +45,12 @@ jobs:
 
     - name: Check ALB in AWS
       run: |
-        echo "=== ALBs in account ==="
+        echo "=== ALBs in account (k8s-* prefix) ==="
+        # Note: requires elasticloadbalancing:DescribeLoadBalancers on CI role
         aws elbv2 describe-load-balancers \
-          --query 'LoadBalancers[?contains(LoadBalancerName, `agentify`) || contains(LoadBalancerName, `k8s`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
-          --output table --region ${{ secrets.AWS_REGION }}
+          --query 'LoadBalancers[?starts_with(LoadBalancerName, `k8s-`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
+          --output table --region ${{ secrets.AWS_REGION }} 2>/dev/null || \
+          echo "(skipped — CI role missing elasticloadbalancing:DescribeLoadBalancers)"
 
     - name: All pods (health snapshot)
       run: |
