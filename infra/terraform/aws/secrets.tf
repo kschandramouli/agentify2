@@ -25,13 +25,14 @@ resource "aws_secretsmanager_secret_version" "db" {
   })
 }
 
-# ANTHROPIC_API_KEY — placeholder; fill after apply:
-#   aws secretsmanager put-secret-value \
-#     --secret-id agentify/dev/anthropic \
-#     --secret-string '{"api_key":"sk-ant-..."}'
 resource "aws_secretsmanager_secret" "anthropic" {
   name                    = "${var.project}/${var.env}/anthropic"
   recovery_window_in_days = var.env == "prod" ? 7 : 0
+}
+
+resource "aws_secretsmanager_secret_version" "anthropic" {
+  secret_id     = aws_secretsmanager_secret.anthropic.id
+  secret_string = jsonencode({ api_key = var.anthropic_api_key })
 }
 
 # ADAPTER_AUTH_TOKEN — auto-generated; backend and adapter both read from here.
