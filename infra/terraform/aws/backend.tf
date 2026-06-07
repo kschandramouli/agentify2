@@ -29,8 +29,7 @@ terraform {
   }
 
   backend "s3" {
-    # Fill in after running bootstrap:
-    bucket         = "REPLACE_WITH_BOOTSTRAP_OUTPUT"
+    bucket         = "agentify-tfstate-f6e00ef8"
     key            = "agentify/dev/terraform.tfstate"
     region         = "ap-southeast-2"
     dynamodb_table = "agentify-tfstate-lock"
