@@ -56,9 +56,14 @@ func New(cfg *Config, dbClient *dynamodb.Client, logger *slog.Logger) (*Router, 
 func buildBackendFactory(cfg *Config, logger *slog.Logger) *storage.BackendFactory {
 	var relational, kv storage.Backend
 
+	// sslmode=require for RDS (AWS enforces TLS); disable only for localhost dev.
+	sslMode := "require"
+	if cfg.DBHost == "localhost" || cfg.DBHost == "127.0.0.1" {
+		sslMode = "disable"
+	}
 	connStr := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName,
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, sslMode,
 	)
 	if pgClient, err := postgres.NewClient(connStr, logger); err != nil {
 		logger.Warn("postgres unavailable; relational + kv queries will fail", "error", err)
