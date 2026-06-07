@@ -47,24 +47,32 @@ jobs:
 
     - name: Scale EKS nodes to 0
       run: |
+        # Look up the actual node group name — Terraform appends a unique suffix.
+        NG=$(aws eks list-nodegroups \
+          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+          --region ${{ secrets.AWS_REGION }} \
+          --query 'nodegroups[0]' --output text)
+        echo "Node group: $NG"
         aws eks update-nodegroup-config \
           --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --nodegroup-name main \
+          --nodegroup-name "$NG" \
           --scaling-config minSize=0,maxSize=3,desiredSize=0 \
           --region ${{ secrets.AWS_REGION }}
+        echo "$NG" > /tmp/ng_name
         echo "Node group scaling to 0 requested"
 
     - name: Wait for nodes to drain
       run: |
+        NG=$(cat /tmp/ng_name)
         echo "Waiting up to 5 min for nodes to scale down..."
         for i in $(seq 1 30); do
           COUNT=$(aws eks describe-nodegroup \
             --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --nodegroup-name main \
+            --nodegroup-name "$NG" \
             --query 'nodegroup.scalingConfig.desiredSize' \
             --output text --region ${{ secrets.AWS_REGION }})
           if [ "$COUNT" = "0" ]; then
-            echo "Nodes at 0"; break
+            echo "Nodes at 0 ✅"; break
           fi
           echo "Waiting... ($i/30)"
           sleep 10

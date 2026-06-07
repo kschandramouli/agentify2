@@ -46,11 +46,18 @@ jobs:
     - name: Scale EKS nodes up
       run: |
         NODE_COUNT=${{ github.event.inputs.node_count }}
+        # Look up the actual node group name — Terraform appends a unique suffix.
+        NG=$(aws eks list-nodegroups \
+          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+          --region ${{ secrets.AWS_REGION }} \
+          --query 'nodegroups[0]' --output text)
+        echo "Node group: $NG"
         aws eks update-nodegroup-config \
           --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --nodegroup-name main \
+          --nodegroup-name "$NG" \
           --scaling-config minSize=1,maxSize=3,desiredSize=${NODE_COUNT} \
           --region ${{ secrets.AWS_REGION }}
+        echo "$NG" > /tmp/ng_name
         echo "Node group scaling to ${NODE_COUNT} requested"
 
     - name: Wait for RDS to be available
@@ -70,14 +77,16 @@ jobs:
 
     - name: Wait for nodes to be ready
       run: |
+        NG=$(cat /tmp/ng_name)
+        NODE_COUNT=${{ github.event.inputs.node_count }}
         echo "Waiting up to 5 min for nodes..."
         for i in $(seq 1 30); do
           COUNT=$(aws eks describe-nodegroup \
             --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --nodegroup-name main \
+            --nodegroup-name "$NG" \
             --query 'nodegroup.scalingConfig.desiredSize' \
             --output text --region ${{ secrets.AWS_REGION }})
-          if [ "$COUNT" = "${{ github.event.inputs.node_count }}" ]; then
+          if [ "$COUNT" = "$NODE_COUNT" ]; then
             echo "Nodes at $COUNT ✅"; break
           fi
           sleep 10
