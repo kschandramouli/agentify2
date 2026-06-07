@@ -1,9 +1,5 @@
 # ── EKS cluster ──────────────────────────────────────────────────────────────
 # Dev: managed node group (t3.medium × 1–3) — no Fargate to keep it simple.
-# The cluster also needs:
-#   - OIDC provider (for IRSA — service accounts that assume IAM roles)
-#   - AWS Load Balancer Controller (installs via Helm, grants ALB ingress)
-#   - EBS CSI driver (for persistent volumes, e.g. if Postgres moves in-cluster later)
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
@@ -25,7 +21,7 @@ module "eks" {
   eks_managed_node_groups = {
     main = {
       instance_types = [var.node_instance_type]
-      ami_type       = "AL2023_x86_64"  # AL2 not supported on EKS 1.33+; use AL2023
+      ami_type       = "AL2023_x86_64"  # AL2 dropped in EKS 1.30+; AL2023 required
       min_size       = var.node_min
       max_size       = var.node_max
       desired_size   = var.node_desired
