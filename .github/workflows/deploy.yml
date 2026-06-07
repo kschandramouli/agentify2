@@ -176,3 +176,61 @@ jobs:
         echo ""
         echo "=== Backend pod logs (last 30 lines) ==="
         kubectl logs -n agentify -l app=agentify-backend --tail=30 2>/dev/null || echo "(no logs yet)"
+        echo ""
+        echo "=== Agent pod logs (last 20 lines) ==="
+        kubectl logs -n agentify -l app=agentify-agent --tail=20 2>/dev/null || echo "(no logs yet)"
+
+    - name: "📋 Deployment Summary — endpoints and validation commands"
+      if: always()
+      run: |
+        echo "=================================================="
+        echo "  DEPLOYMENT SUMMARY — $(date -u '+%Y-%m-%d %H:%M UTC')"
+        echo "  Image tag: ${{ env.IMAGE_TAG }}"
+        echo "=================================================="
+
+        echo ""
+        echo "── Pod status ──────────────────────────────────"
+        kubectl get pods -n agentify \
+          -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[0].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount' \
+          2>/dev/null || echo "(could not list pods)"
+
+        echo ""
+        echo "── Service endpoints ───────────────────────────"
+        kubectl get svc -n agentify 2>/dev/null || true
+
+        echo ""
+        echo "── ALB / Ingress address ───────────────────────"
+        ALB=$(kubectl get ingress agentify -n agentify \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [ -n "$ALB" ]; then
+          echo "  ALB: http://${ALB}"
+          echo ""
+          echo "── Validation commands (run from any terminal) ─"
+          echo ""
+          echo "  # 1. Health check"
+          echo "  curl http://${ALB}/health"
+          echo ""
+          echo "  # 2. List pods (ops console)"
+          echo "  curl http://${ALB}/admin/pods"
+          echo ""
+          echo "  # 3. Run a query"
+          echo "  curl -X POST http://${ALB}/api/query \\"
+          echo "    -H 'Content-Type: application/json' \\"
+          echo "    -d '{\"question\":\"is payment healthy?\",\"context\":{\"namespace\":\"prod\"}}'"
+          echo ""
+          echo "  # 4. Prometheus metrics"
+          echo "  curl http://${ALB}/metrics"
+          echo ""
+          echo "  # 5. Agent health (internal)"
+          echo "  kubectl exec -n agentify deploy/agentify-backend -- wget -qO- http://agentify-agent:8001/health"
+        else
+          echo "  ⚠ ALB address not yet assigned — ingress may still be provisioning."
+          echo "  Check again in 2-3 min: kubectl get ingress -n agentify"
+        fi
+
+        echo ""
+        echo "── ECR images deployed ─────────────────────────"
+        echo "  Backend : ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ env.IMAGE_TAG }}"
+        echo "  Agent   : ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ env.IMAGE_TAG }}"
+        echo "  Adapter : ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ env.IMAGE_TAG }}"
+        echo "=================================================="
