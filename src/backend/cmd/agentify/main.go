@@ -96,11 +96,13 @@ func main() {
 	// Setup HTTP server
 	router := api.NewRouter(handler, logger)
 	server := &http.Server{
-		Addr:         cfg.Port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        cfg.Port,
+		Handler:     router,
+		ReadTimeout: 15 * time.Second,
+		// Tier-2 Opus calls take 30-90s. WriteTimeout must exceed the longest
+		// agent call plus response serialisation — set to 3 min with headroom.
+		WriteTimeout: 180 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Start server in a goroutine

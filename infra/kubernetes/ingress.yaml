@@ -15,6 +15,9 @@ metadata:
     # To enable HTTPS: request a cert in ACM, uncomment and fill the lines below,
     # then restore listen-ports to '[{"HTTP":80},{"HTTPS":443}]' and add ssl-redirect.
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # Raise ALB idle timeout above backend WriteTimeout (180s) so Opus calls
+    # don't get cut off by the ALB before the backend finishes writing.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
     # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:175920682311:certificate/...
     # alb.ingress.kubernetes.io/ssl-redirect: "443"
 spec:
