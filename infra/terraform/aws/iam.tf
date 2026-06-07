@@ -200,19 +200,17 @@ resource "aws_iam_role_policy" "ci" {
           aws_secretsmanager_secret.adapter.arn,
         ]
       },
-      # EKS: kubectl + pause/resume (scale node group to 0 and back)
+      # EKS: kubectl + pause/resume.
+      # Nodegroup ARN format differs from cluster ARN: nodegroup/cluster/ng/uuid
+      {
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster", "eks:ListNodegroups"]
+        Resource = module.eks.cluster_arn
+      },
       {
         Effect = "Allow"
-        Action = [
-          "eks:DescribeCluster",
-          "eks:ListNodegroups",
-          "eks:UpdateNodegroupConfig",
-          "eks:DescribeNodegroup",
-        ]
-        Resource = [
-          module.eks.cluster_arn,
-          "${module.eks.cluster_arn}/nodegroup/*",
-        ]
+        Action = ["eks:UpdateNodegroupConfig", "eks:DescribeNodegroup"]
+        Resource = "arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.this.account_id}:nodegroup/${local.name}/*/*"
       },
       # RDS: pause/resume. CreateDBSnapshot needs both the instance ARN and
       # the snapshot ARN (snapshot name is dynamic, hence the wildcard).
