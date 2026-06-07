@@ -22,11 +22,11 @@ module "eks" {
   eks_managed_node_groups = {
     main = {
       instance_types = [var.node_instance_type]
+      ami_type       = "AL2_x86_64"   # required — module cannot infer null
       min_size       = var.node_min
       max_size       = var.node_max
       desired_size   = var.node_desired
 
-      # Use the latest EKS-optimised AMI automatically.
       use_latest_ami_release_version = true
     }
   }
