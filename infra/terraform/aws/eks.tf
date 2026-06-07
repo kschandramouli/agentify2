@@ -34,12 +34,12 @@ module "eks" {
     }
   }
 
-  # Core add-ons
+  # Core add-ons (aws-ebs-csi-driver omitted — needs its own IRSA role and
+  # we use RDS Postgres, not EBS PVCs, so it adds no value here).
   cluster_addons = {
-    coredns                = { most_recent = true }
-    kube-proxy             = { most_recent = true }
-    vpc-cni                = { most_recent = true }
-    aws-ebs-csi-driver     = { most_recent = true }
+    coredns    = { most_recent = true }
+    kube-proxy = { most_recent = true }
+    vpc-cni    = { most_recent = true }
   }
 }
 
