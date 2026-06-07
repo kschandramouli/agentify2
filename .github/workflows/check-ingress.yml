@@ -22,8 +22,15 @@ jobs:
         role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
         aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Update kubeconfig
-      run: aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+    - name: Update kubeconfig (with retry)
+      run: |
+        for i in 1 2 3 4 5; do
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }} && break
+          echo "Attempt $i failed — waiting 15s before retry..."
+          sleep 15
+        done
 
     - name: ALB controller pods
       run: |
