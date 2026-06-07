@@ -89,7 +89,7 @@ jobs:
         echo "━━━ VALIDATION: health_check ━━━"
         RESP=$(curl -s -X POST http://${{ env.ALB }}/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"question":"is payment healthy?","context":{"namespace":"payments"}}')
+          -d '{"question":"is the payment service healthy?","context":{"namespace":"payments","service":"payment"}}')
         echo "$RESP" | python3 -m json.tool
         STATUS=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))")
         echo "Status: $STATUS"
@@ -115,7 +115,7 @@ jobs:
         echo "━━━ VALIDATION: change_history ━━━"
         RESP=$(curl -s -X POST http://${{ env.ALB }}/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"question":"what changed recently in payments?","context":{"namespace":"payments"}}')
+          -d '{"question":"what changed in the payment deployment recently?","context":{"namespace":"payments","deployment":"payment"}}')
         echo "$RESP" | python3 -m json.tool
 
     # ── Phase 3: CrashLoopBackOff → restart trend ───────────────────────────
@@ -137,7 +137,7 @@ jobs:
         echo "━━━ VALIDATION: metrics_query ━━━"
         RESP=$(curl -s -X POST http://${{ env.ALB }}/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"question":"show restart metrics for payments","context":{"namespace":"payments"}}')
+          -d '{"question":"how many times has payment-worker restarted?","context":{"namespace":"payments","service":"payment-worker"}}')
         echo "$RESP" | python3 -m json.tool
 
     # ── Phase 4: Expiring TLS cert ───────────────────────────────────────────
@@ -162,7 +162,7 @@ jobs:
         echo "━━━ VALIDATION: cert_check ━━━"
         RESP=$(curl -s -X POST http://${{ env.ALB }}/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"question":"when does the payment cert expire?","context":{"namespace":"payments"}}')
+          -d '{"question":"when does the payment-tls certificate expire?","context":{"namespace":"payments","key":"payment-tls"}}')
         echo "$RESP" | python3 -m json.tool
 
     # ── Phase 5: Full diagnose ───────────────────────────────────────────────
@@ -181,7 +181,7 @@ jobs:
 
         RESP=$(curl -s -X POST http://${{ env.ALB }}/api/query \
           -H 'Content-Type: application/json' \
-          -d '{"question":"what is wrong with payment? diagnose everything","context":{"namespace":"payments"}}')
+          -d '{"question":"why is payment-worker crashing? diagnose the payment service in payments","context":{"namespace":"payments","service":"payment-worker"}}')
 
         echo "Full response:"
         echo "$RESP" | python3 -m json.tool
