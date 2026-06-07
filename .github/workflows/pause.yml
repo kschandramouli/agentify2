@@ -80,6 +80,19 @@ jobs:
 
     - name: Stop RDS instance
       run: |
+        # RDS enters 'backing-up' during snapshot — wait for 'available' first.
+        echo "Waiting for RDS to be available before stopping..."
+        for i in $(seq 1 24); do
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier agentify-dev \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text --region ${{ secrets.AWS_REGION }})
+          if [ "$STATUS" = "available" ]; then
+            echo "RDS available ✅"; break
+          fi
+          echo "RDS status: $STATUS — waiting ($i/24)..."
+          sleep 10
+        done
         aws rds stop-db-instance \
           --db-instance-identifier agentify-dev \
           --region ${{ secrets.AWS_REGION }}
