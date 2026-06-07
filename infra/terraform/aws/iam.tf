@@ -213,17 +213,20 @@ resource "aws_iam_role_policy" "ci" {
           "${module.eks.cluster_arn}/nodegroup/*",
         ]
       },
-      # RDS: pause/resume (stop, start, snapshot before pause)
+      # RDS: pause/resume. CreateDBSnapshot needs both the instance ARN and
+      # the snapshot ARN (snapshot name is dynamic, hence the wildcard).
       {
         Effect = "Allow"
-        Action = [
-          "rds:StopDBInstance",
-          "rds:StartDBInstance",
-          "rds:CreateDBSnapshot",
-          "rds:DescribeDBInstances",
-          "rds:DescribeDBSnapshots",
-        ]
+        Action = ["rds:StopDBInstance", "rds:StartDBInstance", "rds:DescribeDBInstances"]
         Resource = aws_db_instance.this.arn
+      },
+      {
+        Effect = "Allow"
+        Action = ["rds:CreateDBSnapshot", "rds:DescribeDBSnapshots"]
+        Resource = [
+          aws_db_instance.this.arn,
+          "arn:aws:rds:${var.aws_region}:${data.aws_caller_identity.this.account_id}:snapshot:agentify-dev-pause-*",
+        ]
       },
     ]
   })
