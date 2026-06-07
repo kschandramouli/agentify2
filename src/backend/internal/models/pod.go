@@ -8,49 +8,49 @@ import (
 // See context-mesh/policies/pod-formation.md and ADR 0002 (recursive pods).
 type Pod struct {
 	// Identification
-	ID       string `dynamodb:"id" json:"id"`                          // unique pod ID
-	Kind     string `dynamodb:"kind" json:"kind"`                      // "leaf" | "index"
-	Summary  string `dynamodb:"summary" json:"summary"`                // one-line description
-	Tags     []string `dynamodb:"tags" json:"tags"`                    // e.g., ["billing", "k8fy"]
-	Namespace string `dynamodb:"namespace" json:"namespace"`           // logical grouping (e.g., "k8fy", "crm")
+	ID       string `dynamodbav:"id" json:"id"`                          // unique pod ID
+	Kind     string `dynamodbav:"kind" json:"kind"`                      // "leaf" | "index"
+	Summary  string `dynamodbav:"summary" json:"summary"`                // one-line description
+	Tags     []string `dynamodbav:"tags" json:"tags"`                    // e.g., ["billing", "k8fy"]
+	Namespace string `dynamodbav:"namespace" json:"namespace"`           // logical grouping (e.g., "k8fy", "crm")
 
 	// Storage configuration
-	StoreType string `dynamodb:"store_type" json:"store_type"`         // "relational" | "kv" | "vector" | "timeseries" | "logs" | "passthrough"
-	Authority string `dynamodb:"authority" json:"authority"`           // "system-of-record" | "derived"
-	SchemaRef string `dynamodb:"schema_ref" json:"schema_ref"`         // pointer to schema definition
+	StoreType string `dynamodbav:"store_type" json:"store_type"`         // "relational" | "kv" | "vector" | "timeseries" | "logs" | "passthrough"
+	Authority string `dynamodbav:"authority" json:"authority"`           // "system-of-record" | "derived"
+	SchemaRef string `dynamodbav:"schema_ref" json:"schema_ref"`         // pointer to schema definition
 
 	// Hierarchy (for index pods)
-	Kind_IsIndex bool `dynamodb:"-" json:"_is_index"`                  // convenience flag
-	PartitionKey string `dynamodb:"partition_key" json:"partition_key"` // dimension for sharding (e.g., "namespace")
-	Shards []ShardRef `dynamodb:"shards" json:"shards"`                // child pods (for index pods only)
+	Kind_IsIndex bool `dynamodbav:"-" json:"_is_index"`                  // convenience flag
+	PartitionKey string `dynamodbav:"partition_key" json:"partition_key"` // dimension for sharding (e.g., "namespace")
+	Shards []ShardRef `dynamodbav:"shards" json:"shards"`                // child pods (for index pods only)
 
 	// Lifecycle
-	Lifecycle string `dynamodb:"lifecycle" json:"lifecycle"`           // "active" | "merging" | "draining" | "retired"
-	Freshness time.Time `dynamodb:"freshness" json:"freshness"`        // last modified timestamp
+	Lifecycle string `dynamodbav:"lifecycle" json:"lifecycle"`           // "active" | "merging" | "draining" | "retired"
+	Freshness time.Time `dynamodbav:"freshness" json:"freshness"`        // last modified timestamp
 
 	// Metrics
-	EventCount int64 `dynamodb:"event_count" json:"event_count"`       // number of events stored
-	QueryStats QueryStats `dynamodb:"query_stats" json:"query_stats"` // hit/miss/latency
+	EventCount int64 `dynamodbav:"event_count" json:"event_count"`       // number of events stored
+	QueryStats QueryStats `dynamodbav:"query_stats" json:"query_stats"` // hit/miss/latency
 
 	// Metadata
-	CreatedAt time.Time `dynamodb:"created_at" json:"created_at"`
-	UpdatedAt time.Time `dynamodb:"updated_at" json:"updated_at"`
+	CreatedAt time.Time `dynamodbav:"created_at" json:"created_at"`
+	UpdatedAt time.Time `dynamodbav:"updated_at" json:"updated_at"`
 }
 
 // ShardRef is a reference to a child pod (for index pods).
 type ShardRef struct {
-	ChildID    string `dynamodb:"child_id" json:"child_id"`           // pod ID of child
-	Partition  string `dynamodb:"partition" json:"partition"`         // partition value (e.g., "namespace=prod")
-	EventCount int64  `dynamodb:"event_count" json:"event_count"`     // events in this shard
+	ChildID    string `dynamodbav:"child_id" json:"child_id"`           // pod ID of child
+	Partition  string `dynamodbav:"partition" json:"partition"`         // partition value (e.g., "namespace=prod")
+	EventCount int64  `dynamodbav:"event_count" json:"event_count"`     // events in this shard
 }
 
 // QueryStats tracks query performance metrics for a pod.
 type QueryStats struct {
-	Hits            int64 `dynamodb:"hits" json:"hits"`                         // successful queries
-	Misses          int64 `dynamodb:"misses" json:"misses"`                     // queries that got no results
-	P95LatencyMs    int64 `dynamodb:"p95_latency_ms" json:"p95_latency_ms"`     // 95th percentile latency
-	TotalQueries    int64 `dynamodb:"total_queries" json:"total_queries"`
-	LastUpdated     time.Time `dynamodb:"last_updated" json:"last_updated"`
+	Hits            int64 `dynamodbav:"hits" json:"hits"`                         // successful queries
+	Misses          int64 `dynamodbav:"misses" json:"misses"`                     // queries that got no results
+	P95LatencyMs    int64 `dynamodbav:"p95_latency_ms" json:"p95_latency_ms"`     // 95th percentile latency
+	TotalQueries    int64 `dynamodbav:"total_queries" json:"total_queries"`
+	LastUpdated     time.Time `dynamodbav:"last_updated" json:"last_updated"`
 }
 
 // MissRate returns the pod's miss rate (0.0 to 1.0).
