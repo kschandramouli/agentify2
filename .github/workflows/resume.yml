@@ -10,6 +10,10 @@ on:
         description: "Number of nodes to restore (default: 2)"
         required: false
         default: "2"
+      verify_test_services:
+        description: "Wait for payment test pods to be ready? (yes/no)"
+        required: false
+        default: "no"
 
 permissions:
   id-token: write
@@ -92,7 +96,32 @@ jobs:
           sleep 10
         done
 
+    - name: Verify payment test services (optional)
+      if: github.event.inputs.verify_test_services == 'yes'
+      run: |
+        echo "Waiting for payment test pods to reschedule in 'payments' namespace..."
+        # Kubernetes auto-reschedules pods from existing Deployments.
+        # We just wait until they're Running.
+        for deploy in payment payment-worker; do
+          if kubectl get deployment $deploy -n payments &>/dev/null; then
+            echo "Waiting for $deploy..."
+            kubectl rollout status deployment/$deploy -n payments --timeout=180s \
+              2>/dev/null || echo "$deploy not ready yet (may still be scheduling)"
+          fi
+        done
+        echo ""
+        echo "=== Payment namespace pods ==="
+        kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
+
     - name: Summary
       run: |
         echo "✅ Resumed. Trigger a deploy to push workloads back to the cluster."
         echo "Running cost: ~\$123/month."
+        echo ""
+        echo "Note: Payment test pods (if they existed before pause) are"
+        echo "automatically rescheduled by Kubernetes — no manual action needed."
+        if [ "${{ github.event.inputs.verify_test_services }}" = "yes" ]; then
+          echo "Payment pod status verified above."
+        else
+          echo "Set 'Verify test services?' to 'yes' to wait for payment pods."
+        fi

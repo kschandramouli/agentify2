@@ -101,4 +101,10 @@ jobs:
     - name: Summary
       run: |
         echo "✅ Paused. Running cost: ~\$73/month (EKS control plane only)."
+        echo ""
+        echo "Note: ALL pods across ALL namespaces have been evicted (nodes=0)."
+        echo "This includes any payment test pods in the 'payments' namespace."
+        echo "Kubernetes will automatically reschedule them when nodes come back."
+        echo ""
         echo "Restore with the 'resume' workflow."
+        echo "  → Set 'Verify test services?' to 'yes' to wait for payment pods."

@@ -15,7 +15,7 @@ on:
       cleanup:
         description: "Delete payment resources after test? (yes/no)"
         required: false
-        default: "yes"
+        default: "no"
 
 permissions:
   id-token: write
