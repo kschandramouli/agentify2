@@ -1,0 +1,38 @@
+# Crashing payment worker — exits with error after 5s to generate CrashLoopBackOff.
+# This builds the restart-count time-series (k8fy.metrics) that the temporal spine
+# uses for trend reasoning. The log line tests the RedactText scrubber.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-worker
+  namespace: payments
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-worker
+  template:
+    metadata:
+      labels:
+        app: payment-worker
+    spec:
+      containers:
+      - name: worker
+        image: alpine:3.19
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "payment-worker starting..."
+          sleep 5
+          echo "ERROR: dial tcp db.payments:5432: connect: connection refused"
+          echo "payment-worker exiting with code 1"
+          exit 1
+        resources:
+          requests:
+            memory: "16Mi"
+            cpu: "5m"
+          limits:
+            memory: "32Mi"
+            cpu: "50m"
+      restartPolicy: Always

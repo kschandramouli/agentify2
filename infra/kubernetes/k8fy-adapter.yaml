@@ -25,11 +25,11 @@ spec:
         - name: BACKEND_URL
           value: "http://agentify-backend:8080"
         - name: K8S_NAMESPACE
-          value: "default"    # namespace to watch — override per deployment
+          value: "payments"   # namespace to watch — points at test payment service
         - name: SCRAPE_INTERVAL
           value: "30"
         - name: CERT_CHECK_INTERVAL
-          value: "300"
+          value: "30"    # fast for test env; restore to 300 for prod
         - name: LOG_SERVER_PORT
           value: "8200"
         - name: MAX_TAIL_LINES
