@@ -12,10 +12,21 @@ module "eks" {
   subnet_ids                     = module.vpc.public_subnets
   cluster_endpoint_public_access = true
 
-  # Automatically grant the IAM identity running Terraform admin access to the
-  # cluster via EKS Access Entries (module v20.x changed from aws-auth ConfigMap).
-  # Without this the Helm and kubernetes providers cannot authenticate.
+  # Grant the Terraform executor (SSO role) cluster admin via EKS Access Entries.
   enable_cluster_creator_admin_permissions = true
+
+  # Grant the CI role (GitHub Actions) cluster admin so kubectl works in CI.
+  access_entries = {
+    ci = {
+      principal_arn = aws_iam_role.ci.arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
 
   # Enable IRSA (IAM Roles for Service Accounts) — required for backend + adapter.
   enable_irsa = true
