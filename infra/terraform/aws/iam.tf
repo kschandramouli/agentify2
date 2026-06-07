@@ -205,6 +205,7 @@ resource "aws_iam_role_policy" "ci" {
         Effect = "Allow"
         Action = [
           "eks:DescribeCluster",
+          "eks:ListNodegroups",
           "eks:UpdateNodegroupConfig",
           "eks:DescribeNodegroup",
         ]
