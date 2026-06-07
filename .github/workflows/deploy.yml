@@ -37,6 +37,15 @@ jobs:
         role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
         aws-region: ${{ secrets.AWS_REGION }}
 
+    - name: Wait for ECR connectivity (retry on transient timeout)
+      run: |
+        for i in 1 2 3 4 5; do
+          aws ecr describe-repositories --region ${{ secrets.AWS_REGION }} \
+            --query 'repositories[0].repositoryName' --output text &>/dev/null && break
+          echo "ECR not reachable (attempt $i) — waiting 15s..."
+          sleep 15
+        done
+
     - name: Login to ECR
       id: ecr_login
       uses: aws-actions/amazon-ecr-login@v2
