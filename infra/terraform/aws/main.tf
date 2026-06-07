@@ -39,9 +39,10 @@ module "vpc" {
 
   # No NAT gateway — EKS nodes run in public subnets (dev) and call AWS APIs
   # via free gateway endpoints (S3, DynamoDB) or directly. Saves $35/month.
-  enable_nat_gateway   = false
-  enable_dns_hostnames = true
-  enable_dns_support   = true
+  enable_nat_gateway      = false
+  map_public_ip_on_launch = true   # required: EKS nodes in public subnets need a public IP
+  enable_dns_hostnames    = true
+  enable_dns_support      = true
 
   # Tags required by the AWS Load Balancer Controller (ALB ingress).
   public_subnet_tags = {
