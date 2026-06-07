@@ -12,9 +12,12 @@ module "eks" {
   cluster_name    = local.name
   cluster_version = var.cluster_version
 
-  vpc_id                         = module.vpc.vpc_id
-  subnet_ids                     = module.vpc.private_subnets
-  cluster_endpoint_public_access = true   # dev convenience; tighten in prod with CIDR allowlist
+  vpc_id     = module.vpc.vpc_id
+  # Workers run in public subnets (dev). No NAT needed; nodes get public IPs
+  # but are protected by the EKS-managed security group. Private subnets are
+  # kept for RDS. Switch to private_subnets + re-add NAT for prod.
+  subnet_ids                     = module.vpc.public_subnets
+  cluster_endpoint_public_access = true
 
   # Enable IRSA (IAM Roles for Service Accounts) — required for backend + adapter.
   enable_irsa = true

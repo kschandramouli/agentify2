@@ -1,0 +1,89 @@
+# Resume: start RDS + scale EKS nodes back up after a pause.
+# Takes ~5-10 min: RDS startup is the slow part (~5 min).
+
+name: Resume (scale up)
+
+on:
+  workflow_dispatch:
+    inputs:
+      node_count:
+        description: "Number of nodes to restore (default: 2)"
+        required: false
+        default: "2"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  resume:
+    name: Start RDS + scale nodes up
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Start RDS instance
+      run: |
+        STATUS=$(aws rds describe-db-instances \
+          --db-instance-identifier agentify-dev \
+          --query 'DBInstances[0].DBInstanceStatus' \
+          --output text --region ${{ secrets.AWS_REGION }} 2>/dev/null || echo "not-found")
+        if [ "$STATUS" = "stopped" ]; then
+          aws rds start-db-instance \
+            --db-instance-identifier agentify-dev \
+            --region ${{ secrets.AWS_REGION }}
+          echo "RDS start requested"
+        else
+          echo "RDS status: $STATUS — skipping start"
+        fi
+
+    - name: Scale EKS nodes up
+      run: |
+        NODE_COUNT=${{ github.event.inputs.node_count }}
+        aws eks update-nodegroup-config \
+          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+          --nodegroup-name main \
+          --scaling-config minSize=1,maxSize=3,desiredSize=${NODE_COUNT} \
+          --region ${{ secrets.AWS_REGION }}
+        echo "Node group scaling to ${NODE_COUNT} requested"
+
+    - name: Wait for RDS to be available
+      run: |
+        echo "Waiting up to 10 min for RDS to become available..."
+        for i in $(seq 1 40); do
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier agentify-dev \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --output text --region ${{ secrets.AWS_REGION }})
+          if [ "$STATUS" = "available" ]; then
+            echo "RDS available ✅"; break
+          fi
+          echo "RDS status: $STATUS ($i/40)"
+          sleep 15
+        done
+
+    - name: Wait for nodes to be ready
+      run: |
+        echo "Waiting up to 5 min for nodes..."
+        for i in $(seq 1 30); do
+          COUNT=$(aws eks describe-nodegroup \
+            --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --nodegroup-name main \
+            --query 'nodegroup.scalingConfig.desiredSize' \
+            --output text --region ${{ secrets.AWS_REGION }})
+          if [ "$COUNT" = "${{ github.event.inputs.node_count }}" ]; then
+            echo "Nodes at $COUNT ✅"; break
+          fi
+          sleep 10
+        done
+
+    - name: Summary
+      run: |
+        echo "✅ Resumed. Trigger a deploy to push workloads back to the cluster."
+        echo "Running cost: ~\$123/month."

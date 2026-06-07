@@ -35,4 +35,9 @@ resource "aws_dynamodb_table" "pod_registry" {
   point_in_time_recovery {
     enabled = true
   }
+
+  # Prevent accidental destroy — pod registry data survives pause/teardown cycles.
+  lifecycle {
+    prevent_destroy = true
+  }
 }

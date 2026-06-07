@@ -16,6 +16,11 @@ resource "aws_ecr_repository" "this" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  # Prevent accidental destroy — images survive pause/teardown cycles.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Lifecycle policy: keep only the 10 most recent images per repo to cap storage cost.

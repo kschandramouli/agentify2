@@ -255,15 +255,52 @@ After that, every push to `main` (touching `src/` or manifests) triggers the dep
 
 ## Cost estimate (dev environment, ap-southeast-2)
 
+NAT gateway removed (nodes run in public subnets for dev); free S3 + DynamoDB
+gateway endpoints added. Three cost tiers depending on usage:
+
+### Running (fully active)
+
 | Resource | ~Monthly |
 |---|---|
 | EKS control plane | $73 |
 | 2× t3.medium nodes (on-demand) | ~$60 |
 | RDS db.t3.micro single-AZ | ~$15 |
-| NAT gateway | ~$35 |
-| DynamoDB (on-demand, low usage) | <$5 |
-| ECR, Secrets Manager, CloudWatch | <$5 |
-| **Total** | **~$190/month** |
+| ~~NAT gateway~~ (removed) | $0 |
+| DynamoDB, ECR, Secrets Manager | <$5 |
+| **Total** | **~$123/month** |
 
-To reduce: use Spot instances for nodes (~60% savings), shrink to 1 node during dev,
-or use `db.t3.micro` reserved instance.
+### Paused (nodes = 0, RDS stopped)
+
+Trigger the **Pause** GitHub Actions workflow when not using for a day or more.
+
+| Resource | ~Monthly |
+|---|---|
+| EKS control plane | $73 |
+| Nodes (scaled to 0) | $0 |
+| RDS (stopped, storage only) | ~$0.10 |
+| **Total** | **~$73/month** |
+
+Restore with the **Resume** workflow (~5–10 min).
+
+### Fully destroyed (no cluster)
+
+For extended breaks (weeks+), run `terraform destroy -target=module.eks -target=module.vpc -target=aws_db_instance.this -target=... -var="env=dev"` after taking an RDS snapshot. ECR images, DynamoDB data, and secrets survive (`prevent_destroy = true` on ECR + DynamoDB).
+
+| Resource | ~Monthly |
+|---|---|
+| ECR, DynamoDB, Secrets Manager | ~$5 |
+| S3 state bucket | ~$0.10 |
+| **Total** | **~$5/month** |
+
+Restore with `terraform apply -var="env=dev"` (~20 min).
+
+---
+
+## Pause / Resume (GitHub Actions)
+
+Go to your repo → **Actions** tab:
+
+- **Pause (scale down)**: manually trigger, type `pause` to confirm.
+  Snapshots RDS, scales nodes to 0, stops RDS. Cost drops to ~$73/month.
+- **Resume (scale up)**: manually trigger, optionally set node count (default: 2).
+  Starts RDS, scales nodes back up. Takes ~5–10 min.

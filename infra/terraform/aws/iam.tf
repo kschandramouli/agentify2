@@ -182,11 +182,30 @@ resource "aws_iam_role_policy" "ci" {
         ]
         Resource = [for r in aws_ecr_repository.this : r.arn]
       },
-      # EKS: kubectl (read cluster endpoint/CA; actual auth via aws eks get-token)
+      # EKS: kubectl + pause/resume (scale node group to 0 and back)
       {
-        Effect   = "Allow"
-        Action   = ["eks:DescribeCluster"]
-        Resource = module.eks.cluster_arn
+        Effect = "Allow"
+        Action = [
+          "eks:DescribeCluster",
+          "eks:UpdateNodegroupConfig",
+          "eks:DescribeNodegroup",
+        ]
+        Resource = [
+          module.eks.cluster_arn,
+          "${module.eks.cluster_arn}/nodegroup/*",
+        ]
+      },
+      # RDS: pause/resume (stop, start, snapshot before pause)
+      {
+        Effect = "Allow"
+        Action = [
+          "rds:StopDBInstance",
+          "rds:StartDBInstance",
+          "rds:CreateDBSnapshot",
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBSnapshots",
+        ]
+        Resource = aws_db_instance.this.arn
       },
     ]
   })
