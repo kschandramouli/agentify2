@@ -20,7 +20,7 @@ variable "env" {
 # EKS
 variable "cluster_version" {
   type    = string
-  default = "1.30"
+  default = "1.33"
 }
 
 # Low-cost node group for dev; scale up in prod.
