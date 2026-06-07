@@ -11,10 +11,12 @@ metadata:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /health
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    # Replace with your ACM certificate ARN for HTTPS:
-    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:ACCOUNT:certificate/...
+    # Dev: HTTP only — HTTPS requires an ACM certificate + domain.
+    # To enable HTTPS: request a cert in ACM, uncomment and fill the lines below,
+    # then restore listen-ports to '[{"HTTP":80},{"HTTPS":443}]' and add ssl-redirect.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:175920682311:certificate/...
+    # alb.ingress.kubernetes.io/ssl-redirect: "443"
 spec:
   rules:
   - http:
