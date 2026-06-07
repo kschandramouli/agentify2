@@ -15,10 +15,21 @@ module "eks" {
   # Grant the Terraform executor (SSO role) cluster admin via EKS Access Entries.
   enable_cluster_creator_admin_permissions = true
 
-  # Grant the CI role (GitHub Actions) cluster admin so kubectl works in CI.
+  # Grant the CI role (GitHub Actions) and the AWS root user cluster admin.
+  # The SSO role is already granted via enable_cluster_creator_admin_permissions.
+  # Root is never automatically granted EKS access — it needs an explicit entry.
   access_entries = {
     ci = {
       principal_arn = aws_iam_role.ci.arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+    root = {
+      principal_arn = "arn:aws:iam::175920682311:root"
       policy_associations = {
         admin = {
           policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
