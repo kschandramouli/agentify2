@@ -25,7 +25,7 @@ module "eks" {
   eks_managed_node_groups = {
     main = {
       instance_types = [var.node_instance_type]
-      ami_type       = "AL2_x86_64"   # required — module cannot infer null
+      ami_type       = "AL2023_x86_64"  # AL2 not supported on EKS 1.33+; use AL2023
       min_size       = var.node_min
       max_size       = var.node_max
       desired_size   = var.node_desired
