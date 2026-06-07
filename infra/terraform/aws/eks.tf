@@ -9,11 +9,13 @@ module "eks" {
   cluster_version = var.cluster_version
 
   vpc_id     = module.vpc.vpc_id
-  # Workers run in public subnets (dev). No NAT needed; nodes get public IPs
-  # but are protected by the EKS-managed security group. Private subnets are
-  # kept for RDS. Switch to private_subnets + re-add NAT for prod.
   subnet_ids                     = module.vpc.public_subnets
   cluster_endpoint_public_access = true
+
+  # Automatically grant the IAM identity running Terraform admin access to the
+  # cluster via EKS Access Entries (module v20.x changed from aws-auth ConfigMap).
+  # Without this the Helm and kubernetes providers cannot authenticate.
+  enable_cluster_creator_admin_permissions = true
 
   # Enable IRSA (IAM Roles for Service Accounts) — required for backend + adapter.
   enable_irsa = true
