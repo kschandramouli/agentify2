@@ -91,11 +91,13 @@ export function checkHealth(ctx: ServiceContext): Promise<QueryResponse> {
   });
 }
 
-// Tier-1: deterministic cert check — no LLM, <10ms
+// Tier-1: deterministic cert check — no LLM, <10ms.
+// Cert payloads are indexed by namespace (not service), so we don't send
+// service in context to avoid the entity filter filtering out all cert rows.
 export function checkCerts(ctx: ServiceContext): Promise<QueryResponse> {
   return postJSON<QueryResponse>("/api/query", {
     question: `does ${ctx.service} have any certificates expiring soon?`,
-    context: { namespace: ctx.namespace, service: ctx.service },
+    context: { namespace: ctx.namespace },
   });
 }
 

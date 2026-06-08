@@ -144,6 +144,10 @@ func (c *Client) Query(ctx context.Context, podID string, queryParams map[string
 		args = append(args, v)
 		n := len(args)
 		q += fmt.Sprintf(" AND (payload->>'pod_id' = $%d OR payload->>'service' = $%d OR payload->>'deployment' = $%d)", n, n, n)
+	} else if v := stringParam(queryParams, "namespace"); v != "" {
+		// No entity filter but namespace present — filter by namespace in payload.
+		// Used for cert queries: cert payloads have namespace but no service/pod_id.
+		addArg("payload->>'namespace' =", v)
 	}
 
 	q += " ORDER BY timestamp " + sqlOrder(queryParams)
