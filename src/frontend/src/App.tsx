@@ -6,7 +6,7 @@ export function App() {
     <div className="app">
       <header className="app__header">
         <h1>agentify</h1>
-        <span className="app__subtitle">Ops console</span>
+        <span className="app__subtitle">Service Intelligence</span>
       </header>
       <main className="app__main">
         <ServiceEvaluator />

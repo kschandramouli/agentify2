@@ -134,52 +134,89 @@ code {
 /* ── Evaluator form ── */
 .evaluator { max-width: 900px; }
 
-.eval-form { display: flex; flex-direction: column; gap: 14px; }
+.eval-form { display: flex; flex-direction: column; gap: 8px; }
 
-.eval-form__fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.4fr;
-  gap: 12px;
-}
-
-.eval-form__field {
+/* Single-row search + button */
+.eval-form__search {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
-  font-size: 13px;
-  color: var(--muted);
+  gap: 10px;
+  align-items: stretch;
 }
-.eval-form__field input {
+
+.eval-form__search-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.eval-form__search-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 18px;
+  color: var(--muted);
+  pointer-events: none;
+  line-height: 1;
+}
+
+.eval-form__search-input {
+  width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 8px;
-  padding: 9px 11px;
-  font-size: 14px;
-  width: 100%;
+  padding: 11px 14px 11px 36px;
+  font-size: 15px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  transition: border-color 0.15s;
 }
-.eval-form__field input:focus {
+.eval-form__search-input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(110,168,254,0.12);
 }
-.eval-form__field--optional { color: var(--muted); }
-.eval-form__field em { font-size: 11px; font-style: normal; opacity: 0.6; }
+.eval-form__search-input::placeholder { color: var(--muted); font-family: inherit; }
+.eval-form__search-input:disabled { opacity: 0.6; }
 
 .eval-form__btn {
-  align-self: flex-start;
   background: var(--accent);
   color: #0b1020;
   border: 0;
   border-radius: 8px;
-  padding: 10px 24px;
+  padding: 0 24px;
   font-weight: 700;
   font-size: 14px;
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  white-space: nowrap;
 }
 .eval-form__btn:disabled { opacity: 0.6; cursor: default; }
+
+/* Hint row below search */
+.eval-form__hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Clickable namespace chips */
+.eval-form__ns-chip {
+  background: #1a2236;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 5px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  cursor: pointer;
+}
+.eval-form__ns-chip:hover { background: #1d2b45; }
 
 /* ── Results ── */
 .eval-results { margin-top: 22px; display: flex; flex-direction: column; gap: 20px; }
@@ -289,6 +326,15 @@ code {
 .diagnosis-card__section p { margin: 0; font-size: 13px; line-height: 1.5; }
 .diagnosis-card__section ul,
 .diagnosis-card__section ol { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+
+.eval-results__no-llm {
+  font-size: 11px;
+  color: #79d88a;
+  background: #0d2018;
+  border: 1px solid #16351f;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
 
 .diagnosis-card__meta {
   display: flex;

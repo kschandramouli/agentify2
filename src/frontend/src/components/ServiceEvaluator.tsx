@@ -1,8 +1,51 @@
-import { useState, type FormEvent } from "react";
-import { checkHealth, checkCerts, diagnoseService, type QueryResponse, type ServiceContext } from "../api";
+import { useState, useId, type FormEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { checkHealth, checkCerts, diagnoseService, listPods, type QueryResponse, type ServiceContext } from "../api";
 
-// A check that needs Claude synthesis to answer
+// Statuses that warrant escalating to Tier-2 (Claude Opus)
 const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error"]);
+
+// ── Input parser ──────────────────────────────────────────────────────────────
+// Accepts K8s-style free text in these formats:
+//   namespace/service   →  { namespace: "payments", service: "payment" }
+//   service             →  { namespace: "",          service: "payment" }
+//   namespace/          →  { namespace: "payments",  service: "" }       ← mid-type
+//
+// DNS names like payment.payments.svc.cluster.local are also accepted:
+//   first label = service, second = namespace.
+function parseInput(raw: string): ServiceContext | null {
+  const s = raw.trim();
+  if (!s) return null;
+
+  // DNS format: service.namespace.svc.*
+  const dnsParts = s.split(".");
+  if (dnsParts.length >= 2 && s.includes(".svc")) {
+    return { service: dnsParts[0], namespace: dnsParts[1], dns: s };
+  }
+
+  // namespace/service
+  const slash = s.indexOf("/");
+  if (slash !== -1) {
+    return {
+      namespace: s.slice(0, slash).trim(),
+      service:   s.slice(slash + 1).trim(),
+    };
+  }
+
+  // bare name — treat as service, namespace inferred by backend
+  return { service: s, namespace: "" };
+}
+
+// Extract known namespaces from pod registry (k8fy.live-state.{ns} leaf pods)
+function extractNamespaces(pods: { id: string; kind: string }[]): string[] {
+  const PREFIX = "k8fy.live-state.";
+  return pods
+    .filter(p => p.kind === "leaf" && p.id.startsWith(PREFIX))
+    .map(p => p.id.slice(PREFIX.length))
+    .filter(Boolean);
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 interface CheckResult {
   label: string;
@@ -12,16 +55,7 @@ interface CheckResult {
   durationMs?: number;
 }
 
-interface EvalState {
-  phase: "idle" | "tier1" | "tier2" | "done" | "error";
-  checks: CheckResult[];
-  diagnosis?: QueryResponse;
-  diagDurationMs?: number;
-  diagError?: string;
-  ctx?: ServiceContext;
-}
-
-function statusToSeverity(status: string): "ok" | "warn" | "crit" | "muted" {
+function statusToSev(status: string): "ok" | "warn" | "crit" | "muted" {
   if (["healthy", "ok", "not_applicable"].includes(status)) return "ok";
   if (["degraded", "partial", "warning"].includes(status)) return "warn";
   if (["unhealthy", "error", "critical"].includes(status)) return "crit";
@@ -33,86 +67,79 @@ function Spinner() {
 }
 
 function Badge({ status }: { status: string }) {
-  const sev = statusToSeverity(status);
-  return <span className={`badge badge--${sev}`}>{status}</span>;
+  return <span className={`badge badge--${statusToSev(status)}`}>{status}</span>;
 }
 
 function TierTag({ tier, ms }: { tier: 1 | 2; ms?: number }) {
   return (
-    <span className={`tier-tag tier-tag--${tier}`} title={tier === 1 ? "Deterministic — no LLM" : "Claude Opus — synthesis"}>
+    <span
+      className={`tier-tag tier-tag--${tier}`}
+      title={tier === 1 ? "Deterministic — no LLM" : "Claude Opus — synthesis"}
+    >
       Tier-{tier}{ms !== undefined ? ` · ${ms}ms` : ""}
     </span>
   );
 }
 
 function CheckCard({ result }: { result: CheckResult }) {
-  const resp = result.resp;
-  const sev = resp ? statusToSeverity(resp.status) : "muted";
+  const sev = result.resp ? statusToSev(result.resp.status) : (result.error ? "crit" : "muted");
   const icon = sev === "ok" ? "✓" : sev === "warn" ? "⚠" : sev === "crit" ? "✗" : "–";
-
   return (
     <div className={`check-card check-card--${sev}`}>
       <div className="check-card__header">
-        <span className="check-card__icon">{result.error ? "✗" : icon}</span>
+        <span className="check-card__icon">{icon}</span>
         <span className="check-card__label">{result.label}</span>
         <TierTag tier={result.tier} ms={result.durationMs} />
-        {resp && <Badge status={resp.status} />}
+        {result.resp && <Badge status={result.resp.status} />}
       </div>
       {result.error && <p className="check-card__answer error">{result.error}</p>}
-      {resp && <p className="check-card__answer">{resp.answer}</p>}
-      {resp?.trace_id && <p className="check-card__trace">trace: <code>{resp.trace_id}</code></p>}
+      {result.resp && <p className="check-card__answer">{result.resp.answer}</p>}
+      {result.resp?.trace_id && (
+        <p className="check-card__trace">trace: <code>{result.resp.trace_id}</code></p>
+      )}
     </div>
   );
 }
 
-function DiagnosisCard({ resp, durationMs, error }: { resp?: QueryResponse; durationMs?: number; error?: string }) {
+function DiagnosisCard({
+  resp, durationMs, error,
+}: { resp?: QueryResponse; durationMs?: number; error?: string }) {
   if (error) return (
-    <div className="diagnosis-card diagnosis-card--error">
+    <div className="diagnosis-card diagnosis-card--crit">
       <h3>Diagnosis failed</h3>
       <p className="error">{error}</p>
     </div>
   );
   if (!resp) return null;
-
   const d = resp.details ?? {};
-  const sev = d.severity ?? resp.status;
-
+  const sev = statusToSev(d.severity ?? resp.status);
   return (
-    <div className={`diagnosis-card diagnosis-card--${statusToSeverity(sev)}`}>
+    <div className={`diagnosis-card diagnosis-card--${sev}`}>
       <div className="diagnosis-card__header">
         <h3>Diagnosis</h3>
         <TierTag tier={2} ms={durationMs} />
         {d.severity && <Badge status={d.severity} />}
         <span className="answer__confidence">{(resp.confidence * 100).toFixed(0)}% confidence</span>
       </div>
-
       <p className="diagnosis-card__answer">{resp.answer}</p>
-
       {d.likely_cause && (
         <div className="diagnosis-card__section">
           <span className="diagnosis-card__section-label">Likely cause</span>
           <p>{d.likely_cause}</p>
         </div>
       )}
-
-      {d.findings && d.findings.length > 0 && (
+      {!!d.findings?.length && (
         <div className="diagnosis-card__section">
           <span className="diagnosis-card__section-label">Findings</span>
-          <ul>
-            {d.findings.map((f, i) => <li key={i}>{f}</li>)}
-          </ul>
+          <ul>{d.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>
         </div>
       )}
-
-      {d.recommendations && d.recommendations.length > 0 && (
+      {!!d.recommendations?.length && (
         <div className="diagnosis-card__section">
           <span className="diagnosis-card__section-label">Recommended actions</span>
-          <ol>
-            {d.recommendations.map((r, i) => <li key={i}>{r}</li>)}
-          </ol>
+          <ol>{d.recommendations.map((r, i) => <li key={i}>{r}</li>)}</ol>
         </div>
       )}
-
       <div className="diagnosis-card__meta">
         {resp.sources.length > 0 && (
           <span>sources: {resp.sources.map(s => <code key={s}>{s}</code>)}</span>
@@ -123,20 +150,41 @@ function DiagnosisCard({ resp, durationMs, error }: { resp?: QueryResponse; dura
   );
 }
 
+// ── Main component ────────────────────────────────────────────────────────────
+
+interface EvalState {
+  phase: "idle" | "tier1" | "tier2" | "done";
+  checks: CheckResult[];
+  diagnosis?: QueryResponse;
+  diagDurationMs?: number;
+  diagError?: string;
+  ctx?: ServiceContext;
+}
+
 export function ServiceEvaluator() {
-  const [service, setService] = useState("payment");
-  const [namespace, setNamespace] = useState("payments");
-  const [dns, setDns] = useState("");
+  const listId = useId();
+  const [raw, setRaw] = useState("payments/payment");
   const [state, setState] = useState<EvalState>({ phase: "idle", checks: [] });
 
-  async function onEvaluate(e: FormEvent) {
+  // Fetch pod registry to power the autocomplete — refetches every 15s
+  const { data: pods } = useQuery({
+    queryKey: ["pods"],
+    queryFn: listPods,
+    refetchInterval: 15_000,
+  });
+  const namespaces = pods ? extractNamespaces(pods) : [];
+
+  const isBusy = state.phase === "tier1" || state.phase === "tier2";
+  const parsed = parseInput(raw);
+
+  async function onDiagnose(e: FormEvent) {
     e.preventDefault();
-    const ctx: ServiceContext = { service: service.trim(), namespace: namespace.trim(), dns: dns.trim() || undefined };
+    const ctx = parseInput(raw);
+    if (!ctx || !ctx.service) return;
 
     setState({ phase: "tier1", checks: [], ctx });
 
     // ── Tier-1: run health + cert checks in parallel (no LLM) ──
-    const t1Start = Date.now();
     const [healthRes, certRes] = await Promise.allSettled([
       timed(() => checkHealth(ctx)),
       timed(() => checkCerts(ctx)),
@@ -148,103 +196,100 @@ export function ServiceEvaluator() {
         tier: 1,
         ...(healthRes.status === "fulfilled"
           ? { resp: healthRes.value.resp, durationMs: healthRes.value.ms }
-          : { error: healthRes.reason?.message ?? "Request failed" }),
+          : { error: String((healthRes as PromiseRejectedResult).reason?.message ?? "Request failed") }),
       },
       {
         label: "TLS certificates",
         tier: 1,
         ...(certRes.status === "fulfilled"
           ? { resp: certRes.value.resp, durationMs: certRes.value.ms }
-          : { error: certRes.reason?.message ?? "Request failed" }),
+          : { error: String((certRes as PromiseRejectedResult).reason?.message ?? "Request failed") }),
       },
     ];
 
-    // ── Decide: is Tier-2 needed? ──
-    const allOk = checks.every(c =>
-      !c.error && c.resp && !NEEDS_CLAUDE.has(c.resp.status)
-    );
-
+    // Escalate to Tier-2 only if something is wrong
+    const allOk = checks.every(c => !c.error && c.resp && !NEEDS_CLAUDE.has(c.resp.status));
     if (allOk) {
       setState({ phase: "done", checks, ctx });
       return;
     }
 
-    // ── Tier-2: correlated diagnosis via Claude Opus (only when issues found) ──
+    // ── Tier-2: correlated diagnosis via Claude Opus ──
     setState({ phase: "tier2", checks, ctx });
-    const t2Start = Date.now();
+    const t2 = Date.now();
     try {
       const diag = await diagnoseService(ctx);
-      setState({ phase: "done", checks, diagnosis: diag, diagDurationMs: Date.now() - t2Start, ctx });
+      setState({ phase: "done", checks, diagnosis: diag, diagDurationMs: Date.now() - t2, ctx });
     } catch (err) {
       setState({
         phase: "done", checks,
         diagError: err instanceof Error ? err.message : "Diagnosis failed",
-        diagDurationMs: Date.now() - t2Start,
+        diagDurationMs: Date.now() - t2,
         ctx,
       });
     }
-
-    void t1Start; // suppress unused warning
   }
 
   const s = state;
 
   return (
     <section className="panel evaluator">
-      <h2>Service Evaluator</h2>
+      <h2>Service Intelligence</h2>
 
-      <form className="eval-form" onSubmit={onEvaluate}>
-        <div className="eval-form__fields">
-          <label className="eval-form__field">
-            <span>Service name</span>
+      <form className="eval-form" onSubmit={onDiagnose}>
+        <div className="eval-form__search">
+          <div className="eval-form__search-wrap">
+            <span className="eval-form__search-icon">⌕</span>
             <input
-              value={service}
-              onChange={e => setService(e.target.value)}
-              placeholder="e.g. payment"
+              className="eval-form__search-input"
+              list={listId}
+              value={raw}
+              onChange={e => setRaw(e.target.value)}
+              placeholder="namespace/service  ·  e.g. payments/payment"
+              aria-label="Service (namespace/service)"
+              disabled={isBusy}
+              autoComplete="off"
               required
-              disabled={s.phase === "tier1" || s.phase === "tier2"}
             />
-          </label>
-          <label className="eval-form__field">
-            <span>Namespace</span>
-            <input
-              value={namespace}
-              onChange={e => setNamespace(e.target.value)}
-              placeholder="e.g. payments"
-              required
-              disabled={s.phase === "tier1" || s.phase === "tier2"}
-            />
-          </label>
-          <label className="eval-form__field eval-form__field--optional">
-            <span>DNS name <em>(optional)</em></span>
-            <input
-              value={dns}
-              onChange={e => setDns(e.target.value)}
-              placeholder="e.g. payment.payments.svc.cluster.local"
-              disabled={s.phase === "tier1" || s.phase === "tier2"}
-            />
-          </label>
+            {/* Native datalist populated from real-time pod registry */}
+            <datalist id={listId}>
+              {namespaces.map(ns => (
+                <option key={ns} value={`${ns}/`} label={`${ns}/ — namespace`} />
+              ))}
+            </datalist>
+          </div>
+
+          <button className="eval-form__btn" type="submit" disabled={isBusy || !parsed?.service}>
+            {s.phase === "tier1" ? <><Spinner />Checking…</> :
+             s.phase === "tier2" ? <><Spinner />Diagnosing…</> :
+             "Diagnose"}
+          </button>
         </div>
-        <button
-          type="submit"
-          className="eval-form__btn"
-          disabled={s.phase === "tier1" || s.phase === "tier2"}
-        >
-          {s.phase === "tier1" ? <><Spinner /> Running checks…</> :
-           s.phase === "tier2" ? <><Spinner /> Diagnosing with Claude…</> :
-           "Evaluate"}
-        </button>
+
+        <p className="eval-form__hint">
+          Format: <code>namespace/service</code> or <code>service.namespace.svc.cluster.local</code>
+          {namespaces.length > 0 && (
+            <> · tracked namespaces: {namespaces.map(ns => (
+              <button
+                key={ns}
+                type="button"
+                className="eval-form__ns-chip"
+                onClick={() => setRaw(v => v.includes("/") ? v : `${ns}/`)}
+              >{ns}</button>
+            ))}</>
+          )}
+        </p>
       </form>
 
       {s.phase !== "idle" && (
         <div className="eval-results">
 
-          {/* Tier-1 status */}
           {s.checks.length > 0 && (
             <div className="eval-results__section">
               <h3 className="eval-results__section-title">
-                Deterministic checks
-                <span className="tier-tag tier-tag--1">Tier-1 · no LLM</span>
+                Checks — {s.ctx?.service}{s.ctx?.namespace ? ` · ${s.ctx.namespace}` : ""}
+                <TierTag tier={1} />
+                <span className="eval-results__no-llm">no LLM</span>
               </h3>
               <div className="check-cards">
                 {s.checks.map((c, i) => <CheckCard key={i} result={c} />)}
@@ -252,29 +297,26 @@ export function ServiceEvaluator() {
             </div>
           )}
 
-          {/* Tier-2 pending */}
           {s.phase === "tier2" && (
-            <div className="eval-results__section eval-results__diagnosing">
+            <div className="eval-results__diagnosing">
               <Spinner />
-              <span>Issues detected — correlating signals with Claude Opus…</span>
-              <span className="tier-tag tier-tag--2">Tier-2</span>
+              Issues detected — correlating signals with Claude Opus…
+              <TierTag tier={2} />
             </div>
           )}
 
-          {/* All clear */}
           {s.phase === "done" && !s.diagnosis && !s.diagError && (
             <div className="eval-results__all-clear">
-              <span className="check-card__icon">✓</span>
+              <span>✓</span>
               All checks nominal — Claude was not needed.
             </div>
           )}
 
-          {/* Tier-2 diagnosis */}
           {(s.diagnosis || s.diagError) && (
             <div className="eval-results__section">
               <h3 className="eval-results__section-title">
-                Correlated diagnosis
-                <span className="tier-tag tier-tag--2">Tier-2 · Claude Opus</span>
+                Diagnosis
+                <TierTag tier={2} />
               </h3>
               <DiagnosisCard resp={s.diagnosis} durationMs={s.diagDurationMs} error={s.diagError} />
             </div>
