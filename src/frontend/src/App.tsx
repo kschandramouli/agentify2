@@ -1,4 +1,4 @@
-import { AskPanel } from "./components/AskPanel";
+import { ServiceEvaluator } from "./components/ServiceEvaluator";
 import { PodsTable } from "./components/PodsTable";
 
 export function App() {
@@ -9,7 +9,7 @@ export function App() {
         <span className="app__subtitle">Ops console</span>
       </header>
       <main className="app__main">
-        <AskPanel />
+        <ServiceEvaluator />
         <PodsTable />
       </main>
     </div>

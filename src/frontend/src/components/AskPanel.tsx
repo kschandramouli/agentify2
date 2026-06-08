@@ -7,7 +7,7 @@ export function AskPanel() {
   const [namespace, setNamespace] = useState("prod");
 
   const mutation = useMutation<QueryResponse, Error, void>({
-    mutationFn: () => askQuery(question, namespace),
+    mutationFn: () => askQuery(question, { namespace }),
   });
 
   function onSubmit(e: FormEvent) {
