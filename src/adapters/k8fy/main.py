@@ -12,7 +12,7 @@ from kubernetes import client, config as kube_config
 
 from .config import load_from_env
 from .emitter import Emitter
-from .logserver import LogReader, serve_logs
+from .logserver import LogReader, NamespaceDiscovery, serve_logs
 from .watcher import K8sWatcher
 
 logger = logging.getLogger("agentify.k8fy")
@@ -52,9 +52,9 @@ def main() -> None:
     emitter = Emitter(cfg.ingest_url, cfg.backend_auth_token)
     watcher = K8sWatcher(core_v1, emitter, cfg.namespace, apps_v1=apps_v1)
 
-    # On-demand log server (spec 008 / ADR 0014): the backend calls this to fetch a
-    # bounded, redacted log tail at diagnosis time. Logs are never persisted.
+    # On-demand log server + namespace discovery (spec 008 / ADR 0014).
     log_reader = LogReader(core_v1, default_namespace=cfg.namespace, max_tail_lines=cfg.max_tail_lines)
+    ns_discovery = NamespaceDiscovery(watcher)
 
     threads = [
         threading.Thread(target=watcher.watch_pods, name="watch-pods", daemon=True),
@@ -69,7 +69,7 @@ def main() -> None:
             name="scrape-certs", daemon=True,
         ),
         threading.Thread(
-            target=serve_logs, args=(log_reader, cfg.log_server_port, cfg.adapter_auth_token),
+            target=serve_logs, args=(log_reader, cfg.log_server_port, cfg.adapter_auth_token, ns_discovery),
             name="log-server", daemon=True,
         ),
     ]

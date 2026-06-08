@@ -34,6 +34,10 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// Admin: tracked namespace/service pairs (powers frontend autocomplete)
 	mux.HandleFunc("GET /admin/tracked", h.HandleTrackedEntities)
 
+	// Admin: sync — discover namespaces/services from the adapter (live K8s list)
+	mux.HandleFunc("POST /admin/sync", h.HandleSyncNamespaces)
+	mux.HandleFunc("GET /admin/sync", h.HandleSyncNamespaces) // also allow GET for CronJob curl
+
 	// TODO: add WebSocket handler for chat
 	// mux.HandleFunc("/ws/chat", h.HandleChatWebSocket)
 

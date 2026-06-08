@@ -17,7 +17,10 @@ import hmac
 import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .watcher import K8sWatcher
 
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -40,6 +43,16 @@ def check_auth(auth_header: Optional[str], expected_token: str) -> bool:
     if not auth_header.startswith(prefix):
         return False
     return hmac.compare_digest(auth_header[len(prefix):], expected_token)
+
+
+class NamespaceDiscovery:
+    """Thin wrapper so the log server can call watcher.list_namespaces()."""
+
+    def __init__(self, watcher: "Any") -> None:
+        self._watcher = watcher
+
+    def list_namespaces(self) -> list[dict]:
+        return self._watcher.list_namespaces()
 
 
 class LogReader:
@@ -96,7 +109,7 @@ class LogReader:
         }
 
 
-def _make_handler(reader: LogReader, auth_token: str = ""):
+def _make_handler(reader: LogReader, auth_token: str = "", discovery: Optional[NamespaceDiscovery] = None):
     class _Handler(BaseHTTPRequestHandler):
         # Quiet the default per-request stderr logging; we log failures ourselves.
         def log_message(self, *args: Any) -> None:  # noqa: D401
@@ -113,6 +126,14 @@ def _make_handler(reader: LogReader, auth_token: str = ""):
         def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
             if self.path == "/health":
                 self._send(200, {"status": "ok"})
+            elif self.path == "/namespaces":
+                # Return discovered K8s namespaces with their service lists.
+                # Called by the backend's sync endpoint on demand and by the CronJob.
+                if discovery is None:
+                    self._send(503, {"error": "namespace discovery not configured"})
+                    return
+                namespaces = discovery.list_namespaces()
+                self._send(200, {"namespaces": namespaces, "count": len(namespaces)})
             else:
                 self._send(404, {"error": "not found"})
 
@@ -145,10 +166,17 @@ def _make_handler(reader: LogReader, auth_token: str = ""):
     return _Handler
 
 
-def serve_logs(reader: LogReader, port: int, auth_token: str = "") -> None:
-    """Run the log server (blocking). Intended to run on a daemon thread."""
+def serve_logs(reader: LogReader, port: int, auth_token: str = "",
+               discovery: Optional[NamespaceDiscovery] = None) -> None:
+    """Run the log server (blocking). Intended to run on a daemon thread.
+
+    Exposes:
+      GET  /health      — liveness probe (no auth)
+      GET  /namespaces  — K8s namespace discovery (no auth — internal only)
+      POST /logs        — on-demand pod log tail (bearer auth required in prod)
+    """
     if not auth_token:
         logger.warning("log server auth token not set; /logs is unauthenticated (set ADAPTER_AUTH_TOKEN in prod)")
-    server = ThreadingHTTPServer(("0.0.0.0", port), _make_handler(reader, auth_token))
+    server = ThreadingHTTPServer(("0.0.0.0", port), _make_handler(reader, auth_token, discovery))
     logger.info("log server listening", extra={"port": port})
     server.serve_forever()

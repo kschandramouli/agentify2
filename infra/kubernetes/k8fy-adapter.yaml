@@ -25,7 +25,7 @@ spec:
         - name: BACKEND_URL
           value: "http://agentify-backend:8080"
         - name: K8S_NAMESPACE
-          value: "payments"   # namespace to watch — points at test payment service
+          value: "*"          # cluster-wide mode — watches all non-system namespaces
         - name: SCRAPE_INTERVAL
           value: "30"
         - name: CERT_CHECK_INTERVAL
@@ -86,7 +86,11 @@ rules:
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
-# Added: watch Deployments for change/rollout events (spec 007).
+# Cluster-wide namespace listing (for discovery endpoint + cluster-wide watches)
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["list", "get"]
+# Deployment watch for change/rollout events (spec 007)
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["list", "watch", "get"]

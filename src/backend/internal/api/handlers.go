@@ -547,6 +547,42 @@ func (h *Handler) HandlePodRegistryGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(pod)
 }
 
+// HandleSyncNamespaces calls the adapter to discover current K8s namespaces +
+// services, and returns them so the frontend search autocomplete can be updated
+// immediately. The CronJob calls the same endpoint on a schedule.
+func (h *Handler) HandleSyncNamespaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	namespaces, err := h.adapterClient.DiscoverNamespaces(r.Context())
+	if err != nil {
+		h.logger.Warn("namespace discovery failed", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"error": "adapter unavailable — namespace discovery requires adapter to be running",
+		})
+		return
+	}
+
+	// Flatten to namespace/service strings for the frontend autocomplete.
+	suggestions := make([]string, 0)
+	for _, ns := range namespaces {
+		for _, svc := range ns.Services {
+			suggestions = append(suggestions, ns.Namespace+"/"+svc)
+		}
+		if len(ns.Services) == 0 {
+			// Namespace exists but no services yet — still useful to surface.
+			suggestions = append(suggestions, ns.Namespace+"/")
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"namespaces":  namespaces,
+		"suggestions": suggestions,
+		"total":       len(namespaces),
+	})
+}
+
 // trackedEntitiesProvider is satisfied by *postgres.CurrentState.
 type trackedEntitiesProvider interface {
 	TrackedEntities(ctx context.Context) ([]string, error)

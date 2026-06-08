@@ -28,7 +28,7 @@ def load_from_env() -> Config:
     return Config(
         backend_url=os.getenv("BACKEND_URL", "http://localhost:8080"),
         backend_auth_token=os.getenv("BACKEND_AUTH_TOKEN", ""),
-        namespace=os.getenv("K8S_NAMESPACE", "default"),
+        namespace=os.getenv("K8S_NAMESPACE", "*"),  # empty/"*" = cluster-wide
         scrape_interval=_int_env("SCRAPE_INTERVAL", 30),
         cert_check_interval=_int_env("CERT_CHECK_INTERVAL", 300),
         log_server_port=_int_env("LOG_SERVER_PORT", 8200),

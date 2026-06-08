@@ -497,3 +497,37 @@ code {
 .check-card__icon--ok   { color: #79d88a; }
 .check-card__icon--warn { color: #e3c267; }
 .check-card__icon--crit { color: #e98080; }
+
+/* ── Sync button ── */
+.search-wrap--outer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.sync-btn {
+  flex-shrink: 0;
+  background: #1a2236;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 8px;
+  width: 36px;
+  height: 36px;
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, transform 0.2s;
+  line-height: 1;
+}
+.sync-btn:hover { background: #1d2b45; }
+.sync-btn:disabled { opacity: 0.5; cursor: default; }
+.sync-btn--spinning { animation: spin 1s linear infinite; }
+
+.sync-msg {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}

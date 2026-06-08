@@ -117,3 +117,14 @@ export function askQuery(question: string, context: Record<string, string>): Pro
 export function listPods(): Promise<Pod[]> {
   return getJSON<Pod[]>("/admin/pods");
 }
+
+export interface SyncResult {
+  namespaces: { namespace: string; services: string[]; service_count: number }[];
+  suggestions: string[];
+  total: number;
+}
+
+// Trigger a live sync from the adapter — discovers all K8s namespaces/services.
+export function syncNamespaces(): Promise<SyncResult> {
+  return postJSON<SyncResult>("/admin/sync", {});
+}

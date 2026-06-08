@@ -49,6 +49,39 @@ type LogResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// NamespaceEntry is one discovered namespace returned by the adapter.
+type NamespaceEntry struct {
+	Namespace    string   `json:"namespace"`
+	Services     []string `json:"services"`
+	ServiceCount int      `json:"service_count"`
+}
+
+// DiscoverNamespaces fetches the live namespace/service list from the adapter.
+func (ac *AdapterClient) DiscoverNamespaces(ctx context.Context) ([]NamespaceEntry, error) {
+	if ac.baseURL == "" {
+		return nil, fmt.Errorf("adapter URL not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", ac.baseURL+"/namespaces", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build request: %w", err)
+	}
+	resp, err := ac.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("adapter request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("adapter returned %d", resp.StatusCode)
+	}
+	var body struct {
+		Namespaces []NamespaceEntry `json:"namespaces"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return body.Namespaces, nil
+}
+
 // FetchLogs requests a log tail from the adapter.
 func (ac *AdapterClient) FetchLogs(ctx context.Context, req LogRequest) (*LogResponse, error) {
 	if ac.baseURL == "" {
