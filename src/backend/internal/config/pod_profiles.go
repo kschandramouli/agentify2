@@ -34,12 +34,13 @@ var profiles = map[string]EventProfile{
 		Sharded:        true,
 		PartitionField: "namespace",
 	},
-	// Certificate expiry — a small table queried with filters ("expiring in 30
-	// days"); kept as a single relational pod (pod-formation: unlikely to split).
+	// Certificate expiry — current state of each secret's expiry date.
+	// Stored as kv (latest-wins) so repeated scrapes overwrite rather than
+	// accumulate; each secret is one row keyed by secret name.
 	"k8fy.certificates": {
 		EventNamespace: "k8fy.certificates",
 		Integration:    "k8fy",
-		StoreType:      "relational",
+		StoreType:      "kv",
 		PodHint:        "single",
 		Sharded:        false,
 	},

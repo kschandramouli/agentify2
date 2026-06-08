@@ -140,8 +140,17 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 		namespace   string
 	}
 
+	// Deduplicate by cert name: cert data may be stored in the events table
+	// (append-only, one row per scrape) rather than current_state (latest-wins).
+	// Events are returned ORDER BY timestamp DESC so the first entry per name
+	// is always the most recent.
+	seen := make(map[string]bool)
 	var certs []certResult
 	forEachRow(podData, func(entity string, payload map[string]interface{}) {
+		if seen[entity] {
+			return // skip older scrapes of the same cert
+		}
+		seen[entity] = true
 		renew, days, reason := evaluator.CertRenewal(payload)
 		expiresAt, _ := payload["expires_at"].(string)
 		ns, _ := payload["namespace"].(string)
