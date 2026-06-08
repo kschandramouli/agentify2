@@ -16,6 +16,7 @@ export default defineConfig({
       "/api":    { target: BACKEND, changeOrigin: true },
       "/admin":  { target: BACKEND, changeOrigin: true },
       "/metrics":{ target: BACKEND, changeOrigin: true },
+      "/admin/tracked": { target: BACKEND, changeOrigin: true },
     },
   },
 });

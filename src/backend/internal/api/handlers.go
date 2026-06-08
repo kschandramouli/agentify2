@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -544,4 +545,41 @@ func (h *Handler) HandlePodRegistryGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(pod)
+}
+
+// trackedEntitiesProvider is satisfied by *postgres.CurrentState.
+type trackedEntitiesProvider interface {
+	TrackedEntities(ctx context.Context) ([]string, error)
+}
+
+// HandleTrackedEntities returns all known namespace/service pairs from the
+// live-state current_state table. Powers the frontend search autocomplete.
+func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// The kv backend wraps *postgres.CurrentState which implements TrackedEntities.
+	kv, err := h.orch.GetBackendFactory().GetBackend("kv")
+	if err != nil {
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+	provider, ok := kv.(trackedEntitiesProvider)
+	if !ok {
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+
+	entities, err := provider.TrackedEntities(r.Context())
+	if err != nil {
+		h.logger.Warn("failed to list tracked entities", "error", err)
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+	if entities == nil {
+		entities = []string{}
+	}
+	writeJSON(w, http.StatusOK, entities)
 }

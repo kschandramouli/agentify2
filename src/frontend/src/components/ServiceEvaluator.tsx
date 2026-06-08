@@ -1,6 +1,6 @@
-import { useState, useId, type FormEvent } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { checkHealth, checkCerts, diagnoseService, listPods, type QueryResponse, type ServiceContext } from "../api";
+import { useState, type FormEvent } from "react";
+import { checkHealth, checkCerts, diagnoseService, type QueryResponse, type ServiceContext } from "../api";
+import { SearchInput } from "./SearchInput";
 
 // Statuses that warrant escalating to Tier-2 (Claude Opus)
 const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error"]);
@@ -36,14 +36,6 @@ function parseInput(raw: string): ServiceContext | null {
   return { service: s, namespace: "" };
 }
 
-// Extract known namespaces from pod registry (k8fy.live-state.{ns} leaf pods)
-function extractNamespaces(pods: { id: string; kind: string }[]): string[] {
-  const PREFIX = "k8fy.live-state.";
-  return pods
-    .filter(p => p.kind === "leaf" && p.id.startsWith(PREFIX))
-    .map(p => p.id.slice(PREFIX.length))
-    .filter(Boolean);
-}
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
@@ -162,17 +154,8 @@ interface EvalState {
 }
 
 export function ServiceEvaluator() {
-  const listId = useId();
   const [raw, setRaw] = useState("payments/payment");
   const [state, setState] = useState<EvalState>({ phase: "idle", checks: [] });
-
-  // Fetch pod registry to power the autocomplete — refetches every 15s
-  const { data: pods } = useQuery({
-    queryKey: ["pods"],
-    queryFn: listPods,
-    refetchInterval: 15_000,
-  });
-  const namespaces = pods ? extractNamespaces(pods) : [];
 
   const isBusy = state.phase === "tier1" || state.phase === "tier2";
   const parsed = parseInput(raw);
@@ -238,46 +221,21 @@ export function ServiceEvaluator() {
 
       <form className="eval-form" onSubmit={onDiagnose}>
         <div className="eval-form__search">
-          <div className="eval-form__search-wrap">
-            <span className="eval-form__search-icon">⌕</span>
-            <input
-              className="eval-form__search-input"
-              list={listId}
-              value={raw}
-              onChange={e => setRaw(e.target.value)}
-              placeholder="namespace/service  ·  e.g. payments/payment"
-              aria-label="Service (namespace/service)"
-              disabled={isBusy}
-              autoComplete="off"
-              required
-            />
-            {/* Native datalist populated from real-time pod registry */}
-            <datalist id={listId}>
-              {namespaces.map(ns => (
-                <option key={ns} value={`${ns}/`} label={`${ns}/ — namespace`} />
-              ))}
-            </datalist>
-          </div>
-
+          <SearchInput
+            value={raw}
+            onChange={setRaw}
+            disabled={isBusy}
+            placeholder="namespace/service  ·  e.g. payments/payment"
+          />
           <button className="eval-form__btn" type="submit" disabled={isBusy || !parsed?.service}>
             {s.phase === "tier1" ? <><Spinner />Checking…</> :
              s.phase === "tier2" ? <><Spinner />Diagnosing…</> :
              "Diagnose"}
           </button>
         </div>
-
         <p className="eval-form__hint">
           Format: <code>namespace/service</code> or <code>service.namespace.svc.cluster.local</code>
-          {namespaces.length > 0 && (
-            <> · tracked namespaces: {namespaces.map(ns => (
-              <button
-                key={ns}
-                type="button"
-                className="eval-form__ns-chip"
-                onClick={() => setRaw(v => v.includes("/") ? v : `${ns}/`)}
-              >{ns}</button>
-            ))}</>
-          )}
+          &nbsp;· suggestions load from live tracked services
         </p>
       </form>
 

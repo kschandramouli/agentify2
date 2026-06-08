@@ -279,6 +279,37 @@ func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[
 	return results, rows.Err()
 }
 
+// TrackedEntities returns all known namespace/entity pairs from the live-state
+// shards — used to power the frontend autocomplete. Each entry is formatted as
+// "namespace/entity_key" (e.g. "payments/payment-worker").
+func (s *CurrentState) TrackedEntities(ctx context.Context) ([]string, error) {
+	const q = `
+	SELECT pod_id, entity_key
+	FROM current_state
+	WHERE pod_id LIKE 'k8fy.live-state.%'
+	ORDER BY pod_id, entity_key`
+
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []string
+	for rows.Next() {
+		var podID, entityKey string
+		if err := rows.Scan(&podID, &entityKey); err != nil {
+			continue
+		}
+		// "k8fy.live-state.payments" → "payments"
+		ns := strings.TrimPrefix(podID, "k8fy.live-state.")
+		if ns != "" && entityKey != "" {
+			result = append(result, ns+"/"+entityKey)
+		}
+	}
+	return result, rows.Err()
+}
+
 // HealthCheck verifies the connection.
 func (s *CurrentState) HealthCheck(ctx context.Context) error { return s.db.PingContext(ctx) }
 

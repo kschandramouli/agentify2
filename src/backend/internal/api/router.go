@@ -31,6 +31,9 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /admin/pods", h.HandlePodRegistryList)
 	mux.HandleFunc("GET /admin/pods/get", h.HandlePodRegistryGet)
 
+	// Admin: tracked namespace/service pairs (powers frontend autocomplete)
+	mux.HandleFunc("GET /admin/tracked", h.HandleTrackedEntities)
+
 	// TODO: add WebSocket handler for chat
 	// mux.HandleFunc("/ws/chat", h.HandleChatWebSocket)
 
