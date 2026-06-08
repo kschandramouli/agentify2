@@ -1,6 +1,16 @@
 // Typed client for the agentify backend. Calls are same-origin (/api, /admin) and
 // proxied to the Go backend by Vite in dev (see vite.config.ts).
 
+export interface CertDetail {
+  name: string;
+  namespace: string;
+  should_renew: boolean;
+  days: number;
+  expires_at: string;
+  reason: string;
+  urgency: "ok" | "warn" | "crit";
+}
+
 export interface PodDetail {
   name: string;
   status: string;       // healthy | degraded | unhealthy | completed | unknown
@@ -18,6 +28,11 @@ export interface QueryResponse {
   sources: string[];
   trace_id?: string;
   details?: {
+    // Cert check (Tier-1)
+    certs_checked?: number;
+    certs_needing_renewal?: number;
+    renewal_threshold_days?: number;
+    certificates?: CertDetail[];
     // Health check (Tier-1)
     healthy?: number;
     total_active?: number;

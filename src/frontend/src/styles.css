@@ -445,3 +445,55 @@ code {
 .health-card__completed-toggle:hover { color: var(--text); }
 .health-card__trace { margin: 10px 0 0; font-size: 12px; }
 .small { font-size: 12px; }
+
+/* ── CertCard ── */
+.cert-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+
+.cert-row {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.cert-row--ok   { border-left: 3px solid #79d88a; }
+.cert-row--warn { border-left: 3px solid #e3c267; }
+.cert-row--crit { border-left: 3px solid #e98080; }
+
+.cert-row__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.cert-row__icon { font-size: 13px; width: 18px; text-align: center; font-weight: 700; }
+.cert-row__icon--ok   { color: #79d88a; }
+.cert-row__icon--warn { color: #e3c267; }
+.cert-row__icon--crit { color: #e98080; }
+.cert-row__ns   { font-size: 12px; }
+.cert-row__name { font-size: 13px; }
+
+.cert-row__body { padding-left: 26px; display: flex; flex-direction: column; gap: 4px; }
+
+.cert-row__days { display: flex; align-items: center; gap: 8px; }
+.cert-row__days-num { font-size: 18px; font-weight: 700; }
+.cert-row__days-num--ok   { color: #79d88a; }
+.cert-row__days-num--warn { color: #e3c267; }
+.cert-row__days-num--crit { color: #e98080; }
+.cert-row__days-label { font-size: 13px; }
+.cert-row__expiry { font-size: 12px; }
+
+/* Days bar (like ratio bar but horizontal countdown) */
+.days-bar {
+  flex: 1; max-width: 120px; height: 4px;
+  background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden;
+}
+.days-bar__fill { height: 100%; border-radius: 2px; transition: width 0.4s ease; }
+.days-bar__fill--ok   { background: #79d88a; }
+.days-bar__fill--warn { background: #e3c267; }
+.days-bar__fill--crit { background: #e98080; }
+
+/* Override check-card icon colour for cert summary line */
+.check-card__icon--ok   { color: #79d88a; }
+.check-card__icon--warn { color: #e3c267; }
+.check-card__icon--crit { color: #e98080; }

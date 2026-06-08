@@ -134,12 +134,25 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 	type certResult struct {
 		entity      string
 		shouldRenew bool
+		days        int
+		expiresAt   string
 		reason      string
+		namespace   string
 	}
+
 	var certs []certResult
 	forEachRow(podData, func(entity string, payload map[string]interface{}) {
-		renew, _, reason := evaluator.CertRenewal(payload)
-		certs = append(certs, certResult{entity, renew, reason})
+		renew, days, reason := evaluator.CertRenewal(payload)
+		expiresAt, _ := payload["expires_at"].(string)
+		ns, _ := payload["namespace"].(string)
+		certs = append(certs, certResult{
+			entity:      entity,
+			shouldRenew: renew,
+			days:        days,
+			expiresAt:   expiresAt,
+			reason:      reason,
+			namespace:   ns,
+		})
 	})
 	if len(certs) == 0 {
 		return QueryResponse{}, false
@@ -151,6 +164,8 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 			renewCount++
 		}
 	}
+
+	// Plain-text summary for fallback/accessibility
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d certificate(s) checked; %d need renewal (< %d days).",
 		len(certs), renewCount, evaluator.RenewThresholdDays)
@@ -160,11 +175,39 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 		}
 	}
 
+	// Structured detail for the frontend
+	certList := make([]map[string]interface{}, 0, len(certs))
+	for _, c := range certs {
+		urgency := "ok"
+		if c.shouldRenew {
+			if c.days < 7 {
+				urgency = "crit"
+			} else {
+				urgency = "warn"
+			}
+		}
+		certList = append(certList, map[string]interface{}{
+			"name":         c.entity,
+			"namespace":    c.namespace,
+			"should_renew": c.shouldRenew,
+			"days":         c.days,
+			"expires_at":   c.expiresAt,
+			"reason":       c.reason,
+			"urgency":      urgency,
+		})
+	}
+
 	return QueryResponse{
 		Answer:     b.String(),
 		Status:     "ok",
 		Confidence: 1.0,
 		Sources:    sourceKeys(podData),
+		Details: map[string]interface{}{
+			"certs_checked":          len(certs),
+			"certs_needing_renewal":  renewCount,
+			"renewal_threshold_days": evaluator.RenewThresholdDays,
+			"certificates":           certList,
+		},
 	}, true
 }
 
