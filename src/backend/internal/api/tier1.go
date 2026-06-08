@@ -13,12 +13,13 @@ import (
 // Returns (response, true) when it can answer; (_, false) to fall through to the
 // agent (Tier 2) — e.g. free-text/compound intents, or when there's no data to
 // evaluate.
-func tryDeterministic(intent string, podData map[string]interface{}) (QueryResponse, bool) {
+func tryDeterministic(intent string, podData map[string]interface{}, reqCtx map[string]interface{}) (QueryResponse, bool) {
 	switch intent {
 	case "health_check":
 		return tier1Health(podData)
 	case "cert_check":
-		return tier1Cert(podData)
+		hint, _ := reqCtx["service_hint"].(string)
+		return tier1Cert(podData, hint)
 	default:
 		// metrics_query, general_query, etc. need synthesis — Tier 2.
 		return QueryResponse{}, false
@@ -130,7 +131,19 @@ func tier1Health(podData map[string]interface{}) (QueryResponse, bool) {
 	}, true
 }
 
-func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
+// certMatchesService returns true if the secret name is plausibly related to the
+// given service — matches common naming conventions like "payment-tls",
+// "payment.tls", "tls-payment". Empty serviceHint means all certs match.
+func certMatchesService(secretName, serviceHint string) bool {
+	if serviceHint == "" {
+		return true
+	}
+	sn := strings.ToLower(secretName)
+	sh := strings.ToLower(serviceHint)
+	return strings.Contains(sn, sh) || strings.Contains(sh, sn)
+}
+
+func tier1Cert(podData map[string]interface{}, serviceHint string) (QueryResponse, bool) {
 	type certResult struct {
 		entity      string
 		shouldRenew bool
@@ -140,31 +153,52 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 		namespace   string
 	}
 
-	// Deduplicate by cert name: cert data may be stored in the events table
-	// (append-only, one row per scrape) rather than current_state (latest-wins).
-	// Events are returned ORDER BY timestamp DESC so the first entry per name
-	// is always the most recent.
+	// Collect all certs (deduped — first entry per name is most recent).
 	seen := make(map[string]bool)
-	var certs []certResult
+	var allCerts []certResult
 	forEachRow(podData, func(entity string, payload map[string]interface{}) {
 		if seen[entity] {
-			return // skip older scrapes of the same cert
+			return
 		}
 		seen[entity] = true
 		renew, days, reason := evaluator.CertRenewal(payload)
 		expiresAt, _ := payload["expires_at"].(string)
 		ns, _ := payload["namespace"].(string)
-		certs = append(certs, certResult{
-			entity:      entity,
-			shouldRenew: renew,
-			days:        days,
-			expiresAt:   expiresAt,
-			reason:      reason,
-			namespace:   ns,
+		allCerts = append(allCerts, certResult{
+			entity: entity, shouldRenew: renew, days: days,
+			expiresAt: expiresAt, reason: reason, namespace: ns,
 		})
 	})
+
+	// Prefer certs whose name matches the service hint; fall back to all certs.
+	certs := allCerts
+	if serviceHint != "" {
+		var matched []certResult
+		for _, c := range allCerts {
+			if certMatchesService(c.entity, serviceHint) {
+				matched = append(matched, c)
+			}
+		}
+		if len(matched) > 0 {
+			certs = matched
+		}
+	}
+
 	if len(certs) == 0 {
-		return QueryResponse{}, false
+		// Return a clean Tier-1 "not applicable" — don't fall through to Tier-2
+		// where Claude writes a paragraph explaining the empty namespace.
+		return QueryResponse{
+			Answer:     "Certificate inventory for this service is empty — no TLS secrets found in this namespace.",
+			Status:     "not_applicable",
+			Confidence: 1.0,
+			Sources:    sourceKeys(podData),
+			Details: map[string]interface{}{
+				"certs_checked":          0,
+				"certs_needing_renewal":  0,
+				"renewal_threshold_days": evaluator.RenewThresholdDays,
+				"certificates":           []interface{}{},
+			},
+		}, true
 	}
 
 	renewCount := 0
@@ -174,7 +208,6 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 		}
 	}
 
-	// Plain-text summary for fallback/accessibility
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d certificate(s) checked; %d need renewal (< %d days).",
 		len(certs), renewCount, evaluator.RenewThresholdDays)
@@ -184,7 +217,6 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 		}
 	}
 
-	// Structured detail for the frontend
 	certList := make([]map[string]interface{}, 0, len(certs))
 	for _, c := range certs {
 		urgency := "ok"
@@ -196,13 +228,9 @@ func tier1Cert(podData map[string]interface{}) (QueryResponse, bool) {
 			}
 		}
 		certList = append(certList, map[string]interface{}{
-			"name":         c.entity,
-			"namespace":    c.namespace,
-			"should_renew": c.shouldRenew,
-			"days":         c.days,
-			"expires_at":   c.expiresAt,
-			"reason":       c.reason,
-			"urgency":      urgency,
+			"name": c.entity, "namespace": c.namespace,
+			"should_renew": c.shouldRenew, "days": c.days,
+			"expires_at": c.expiresAt, "reason": c.reason, "urgency": urgency,
 		})
 	}
 

@@ -92,12 +92,13 @@ export function checkHealth(ctx: ServiceContext): Promise<QueryResponse> {
 }
 
 // Tier-1: deterministic cert check — no LLM, <10ms.
-// Cert payloads are indexed by namespace (not service), so we don't send
-// service in context to avoid the entity filter filtering out all cert rows.
+// Certs are namespace-scoped in K8s; the backend returns all certs in the
+// namespace and tier1Cert filters to secrets matching the service name first,
+// falling back to all namespace certs. service is passed for name-matching only.
 export function checkCerts(ctx: ServiceContext): Promise<QueryResponse> {
   return postJSON<QueryResponse>("/api/query", {
     question: `does ${ctx.service} have any certificates expiring soon?`,
-    context: { namespace: ctx.namespace },
+    context: { namespace: ctx.namespace, service_hint: ctx.service },
   });
 }
 

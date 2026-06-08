@@ -64,7 +64,9 @@ interface Props {
 export function CertCard({ resp, durationMs }: Props) {
   const d = resp.details;
 
-  if (!d?.certificates) {
+  // Empty inventory or no structured details — show a clean one-liner, not a wall of text.
+  const isEmpty = d?.certs_checked === 0 || (d?.certificates && d.certificates.length === 0);
+  if (!d?.certificates || isEmpty) {
     return (
       <div className="check-card check-card--muted">
         <div className="check-card__header">
@@ -74,7 +76,9 @@ export function CertCard({ resp, durationMs }: Props) {
             <span className="tier-tag tier-tag--1">Tier-1 · {durationMs}ms</span>
           )}
         </div>
-        <p className="check-card__answer">{resp.answer}</p>
+        <p className="check-card__answer muted">
+          Certificate inventory for this service is empty — no TLS secrets found in this namespace.
+        </p>
       </div>
     );
   }

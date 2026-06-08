@@ -156,7 +156,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// Tier 1 — deterministic fast-path (ADR 0006): answer structured intents
 	// (health/cert) directly from the data with no LLM call. Falls through to the
 	// agent when the intent needs synthesis or there's no data to evaluate.
-	if resp, handled := tryDeterministic(intent, podData); handled {
+	if resp, handled := tryDeterministic(intent, podData, req.Context); handled {
 		resp.TraceID = traceID
 		h.logger.Info("answered via deterministic fast-path", "intent", intent, "pods", len(pods))
 		telemetry.QueriesTotal.WithLabelValues(intent, "tier1", "ok").Inc()
