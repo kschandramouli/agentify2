@@ -1,5 +1,9 @@
 import { useState, type FormEvent } from "react";
-import { checkHealth, checkCerts, diagnoseService, type QueryResponse, type ServiceContext } from "../api";
+import {
+  checkHealth, checkCerts, diagnoseService,
+  checkChangeHistory, checkRestartTrend,
+  type QueryResponse, type ServiceContext,
+} from "../api";
 import { SearchInput } from "./SearchInput";
 import { HealthCard } from "./HealthCard";
 import { CertCard } from "./CertCard";
@@ -134,6 +138,21 @@ function DiagnosisCard({
           <ol>{d.recommendations.map((r, i) => <li key={i}>{r}</li>)}</ol>
         </div>
       )}
+      {/* Tool calls — shows which data Claude fetched to build this answer */}
+      {!!resp.tool_calls?.length && (
+        <div className="diagnosis-card__section">
+          <span className="diagnosis-card__section-label">
+            Tools called by Claude ({resp.tool_calls.length})
+          </span>
+          <div className="tool-calls">
+            {resp.tool_calls.map((t, i) => (
+              <span key={i} className="tool-call-badge" title={JSON.stringify(t.arguments, null, 2)}>
+                {t.name}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="diagnosis-card__meta">
         {resp.sources.length > 0 && (
           <span>sources: {resp.sources.map(s => <code key={s}>{s}</code>)}</span>
@@ -144,22 +163,74 @@ function DiagnosisCard({
   );
 }
 
+// ── Tier-2 scenario check card (change history, restart trend) ────────────────
+function Tier2CheckCard({ label, description, resp, durationMs, error, pending }: {
+  label: string; description: string;
+  resp?: QueryResponse; durationMs?: number; error?: string; pending?: boolean;
+}) {
+  const sev = resp ? statusToSev(resp.status) : (error ? "crit" : "muted");
+  return (
+    <div className={`check-card check-card--${sev} check-card--tier2`}>
+      <div className="check-card__header">
+        <span className={`check-card__icon check-card__icon--${sev}`}>
+          {pending ? <Spinner /> : sev === "ok" ? "✓" : sev === "muted" ? "–" : "⚠"}
+        </span>
+        <span className="check-card__label">{label}</span>
+        <TierTag tier={2} ms={durationMs} />
+        {resp && <Badge status={resp.status} />}
+      </div>
+      {!resp && !error && !pending && (
+        <p className="check-card__answer muted">{description}</p>
+      )}
+      {error && <p className="check-card__answer error">{error}</p>}
+      {resp && <p className="check-card__answer">{resp.answer}</p>}
+      {resp?.tool_calls && resp.tool_calls.length > 0 && (
+        <div className="tool-calls" style={{ marginTop: 6 }}>
+          {resp.tool_calls.map((t, i) => (
+            <span key={i} className="tool-call-badge" title={JSON.stringify(t.arguments)}>{t.name}</span>
+          ))}
+        </div>
+      )}
+      {resp?.trace_id && <p className="check-card__trace">trace: <code>{resp.trace_id}</code></p>}
+    </div>
+  );
+}
+
+// ── LLM scenarios reference ───────────────────────────────────────────────────
+const LLM_SCENARIOS = [
+  { tier: 1 as const, label: "Health check",        when: "Any query — always runs first",                cost: "Free" },
+  { tier: 1 as const, label: "Certificate check",   when: "Any query — always runs first",                cost: "Free" },
+  { tier: 2 as const, label: "Correlated diagnosis", when: "When health or cert is degraded/unhealthy",   cost: "Opus call" },
+  { tier: 2 as const, label: "Change history",       when: "Optional — recent deployments & rollouts",   cost: "Opus call" },
+  { tier: 2 as const, label: "Restart trend",        when: "Optional — restart counts over time",        cost: "Opus call" },
+  { tier: 2 as const, label: "Pod logs",             when: "Claude tool — crash reason from container",  cost: "Opus tool" },
+  { tier: 2 as const, label: "Metrics history",      when: "Claude tool — time-series data fetch",       cost: "Opus tool" },
+  { tier: 2 as const, label: "Proactive sweep",      when: "Background (P4c) — fires on anomaly detect", cost: "Opus call" },
+];
+
 // ── Main component ────────────────────────────────────────────────────────────
 
+interface Tier2Result { resp?: QueryResponse; durationMs?: number; error?: string; pending?: boolean; }
+
 interface EvalState {
-  phase: "idle" | "tier1" | "tier2" | "done";
+  phase: "idle" | "tier1" | "tier2" | "tier2-extra" | "done";
   checks: CheckResult[];
   diagnosis?: QueryResponse;
   diagDurationMs?: number;
   diagError?: string;
+  changeHistory?: Tier2Result;
+  restartTrend?: Tier2Result;
   ctx?: ServiceContext;
 }
 
 export function ServiceEvaluator() {
   const [raw, setRaw] = useState("payments/payment");
   const [state, setState] = useState<EvalState>({ phase: "idle", checks: [] });
+  const [runChangeHistory, setRunChangeHistory] = useState(false);
+  const [runRestartTrend, setRunRestartTrend] = useState(false);
+  const [showScenarios, setShowScenarios] = useState(false);
 
-  const isBusy = state.phase === "tier1" || state.phase === "tier2";
+  const isBusy = state.phase !== "idle" && state.phase !== "done";
   const parsed = parseInput(raw);
 
   async function onDiagnose(e: FormEvent) {
@@ -169,7 +240,7 @@ export function ServiceEvaluator() {
 
     setState({ phase: "tier1", checks: [], ctx });
 
-    // ── Tier-1: run health + cert checks in parallel (no LLM) ──
+    // ── Tier-1: health + cert in parallel (no LLM) ──
     const [healthRes, certRes] = await Promise.allSettled([
       timed(() => checkHealth(ctx)),
       timed(() => checkCerts(ctx)),
@@ -177,42 +248,75 @@ export function ServiceEvaluator() {
 
     const checks: CheckResult[] = [
       {
-        label: "Service health",
-        tier: 1,
+        label: "Service health", tier: 1,
         ...(healthRes.status === "fulfilled"
           ? { resp: healthRes.value.resp, durationMs: healthRes.value.ms }
           : { error: String((healthRes as PromiseRejectedResult).reason?.message ?? "Request failed") }),
       },
       {
-        label: "TLS certificates",
-        tier: 1,
+        label: "TLS certificates", tier: 1,
         ...(certRes.status === "fulfilled"
           ? { resp: certRes.value.resp, durationMs: certRes.value.ms }
           : { error: String((certRes as PromiseRejectedResult).reason?.message ?? "Request failed") }),
       },
     ];
 
-    // Escalate to Tier-2 only if something is wrong
     const allOk = checks.every(c => !c.error && c.resp && !NEEDS_CLAUDE.has(c.resp.status));
-    if (allOk) {
+    if (allOk && !runChangeHistory && !runRestartTrend) {
       setState({ phase: "done", checks, ctx });
       return;
     }
 
-    // ── Tier-2: correlated diagnosis via Claude Opus ──
-    setState({ phase: "tier2", checks, ctx });
-    const t2 = Date.now();
-    try {
-      const diag = await diagnoseService(ctx);
-      setState({ phase: "done", checks, diagnosis: diag, diagDurationMs: Date.now() - t2, ctx });
-    } catch (err) {
-      setState({
-        phase: "done", checks,
-        diagError: err instanceof Error ? err.message : "Diagnosis failed",
-        diagDurationMs: Date.now() - t2,
-        ctx,
-      });
+    // ── Tier-2: diagnosis (when issues found) + optional extras ──
+    setState({ phase: "tier2", checks, ctx,
+      changeHistory: runChangeHistory ? { pending: true } : undefined,
+      restartTrend: runRestartTrend ? { pending: true } : undefined,
+    });
+
+    const promises: Promise<void>[] = [];
+
+    // Correlated diagnosis — only when issues exist
+    let diagResult: { diag?: QueryResponse; diagMs?: number; diagErr?: string } = {};
+    if (!allOk) {
+      const t2 = Date.now();
+      promises.push(
+        diagnoseService(ctx)
+          .then(diag => { diagResult = { diag, diagMs: Date.now() - t2 }; })
+          .catch(err => { diagResult = { diagErr: err instanceof Error ? err.message : "failed", diagMs: Date.now() - t2 }; })
+      );
     }
+
+    // Optional Tier-2 extras
+    let chResult: Tier2Result | undefined;
+    let rtResult: Tier2Result | undefined;
+
+    if (runChangeHistory) {
+      const t = Date.now();
+      promises.push(
+        checkChangeHistory(ctx)
+          .then(r => { chResult = { resp: r, durationMs: Date.now() - t }; })
+          .catch(err => { chResult = { error: err instanceof Error ? err.message : "failed", durationMs: Date.now() - t }; })
+      );
+    }
+    if (runRestartTrend) {
+      const t = Date.now();
+      promises.push(
+        checkRestartTrend(ctx)
+          .then(r => { rtResult = { resp: r, durationMs: Date.now() - t }; })
+          .catch(err => { rtResult = { error: err instanceof Error ? err.message : "failed", durationMs: Date.now() - t }; })
+      );
+    }
+
+    await Promise.all(promises);
+
+    setState({
+      phase: "done", checks, ctx,
+      diagnosis: diagResult.diag,
+      diagDurationMs: diagResult.diagMs,
+      diagError: diagResult.diagErr,
+      changeHistory: chResult,
+      restartTrend: rtResult,
+    });
   }
 
   const s = state;
@@ -231,10 +335,52 @@ export function ServiceEvaluator() {
           />
           <button className="eval-form__btn" type="submit" disabled={isBusy || !parsed?.service}>
             {s.phase === "tier1" ? <><Spinner />Checking…</> :
-             s.phase === "tier2" ? <><Spinner />Diagnosing…</> :
+             s.phase === "tier2" || s.phase === "tier2-extra" ? <><Spinner />Diagnosing…</> :
              "Diagnose"}
           </button>
         </div>
+
+        {/* Optional Tier-2 checks */}
+        <div className="eval-options">
+          <span className="eval-options__label">Also run:</span>
+          <label className="eval-option">
+            <input type="checkbox" checked={runChangeHistory}
+              onChange={e => setRunChangeHistory(e.target.checked)} disabled={isBusy} />
+            <span>Recent deployments</span>
+            <TierTag tier={2} />
+          </label>
+          <label className="eval-option">
+            <input type="checkbox" checked={runRestartTrend}
+              onChange={e => setRunRestartTrend(e.target.checked)} disabled={isBusy} />
+            <span>Restart trend</span>
+            <TierTag tier={2} />
+          </label>
+          <button type="button" className="eval-options__info"
+            onClick={() => setShowScenarios(v => !v)}>
+            {showScenarios ? "▾" : "▸"} When does Claude run?
+          </button>
+        </div>
+
+        {/* LLM scenarios reference panel */}
+        {showScenarios && (
+          <div className="scenarios-panel">
+            <table className="scenarios-table">
+              <thead>
+                <tr><th>Scenario</th><th>When triggered</th><th>Cost</th></tr>
+              </thead>
+              <tbody>
+                {LLM_SCENARIOS.map((sc, i) => (
+                  <tr key={i}>
+                    <td><TierTag tier={sc.tier} />&nbsp;{sc.label}</td>
+                    <td className="muted">{sc.when}</td>
+                    <td><span className={sc.tier === 1 ? "cost-free" : "cost-llm"}>{sc.cost}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         <p className="eval-form__hint">
           Format: <code>namespace/service</code> or <code>service.namespace.svc.cluster.local</code>
           &nbsp;· suggestions load from live tracked services
@@ -263,15 +409,14 @@ export function ServiceEvaluator() {
             </div>
           )}
 
-          {s.phase === "tier2" && (
+          {(s.phase === "tier2" || (s.phase === "done" && !s.diagnosis && !s.diagError && NEEDS_CLAUDE.has(s.checks.find(c => c.resp)?.resp?.status ?? ""))) && !s.diagnosis && !s.diagError && s.phase === "tier2" && (
             <div className="eval-results__diagnosing">
-              <Spinner />
-              Issues detected — correlating signals with Claude Opus…
+              <Spinner />Issues detected — correlating signals with Claude Opus…
               <TierTag tier={2} />
             </div>
           )}
 
-          {s.phase === "done" && !s.diagnosis && !s.diagError && (
+          {s.phase === "done" && !s.diagnosis && !s.diagError && !runChangeHistory && !runRestartTrend && (
             <div className="eval-results__all-clear">
               <span>✓</span>
               All checks nominal — Claude was not needed.
@@ -280,11 +425,32 @@ export function ServiceEvaluator() {
 
           {(s.diagnosis || s.diagError) && (
             <div className="eval-results__section">
-              <h3 className="eval-results__section-title">
-                Diagnosis
-                <TierTag tier={2} />
-              </h3>
+              <h3 className="eval-results__section-title">Correlated diagnosis <TierTag tier={2} /></h3>
               <DiagnosisCard resp={s.diagnosis} durationMs={s.diagDurationMs} error={s.diagError} />
+            </div>
+          )}
+
+          {(s.changeHistory || runChangeHistory) && (
+            <div className="eval-results__section">
+              <h3 className="eval-results__section-title">Recent deployments <TierTag tier={2} /></h3>
+              <Tier2CheckCard
+                label="Change history" pending={s.changeHistory?.pending}
+                description="Lists recent deployment rollouts for this service."
+                resp={s.changeHistory?.resp} durationMs={s.changeHistory?.durationMs}
+                error={s.changeHistory?.error}
+              />
+            </div>
+          )}
+
+          {(s.restartTrend || runRestartTrend) && (
+            <div className="eval-results__section">
+              <h3 className="eval-results__section-title">Restart trend <TierTag tier={2} /></h3>
+              <Tier2CheckCard
+                label="Restart trend" pending={s.restartTrend?.pending}
+                description="Shows restart count over time and when climbing started."
+                resp={s.restartTrend?.resp} durationMs={s.restartTrend?.durationMs}
+                error={s.restartTrend?.error}
+              />
             </div>
           )}
         </div>

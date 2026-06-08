@@ -21,12 +21,18 @@ export interface PodDetail {
   completed: boolean;   // true = Succeeded/old pod, excluded from health score
 }
 
+export interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 export interface QueryResponse {
   answer: string;
   status: string;
   confidence: number; // 0.0–1.0
   sources: string[];
   trace_id?: string;
+  tool_calls?: ToolCall[];  // tools Claude called to gather context
   details?: {
     // Cert check (Tier-1)
     certs_checked?: number;
@@ -106,6 +112,22 @@ export function checkCerts(ctx: ServiceContext): Promise<QueryResponse> {
 export function diagnoseService(ctx: ServiceContext): Promise<QueryResponse> {
   return postJSON<QueryResponse>("/api/query", {
     question: `why is ${ctx.service} having issues? diagnose crashes, cert expiry, recent deploys, and restart trends`,
+    context: { namespace: ctx.namespace, service: ctx.service },
+  });
+}
+
+// Tier-2: what changed recently? (deploy events)
+export function checkChangeHistory(ctx: ServiceContext): Promise<QueryResponse> {
+  return postJSON<QueryResponse>("/api/query", {
+    question: `what changed recently for ${ctx.service}? show recent deployments and rollouts`,
+    context: { namespace: ctx.namespace, deployment: ctx.service },
+  });
+}
+
+// Tier-2: restart trend over time
+export function checkRestartTrend(ctx: ServiceContext): Promise<QueryResponse> {
+  return postJSON<QueryResponse>("/api/query", {
+    question: `show the restart trend for ${ctx.service} — when did restarts start and how many?`,
     context: { namespace: ctx.namespace, service: ctx.service },
   });
 }
