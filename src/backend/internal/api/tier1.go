@@ -25,31 +25,108 @@ func tryDeterministic(intent string, podData map[string]interface{}) (QueryRespo
 	}
 }
 
+// podPhase extracts the phase string from a pod payload.
+func podPhase(payload map[string]interface{}) string {
+	if p, ok := payload["phase"].(string); ok {
+		return p
+	}
+	return ""
+}
+
 func tier1Health(podData map[string]interface{}) (QueryResponse, bool) {
-	var results []evaluator.PodResult
-	forEachRow(podData, func(entity string, payload map[string]interface{}) {
-		status, reason := evaluator.PodHealth(payload)
-		results = append(results, evaluator.PodResult{Entity: entity, Status: status, Reason: reason})
-	})
-	if len(results) == 0 {
-		return QueryResponse{}, false // nothing to evaluate — let the agent try its tools
+	type podEntry struct {
+		name      string
+		status    string
+		reason    string
+		phase     string
+		restarts  int
+		ready     bool
+		completed bool // Succeeded/Pending-without-phase → skip from health calc
 	}
 
-	status, healthy, ratio := evaluator.ServiceStatus(results)
+	var active []evaluator.PodResult
+	var allPods []podEntry
+
+	forEachRow(podData, func(entity string, payload map[string]interface{}) {
+		phase := podPhase(payload)
+		ready, _ := payload["ready"].(bool)
+		restarts := 0
+		switch v := payload["restarts"].(type) {
+		case float64:
+			restarts = int(v)
+		case int:
+			restarts = v
+		}
+
+		// Succeeded = completed pod from a finished rollout or Job.
+		// It's not a running service instance — exclude from health calculation.
+		if phase == "Succeeded" || phase == "Completed" {
+			allPods = append(allPods, podEntry{
+				name: entity, status: "completed", reason: "phase " + phase,
+				phase: phase, completed: true,
+			})
+			return
+		}
+		// Skip empty-phase entries (usually stale service-level objects, not pods)
+		if phase == "" {
+			return
+		}
+
+		status, reason := evaluator.PodHealth(payload)
+		active = append(active, evaluator.PodResult{Entity: entity, Status: status, Reason: reason})
+		allPods = append(allPods, podEntry{
+			name: entity, status: status, reason: reason,
+			phase: phase, ready: ready, restarts: restarts,
+		})
+	})
+
+	if len(active) == 0 {
+		return QueryResponse{}, false
+	}
+
+	svcStatus, healthy, ratio := evaluator.ServiceStatus(active)
+
+	// Summary answer (still plain text for fallback/accessibility)
+	completed := len(allPods) - len(active)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Service is %s: %d of %d pod(s) healthy (%.0f%%).",
-		strings.ToUpper(status), healthy, len(results), ratio*100)
-	for _, r := range results {
+	fmt.Fprintf(&b, "Service is %s: %d of %d active pod(s) healthy (%.0f%%).",
+		strings.ToUpper(svcStatus), healthy, len(active), ratio*100)
+	if completed > 0 {
+		fmt.Fprintf(&b, " %d completed/old pod(s) excluded from health score.", completed)
+	}
+	for _, r := range active {
 		if r.Status != evaluator.StatusHealthy {
 			fmt.Fprintf(&b, " %s is %s (%s).", r.Entity, r.Status, r.Reason)
 		}
 	}
 
+	// Structured details — rendered by the frontend into a scannable layout
+	podList := make([]map[string]interface{}, 0, len(allPods))
+	for _, p := range allPods {
+		podList = append(podList, map[string]interface{}{
+			"name":      p.name,
+			"status":    p.status,
+			"reason":    p.reason,
+			"phase":     p.phase,
+			"ready":     p.ready,
+			"restarts":  p.restarts,
+			"completed": p.completed,
+		})
+	}
+
 	return QueryResponse{
 		Answer:     b.String(),
 		Status:     "ok",
-		Confidence: 1.0, // deterministic rule applied to the data — not an estimate
+		Confidence: 1.0,
 		Sources:    sourceKeys(podData),
+		Details: map[string]interface{}{
+			"healthy":         healthy,
+			"total_active":    len(active),
+			"total_completed": completed,
+			"ratio":           ratio,
+			"service_status":  svcStatus,
+			"pods":            podList,
+		},
 	}, true
 }
 

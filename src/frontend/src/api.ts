@@ -1,6 +1,16 @@
 // Typed client for the agentify backend. Calls are same-origin (/api, /admin) and
 // proxied to the Go backend by Vite in dev (see vite.config.ts).
 
+export interface PodDetail {
+  name: string;
+  status: string;       // healthy | degraded | unhealthy | completed | unknown
+  reason: string;
+  phase: string;
+  ready: boolean;
+  restarts: number;
+  completed: boolean;   // true = Succeeded/old pod, excluded from health score
+}
+
 export interface QueryResponse {
   answer: string;
   status: string;
@@ -8,6 +18,14 @@ export interface QueryResponse {
   sources: string[];
   trace_id?: string;
   details?: {
+    // Health check (Tier-1)
+    healthy?: number;
+    total_active?: number;
+    total_completed?: number;
+    ratio?: number;
+    service_status?: string;
+    pods?: PodDetail[];
+    // Diagnosis (Tier-2)
     severity?: string;
     likely_cause?: string;
     findings?: string[];

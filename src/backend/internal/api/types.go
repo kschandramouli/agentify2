@@ -8,9 +8,10 @@ type QueryRequest struct {
 
 // QueryResponse represents the answer to a query.
 type QueryResponse struct {
-	Answer     string   `json:"answer"`
-	Status     string   `json:"status"`
-	Confidence float64  `json:"confidence"`
-	Sources    []string `json:"sources"`
-	TraceID    string   `json:"trace_id,omitempty"` // provenance correlation id (spec 004)
+	Answer     string                 `json:"answer"`
+	Status     string                 `json:"status"`
+	Confidence float64                `json:"confidence"`
+	Sources    []string               `json:"sources"`
+	TraceID    string                 `json:"trace_id,omitempty"` // provenance correlation id (spec 004)
+	Details    map[string]interface{} `json:"details,omitempty"`  // structured data for UI rendering
 }

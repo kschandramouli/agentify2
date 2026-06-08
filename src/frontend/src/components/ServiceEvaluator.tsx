@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { checkHealth, checkCerts, diagnoseService, type QueryResponse, type ServiceContext } from "../api";
 import { SearchInput } from "./SearchInput";
+import { HealthCard } from "./HealthCard";
 
 // Statuses that warrant escalating to Tier-2 (Claude Opus)
 const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error"]);
@@ -250,7 +251,11 @@ export function ServiceEvaluator() {
                 <span className="eval-results__no-llm">no LLM</span>
               </h3>
               <div className="check-cards">
-                {s.checks.map((c, i) => <CheckCard key={i} result={c} />)}
+                {s.checks.map((c, i) =>
+                  c.label === "Service health" && c.resp
+                    ? <HealthCard key={i} resp={c.resp} durationMs={c.durationMs} />
+                    : <CheckCard key={i} result={c} />
+                )}
               </div>
             </div>
           )}
