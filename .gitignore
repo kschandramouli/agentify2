@@ -23,3 +23,13 @@ dist/
 # OS / editor
 .DS_Store
 prescriptive-guidance.pdf
+
+# Terraform — state files contain secrets (passwords, tokens); never commit.
+# Remote state is in S3 (infra/terraform/aws/backend.tf).
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl.bak
+
+# Claude Code internal files
+.claude/
