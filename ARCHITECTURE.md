@@ -119,11 +119,17 @@ src/
 │
 ├── agent/                         # Python application (FastAPI)
 │   ├── main.py                    # entry point
-│   ├── app.py                     # FastAPI app setup
+│   ├── app.py                     # FastAPI app setup + /reason endpoint
+│   ├── metrics.py                 # Prometheus token-usage metrics (ADR 0011)
 │   ├── k8fy/
-│   │   ├── agent.py               # K8fy reasoning agent (Tier-2 / LLM)
-│   │   ├── prompts.py             # system prompts, few-shot examples
-│   │   └── tools.py               # Claude tool definitions
+│   │   ├── agent.py               # K8fyAgent: agentic loop, advisor/executor strategy
+│   │   ├── prompts.py             # system prompts for each skill
+│   │   ├── tools.py               # 7 Claude tool definitions
+│   │   └── skills/                # spec 010 — Pattern B skill router
+│   │       ├── router.py          # SkillRouter: intent → skill dispatch table
+│   │       ├── health_check.py    # HealthSkill — 3 tools, health-model prompt
+│   │       ├── cert_audit.py      # CertAuditSkill — 1 tool, PKI prompt
+│   │       └── diagnose.py        # DiagnoseSkill — 6 tools, Opus advisor + Sonnet executor
 │   │   # deterministic health/cert rules now live in the Go backend's
 │   │   # internal/orchestrator/evaluator (Tier-1) — see spec 003
 │   ├── adapters/                  # adapter-specific agents (future)

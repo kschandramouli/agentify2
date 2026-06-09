@@ -5,7 +5,7 @@ import logging
 
 import metrics
 from config.settings import get_settings
-from k8fy.agent import get_k8fy_agent
+from k8fy.skills.router import get_skill_router
 from models.response import AgentResponse, QueryRequest
 
 # Setup logging
@@ -20,10 +20,10 @@ app = FastAPI(title="agentify-agent", version="0.1.0")
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize agent on startup."""
+    """Initialize skill router (and all sub-agents) on startup."""
     logger.info("Agent service starting up...")
-    agent = get_k8fy_agent()
-    logger.info(f"Agent initialized with model: {settings.claude_model}")
+    get_skill_router()
+    logger.info(f"Skill router initialized with model: {settings.claude_model}")
 
 
 @app.get("/health")
@@ -63,8 +63,7 @@ async def reason(request: QueryRequest) -> AgentResponse:
     # backend's query.trace by the same id (spec 004).
     logger.info("reason request", extra={"trace_id": request.trace_id, "intent": request.intent})
     try:
-        agent = get_k8fy_agent()
-        response = await agent.reason(request.intent, request.data, request.context)
+        response = await get_skill_router().dispatch(request.intent, request.data, request.context)
         return response
     except Exception as e:
         logger.error(f"Reasoning error (trace_id=%s): %s", request.trace_id, e)
