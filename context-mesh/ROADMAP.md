@@ -196,11 +196,90 @@ blip (instead of 500s), invalidates on pod formation, and exposes
 
 ## P5 — Supporting tooling (when scaling)
 
-AI gateway for semantic caching / fallback routing / budget controls (semantic
-cache hits ~5ms vs ~2s for a full round-trip — directly attacks the latency we
-measured); agent tracing/eval via Langfuse or MLflow; an eval harness and bounded
-tool-call budgets before Tier 2 / agentic loops are trusted in production. All
-explicitly later — they matter once the two-tier path and governance gate land.
+### Tools vs Skills — the next abstraction layer
+
+**Tools** are atomic, stateless functions the LLM calls during reasoning to fetch
+data. We already have seven: `get_service_health`, `get_pod_logs`,
+`get_metrics_history`, `get_change_history`, `get_pod_events`, `get_certificates`,
+`query_pod` (all in `src/agent/k8fy/tools.py`).
+
+**Skills** are higher-level, pre-packaged diagnostic workflows that combine multiple
+tools, have their own specialised system prompt, and return a structured result.
+A skill knows *how* to solve a class of problem — not just how to fetch one piece of
+data. The current general-purpose K8fy agent is a single "know-everything" context;
+skills split it into expert specialists.
+
+#### Pattern A — Hardcoded tool sequences (deterministic skill, lower cost)
+
+Pre-assemble data with a fixed tool sequence, then make exactly ONE Claude call
+with everything pre-loaded. Bypasses the ad-hoc tool loop entirely:
+
+```python
+# src/agent/k8fy/skills/diagnose_crash.py
+async def diagnose_crash_loop(pod_id, namespace) -> DiagnosisResult:
+    logs    = await process_tool_call("get_pod_logs",        {"pod_id": pod_id, "previous": True})
+    events  = await process_tool_call("get_pod_events",      {"pod_id": pod_id})
+    metrics = await process_tool_call("get_metrics_history", {"pod_id": pod_id})
+    # ONE Claude call with all data pre-assembled → predictable cost
+    return await reason_over(logs, events, metrics, CRASH_DIAGNOSIS_PROMPT)
+```
+
+Cost: exactly 1 Opus call + 3 tool fetches regardless of how complex the crash is.
+The current ad-hoc loop takes 2–7 tool iterations for the same problem.
+**Recommended first step — immediately implementable, 30–50% token cost reduction.**
+
+#### Pattern B — Sub-agent with specialised prompt (agentic skill, higher quality)
+
+A separate Claude instance with domain expertise baked into its system prompt.
+A **skill router** (using the Tier-1 findings that already exist) dispatches to
+the right specialist:
+
+```
+User: "why is payment-worker crashing?"
+         ↓
+   Tier-1 evaluator → finds CrashLoopBackOff
+         ↓
+   SkillRouter (new — reads Tier-1 findings):
+     crash detected     → CrashLoopSkill    (prompt: K8s failure-mode expert)
+     cert expiry        → CertAuditSkill    (prompt: PKI/TLS lifecycle expert)
+     rollout regression → DeploymentSkill   (prompt: rollout strategy expert)
+```
+
+Each skill has a focused system prompt that makes Claude sharper for its domain,
+reducing hallucination and irrelevant context. The router lives naturally at the
+same point where Tier-1 currently hands off to Tier-2 (`handlers.go`
+`tryDeterministic` → agent call).
+
+**Why Pattern B fits agentify specifically:**
+- The Tier-1 evaluator already classifies the problem type *before* Claude is called.
+  That classification is exactly the input a skill router needs.
+- Different failure modes need different expertise: crash-loop root cause ≠ PKI
+  lifecycle ≠ deployment rollout analysis.
+- The skill boundary enforces a tool-call budget per skill class (a crash skill
+  always calls logs + events + metrics; never more).
+- Aligns with the existing intent taxonomy (`health_check`, `cert_check`,
+  `diagnose`, `change_history`) — one skill per intent class.
+
+**Implementation order:** Pattern A first (lower risk, immediate savings), then
+Pattern B (higher quality, requires skill router + per-domain prompts).
+
+### Other P5 items
+
+- **AI gateway** — semantic caching (cache hits ~5ms vs ~2s full round-trip),
+  fallback model routing (Haiku for simple intents, Opus only for synthesis),
+  per-namespace cost budgets.
+- **Eval harness** — regression test suite for Tier-2 answer quality: fixed
+  query/ground-truth pairs, run on CI after prompt or model changes. Prevents
+  silent quality regressions. Tools: Langfuse or MLflow for tracing + eval.
+  Prerequisite: skills (Pattern A/B) must be stable before evals are meaningful.
+- **Agent tracing** — per-call tool-iteration counts, latency, and token cost
+  surfaced in the UI alongside the answer (partial: Prometheus metrics exist for
+  token counts; structured per-call trace still deferred).
+- **Tool-call budgets** — hard cap on tool iterations per skill class. Pattern A
+  naturally enforces this; Pattern B needs an explicit counter in the agent loop.
+
+All explicitly later — they matter once the two-tier path, governance gate, and
+skill layer land.
 
 ## Frontend — ops console (not a reviewer P-item; foundational gap)
 
