@@ -21,6 +21,17 @@ const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error", "pa
 //
 // DNS names like payment.payments.svc.cluster.local are also accepted:
 //   first label = service, second = namespace.
+//
+// Full pod names (e.g. payment-worker-68795899ff-kngf7) are normalized to their
+// deployment name by stripping the K8s ReplicaSet hash + pod hash suffixes.
+
+function stripK8sPodSuffix(name: string): string {
+  // K8s pod names: {deployment}-{rs_hash}-{pod_hash}
+  // rs_hash: 6–12 lowercase alphanum; pod_hash: exactly 5 lowercase alphanum.
+  const m = name.match(/^(.+)-[a-z0-9]{6,12}-[a-z0-9]{5}$/);
+  return m ? m[1] : name;
+}
+
 function parseInput(raw: string): ServiceContext | null {
   const s = raw.trim();
   if (!s) return null;
@@ -31,17 +42,17 @@ function parseInput(raw: string): ServiceContext | null {
     return { service: dnsParts[0], namespace: dnsParts[1], dns: s };
   }
 
-  // namespace/service
+  // namespace/service (or namespace/full-pod-name)
   const slash = s.indexOf("/");
   if (slash !== -1) {
     return {
       namespace: s.slice(0, slash).trim(),
-      service:   s.slice(slash + 1).trim(),
+      service:   stripK8sPodSuffix(s.slice(slash + 1).trim()),
     };
   }
 
   // bare name — treat as service, namespace inferred by backend
-  return { service: s, namespace: "" };
+  return { service: stripK8sPodSuffix(s), namespace: "" };
 }
 
 
@@ -158,22 +169,26 @@ function DiagnosisCard({
         <span className="answer__confidence">{(resp.confidence * 100).toFixed(0)}% confidence</span>
       </div>
       <p className="diagnosis-card__answer">{resp.answer}</p>
+      {!!d.findings?.length && (
+        <div className="diagnosis-card__section">
+          <span className="diagnosis-card__section-label">Evidence</span>
+          <ul className="diagnosis-card__findings">
+            {d.findings.map((f, i) => <li key={i}>{f}</li>)}
+          </ul>
+        </div>
+      )}
       {d.likely_cause && (
         <div className="diagnosis-card__section">
           <span className="diagnosis-card__section-label">Likely cause</span>
           <p>{d.likely_cause}</p>
         </div>
       )}
-      {!!d.findings?.length && (
-        <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">Findings</span>
-          <ul>{d.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>
-        </div>
-      )}
       {!!d.recommendations?.length && (
         <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">Recommended actions</span>
-          <ol>{d.recommendations.map((r, i) => <li key={i}>{r}</li>)}</ol>
+          <span className="diagnosis-card__section-label">Suggested actions</span>
+          <ol className="diagnosis-card__actions">
+            {d.recommendations.map((r, i) => <li key={i}>{r}</li>)}
+          </ol>
         </div>
       )}
       {/* Tool calls — shows which data Claude fetched to build this answer */}
@@ -275,6 +290,9 @@ export function ServiceEvaluator() {
     e.preventDefault();
     const ctx = parseInput(raw);
     if (!ctx || !ctx.service) return;
+
+    // Normalize the input field: strip pod hash suffixes, show namespace/service only
+    setRaw(ctx.namespace ? `${ctx.namespace}/${ctx.service}` : ctx.service);
 
     setState({ phase: "tier1", checks: [], ctx });
 

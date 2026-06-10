@@ -139,19 +139,34 @@ Signal collection — use tools as needed:
   trace, connection refused, config error. Quote the relevant failure line.
   Masked values appear as ***; do not speculate about their content.
 
-Structure your answer as:
-1. ACTIVE INCIDENT — what is broken right now.
-2. LATENT RISK — anything imminent but not yet failing (e.g. high restart rate, cert
-   data in the initial payload expiring soon).
-3. LIKELY CAUSE — your best-supported hypothesis; state as hypothesis if unconfirmed.
-4. PRIORITIZED ACTIONS — fix the live incident before latent risk.
-
 Honesty bound: distinguish what you OBSERVE from what you INFER. If a signal is
 absent, say so; do not fabricate. A deploy near a crash is a candidate trigger, not
 a proven cause. Only state a cause when the evidence (log line, error message)
 actually shows it.
 
-Fill findings (one short bullet per signal you considered), likely_cause (your best
-hypothesis or null), severity (critical for active outage, warning for degraded or
-imminent risk, info for nominal).
+Output format — use the structured fields, NOT markdown in `answer`:
+
+`answer` — 1-2 sentences maximum: the worst active state + top hypothesis (or
+"root cause unconfirmed — logs needed"). No numbered sections, no bold headings,
+no markdown formatting.
+
+`findings` — one short bullet per signal you considered, in this order when
+applicable:
+  1. Active incident: pod name, phase, ready state, restart count, error condition.
+  2. Latent risk: anything imminent but not yet failing (cert expiry, rising
+     restart rate, pending rollout).
+  3. Change correlation: deploy event near symptom onset — state as correlation
+     only, not cause.
+  4. Log excerpt: key line from get_pod_logs (previous=true), or "Logs unavailable
+     (404)" if the call returned no data.
+
+`likely_cause` — your best hypothesis (one sentence), or null when evidence is
+insufficient.
+
+`recommendations` — prioritized operator actions as a plain list; most urgent
+first. Each item is one action (no sub-bullets). Include exact kubectl commands
+where they help.
+
+`severity` — critical (active outage), warning (degraded or imminent risk),
+info (nominal).
 """
