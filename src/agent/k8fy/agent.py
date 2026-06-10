@@ -428,6 +428,8 @@ def _user_error_message(e: Exception) -> str:
     s = str(e)
     if "rate_limit" in s or "429" in s:
         return "Rate limit reached — too many requests in flight. Please wait a moment and try again."
+    if "credit balance" in s.lower() or "billing" in s.lower():
+        return "AI service unavailable — the API account has insufficient credits. Please contact your administrator."
     if "timeout" in s.lower() or "timed out" in s.lower():
         return "Request timed out — the query took too long. Try a more specific question or retry."
     if "overloaded" in s.lower() or "529" in s:

@@ -198,15 +198,21 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	telemetry.QueriesTotal.WithLabelValues(intent, "tier2", "ok").Inc()
 	telemetry.QueryDuration.WithLabelValues("tier2").Observe(time.Since(start).Seconds())
 
-	// Return agent response
+	// Return agent response. Pass the agent's status through so the frontend
+	// can render error/degraded cards correctly. Fall back to "ok" only when
+	// the agent omits the field (older image compatibility).
+	agentStatus := agentResp.Status
+	if agentStatus == "" {
+		agentStatus = "ok"
+	}
 	resp := QueryResponse{
 		Answer:     agentResp.Answer,
-		Status:     "ok",
+		Status:     agentStatus,
 		Confidence: agentResp.Confidence,
 		Sources:    agentResp.Sources,
 		TraceID:    traceID,
 	}
-	h.logTrace(traceID, req.Question, intent, namespace, "tier2", "ok", agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start)
+	h.logTrace(traceID, req.Question, intent, namespace, "tier2", agentStatus, agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

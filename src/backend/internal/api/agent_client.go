@@ -42,6 +42,7 @@ type AgentToolCall struct {
 // AgentResponse is returned from the agent service.
 type AgentResponse struct {
 	Answer     string                 `json:"answer"`
+	Status     string                 `json:"status"`   // "healthy","degraded","unhealthy","error","unknown"
 	Reasoning  string                 `json:"reasoning"`
 	Confidence float64                `json:"confidence"`
 	Sources    []string               `json:"sources"`
