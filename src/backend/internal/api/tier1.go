@@ -50,10 +50,7 @@ func tier1Health(podData map[string]interface{}, serviceFilter string) (QueryRes
 	var allPods []podEntry
 
 	forEachRow(podData, func(entity string, payload map[string]interface{}) {
-		// Narrow to the requested service when one is specified. Use
-		// case-insensitive contains so "payment-worker" matches all replicas
-		// and "payment-worker-68795899ff-kngf7" matches only that pod.
-		if serviceFilter != "" && !strings.Contains(strings.ToLower(entity), strings.ToLower(serviceFilter)) {
+		if !entityMatchesService(entity, serviceFilter) {
 			return
 		}
 		phase := podPhase(payload)
@@ -290,4 +287,28 @@ func sourceKeys(podData map[string]interface{}) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// entityMatchesService returns true when entity is (a) an exact match for
+// service, or (b) a Kubernetes pod whose name is {service}-{rs-hash} or
+// {service}-{rs-hash}-{pod-hash} (≤1 hyphen after the service prefix).
+//
+// This prevents "payment" from matching "payment-worker-<hash>-<hash>":
+// stripping the "payment-" prefix leaves "worker-<hash>-<hash>", which
+// contains 2 hyphens — more than the 1 allowed for a direct k8s pod.
+// An empty service means "match everything".
+func entityMatchesService(entity, service string) bool {
+	if service == "" {
+		return true
+	}
+	el := strings.ToLower(entity)
+	sl := strings.ToLower(service)
+	if el == sl {
+		return true
+	}
+	prefix := sl + "-"
+	if !strings.HasPrefix(el, prefix) {
+		return false
+	}
+	return strings.Count(el[len(prefix):], "-") <= 1
 }
