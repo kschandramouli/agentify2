@@ -1,4 +1,4 @@
-"""HealthSkill — Pattern A sub-agent for health_check intent (spec 010).
+"""HealthSkill — Pattern A skill for health_check intent (spec 010).
 
 Pattern A: derives which tool calls are needed from the initial data and
 context, fires them in parallel, then makes a single Claude call with the

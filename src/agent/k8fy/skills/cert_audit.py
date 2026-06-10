@@ -1,4 +1,4 @@
-"""CertAuditSkill — Pattern A sub-agent for cert_check intent (spec 010).
+"""CertAuditSkill — Pattern A skill for cert_check intent (spec 010).
 
 Pattern A: always pre-fetches the full certificate list for the namespace
 before calling Claude. The cert list is the only data source this skill needs,

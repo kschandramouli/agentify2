@@ -1,7 +1,7 @@
-"""DiagnoseSkill — focused sub-agent for diagnose intent (spec 010).
+"""DiagnoseSkill — focused skill for diagnose intent (spec 010).
 
 Cert data arrives in the pre-fetched payload (fan-out includes cert pods), so
-get_certificates is excluded from the tool set — the agent reads cert context
+get_certificates is excluded from the tool set — the skill reads cert context
 from the initial data without a redundant tool call.
 """
 

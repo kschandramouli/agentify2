@@ -1,4 +1,4 @@
-"""SkillRouter — dispatches each intent to the appropriate skill sub-agent (spec 010).
+"""SkillRouter — dispatches each intent to the appropriate skill (spec 010).
 
 The intent is pre-classified by Go's inferIntent() before the /reason request
 arrives, so this is a pure O(1) dispatch table with no classification cost.
