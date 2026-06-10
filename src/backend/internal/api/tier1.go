@@ -16,7 +16,8 @@ import (
 func tryDeterministic(intent string, podData map[string]interface{}, reqCtx map[string]interface{}) (QueryResponse, bool) {
 	switch intent {
 	case "health_check":
-		return tier1Health(podData)
+		service, _ := reqCtx["service"].(string)
+		return tier1Health(podData, service)
 	case "cert_check":
 		hint, _ := reqCtx["service_hint"].(string)
 		return tier1Cert(podData, hint)
@@ -34,7 +35,7 @@ func podPhase(payload map[string]interface{}) string {
 	return ""
 }
 
-func tier1Health(podData map[string]interface{}) (QueryResponse, bool) {
+func tier1Health(podData map[string]interface{}, serviceFilter string) (QueryResponse, bool) {
 	type podEntry struct {
 		name      string
 		status    string
@@ -49,6 +50,12 @@ func tier1Health(podData map[string]interface{}) (QueryResponse, bool) {
 	var allPods []podEntry
 
 	forEachRow(podData, func(entity string, payload map[string]interface{}) {
+		// Narrow to the requested service when one is specified. Use
+		// case-insensitive contains so "payment-worker" matches all replicas
+		// and "payment-worker-68795899ff-kngf7" matches only that pod.
+		if serviceFilter != "" && !strings.Contains(strings.ToLower(entity), strings.ToLower(serviceFilter)) {
+			return
+		}
 		phase := podPhase(payload)
 		ready, _ := payload["ready"].(bool)
 		restarts := 0
@@ -117,7 +124,7 @@ func tier1Health(podData map[string]interface{}) (QueryResponse, bool) {
 
 	return QueryResponse{
 		Answer:     b.String(),
-		Status:     "ok",
+		Status:     svcStatus, // "healthy"|"degraded"|"unhealthy" — drives NEEDS_CLAUDE in the frontend
 		Confidence: 1.0,
 		Sources:    sourceKeys(podData),
 		Details: map[string]interface{}{
