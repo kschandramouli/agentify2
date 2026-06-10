@@ -1,5 +1,41 @@
-from pydantic import AliasChoices, Field
+import json
+import logging
+
+import boto3
+from botocore.exceptions import ClientError
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
+
+
+def _fetch_secret(secret_name: str, region: str) -> str:
+    """Fetch a secret value from AWS Secrets Manager.
+
+    Handles both plain-string secrets and JSON secrets that contain an
+    ANTHROPIC_API_KEY (or CLAUDE_API_KEY) field.  Returns the raw key string.
+    Raises on any Secrets Manager error so the service fails fast at startup
+    rather than silently running without credentials.
+    """
+    client = boto3.client("secretsmanager", region_name=region)
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+    except ClientError as e:
+        raise RuntimeError(
+            f"Failed to fetch secret '{secret_name}' from Secrets Manager: {e}"
+        ) from e
+
+    raw = response.get("SecretString") or ""
+    try:
+        data = json.loads(raw)
+        return (
+            data.get("ANTHROPIC_API_KEY")
+            or data.get("CLAUDE_API_KEY")
+            or data.get("api_key")
+            or raw
+        )
+    except (json.JSONDecodeError, AttributeError):
+        return raw
 
 
 class Settings(BaseSettings):
@@ -12,7 +48,8 @@ class Settings(BaseSettings):
 
     # Claude API
     # Accept either ANTHROPIC_API_KEY (the canonical SDK name) or CLAUDE_API_KEY,
-    # from the environment or src/agent/.env.
+    # from the environment or src/agent/.env.  If neither is set, the key is
+    # fetched from AWS Secrets Manager using anthropic_secret_name below.
     claude_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
@@ -21,6 +58,9 @@ class Settings(BaseSettings):
     claude_max_tokens: int = 4096  # room for adaptive thinking + the structured answer
     claude_effort: str = "high"  # low | medium | high | max — thinking/spend tradeoff
     agent_max_tool_iterations: int = 5  # cap on the tool-calling loop
+
+    # AWS Secrets Manager — set this to override the secret name per environment
+    anthropic_secret_name: str = "agentify/dev/anthropic"
 
     # Backend service (for the agent's tool callbacks)
     backend_url: str = "http://localhost:8080"
@@ -39,6 +79,18 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+
+    @model_validator(mode="after")
+    def resolve_claude_api_key(self) -> "Settings":
+        """Fetch the API key from Secrets Manager if it wasn't set via env/file."""
+        if self.claude_api_key:
+            return self
+        logger.info(
+            "ANTHROPIC_API_KEY not set in environment; fetching from Secrets Manager",
+            extra={"secret": self.anthropic_secret_name, "region": self.aws_region},
+        )
+        self.claude_api_key = _fetch_secret(self.anthropic_secret_name, self.aws_region)
+        return self
 
 
 def get_settings() -> Settings:

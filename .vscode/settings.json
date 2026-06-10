@@ -1,0 +1,4 @@
+{
+  "python.envFile": "${workspaceFolder}/src/agent/.env",
+  "python.terminal.useEnvFile": true
+}
