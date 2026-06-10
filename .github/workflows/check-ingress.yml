@@ -79,6 +79,96 @@ jobs:
         kubectl get serviceaccount agentify-backend -n agentify \
           -o jsonpath='{.metadata.annotations}' | python3 -m json.tool
 
+    - name: Agent pod — status, endpoints, logs
+      run: |
+        echo "=== Agent pods ==="
+        kubectl get pods -n agentify -l app=agentify-agent -o wide
+        echo ""
+
+        echo "=== Agent service endpoints (empty = no Ready pods) ==="
+        kubectl get endpoints agentify-agent -n agentify
+        echo ""
+
+        echo "=== Agent pod logs — last 50 lines ==="
+        kubectl logs -n agentify -l app=agentify-agent --tail=50 2>/dev/null || echo "(no logs)"
+        echo ""
+
+        echo "=== Agent describe (events, restarts, image) ==="
+        kubectl describe pods -n agentify -l app=agentify-agent | \
+          grep -A5 -E "State:|Image:|Reason:|Message:|Restart|Events:" || true
+
+    - name: Agent K8s secret validation
+      run: |
+        echo "=== agentify-anthropic-secret presence ==="
+        kubectl get secret agentify-anthropic-secret -n agentify 2>/dev/null && \
+          echo "  secret EXISTS" || echo "  ⚠ SECRET MISSING"
+        echo ""
+
+        echo "=== api_key format (first 12 chars only) ==="
+        KEY=$(kubectl get secret agentify-anthropic-secret -n agentify \
+          -o jsonpath='{.data.api_key}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+        if [ -z "$KEY" ]; then
+          echo "  ⚠ api_key is empty or secret missing"
+        elif echo "$KEY" | grep -qE '^\{'; then
+          echo "  ⚠ api_key looks like JSON — should be a raw sk-ant- string, not a Secrets Manager JSON blob"
+          echo "  First 40 chars: ${KEY:0:40}..."
+        elif echo "$KEY" | grep -q '^sk-ant-'; then
+          echo "  ✓ api_key has correct sk-ant- prefix (${KEY:0:12}...)"
+        else
+          echo "  ⚠ api_key does not start with sk-ant- — may be wrong value"
+          echo "  First 12 chars: ${KEY:0:12}..."
+        fi
+
+    - name: Agent reachability from backend pod
+      run: |
+        echo "=== Curl agent /health from inside backend pod ==="
+        BACKEND_POD=$(kubectl get pods -n agentify -l app=agentify-backend \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -z "$BACKEND_POD" ]; then
+          echo "  ⚠ No backend pod found — skipping reachability test"
+        else
+          echo "  Using pod: $BACKEND_POD"
+          kubectl exec -n agentify "$BACKEND_POD" -- \
+            wget -qO- --timeout=5 http://agentify-agent:8001/health 2>&1 || \
+            echo "  ⚠ Agent /health unreachable from backend pod"
+        fi
+
+    - name: End-to-end query smoke test (via ALB)
+      run: |
+        ALB=$(kubectl get ingress agentify -n agentify \
+          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [ -z "$ALB" ]; then
+          echo "  ⚠ ALB address not available — skipping query test"
+          exit 0
+        fi
+        echo "=== ALB health check ==="
+        curl -sf "http://${ALB}/health" && echo "" || echo "  ⚠ /health failed"
+        echo ""
+
+        echo "=== Tier-1 query (no LLM) ==="
+        RESP=$(curl -sf -X POST "http://${ALB}/api/query" \
+          -H 'Content-Type: application/json' \
+          -d '{"question":"is payment healthy?","context":{"namespace":"payments","service":"payment"}}' \
+          --max-time 15 2>&1)
+        echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+        STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
+        echo "  → status: $STATUS"
+        echo ""
+
+        echo "=== Tier-2 query (triggers Claude if service degraded) ==="
+        RESP2=$(curl -sf -X POST "http://${ALB}/api/query" \
+          -H 'Content-Type: application/json' \
+          -d '{"question":"why is payment-worker having issues?","context":{"namespace":"payments","service":"payment-worker"}}' \
+          --max-time 120 2>&1)
+        echo "$RESP2" | python3 -m json.tool 2>/dev/null || echo "$RESP2"
+        STATUS2=$(echo "$RESP2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
+        echo "  → status: $STATUS2"
+        if [ "$STATUS2" = "partial" ]; then
+          echo "  ⚠ status=partial — agent service unreachable from backend"
+        elif [ "$STATUS2" = "error" ]; then
+          echo "  ⚠ status=error — agent reached but Claude API call failed"
+        fi
+
     - name: Adapter logs (emit + watch errors)
       run: |
         echo "=== Adapter logs — last 50 lines ==="
