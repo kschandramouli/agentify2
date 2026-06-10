@@ -168,7 +168,9 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Tier 2 — agentic synthesis path. Redact at the egress boundary (ADR 0007):
 	// the agent (and the model it calls) only ever sees allowlisted data.
-	agentData := h.redactor.RedactPodData(podData)
+	// trimAgentPayload then reduces token footprint: dedup by entity_key,
+	// drop completed-rollout noise, hard-cap at maxEventsPerPod per pod.
+	agentData := trimAgentPayload(h.redactor.RedactPodData(podData))
 	agentStart := time.Now()
 	agentResp, err := h.agentClient.Reason(req.Question, intent, agentData, req.Context, traceID)
 	telemetry.AgentCallDuration.Observe(time.Since(agentStart).Seconds())
