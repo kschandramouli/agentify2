@@ -20,7 +20,7 @@ func NewAgentClient(baseURL string) *AgentClient {
 	return &AgentClient{
 		baseURL: baseURL,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 180 * time.Second, // Opus 4.8 takes 60-90s; frontend waits 190s
 		},
 	}
 }
