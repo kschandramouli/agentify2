@@ -231,7 +231,6 @@ make test-integration   # Run tests (includes query testing)
 2. **Dynamic Intent**: Let Claude infer intent from question instead of heuristics
 3. **Correlation Queries**: Handle questions that span multiple data sources
 4. **Scheduled Queries**: Support "alert me if X becomes unhealthy"
-5. **Pattern A pre-fetch**: Assemble all data before the single LLM call for simple intents (spec 010 non-goal, deferred)
 
 ## Troubleshooting
 

@@ -134,55 +134,69 @@ Tool iterations recorded in Prometheus: **0**.
 
 ## 4. Pattern B — DiagnoseSkill (`diagnose`) with Advisor/Executor
 
-The executor (Sonnet 4.6) is the primary model and drives the tool loop.
-The advisor (Opus 4.8) is a server-side tool the executor calls for strategic
-guidance — all within a single `beta.messages.create` request per iteration.
+**Same agentic tool loop as K8fyAgent** — the structural difference is the model
+pair and a single extra tool in the list. Sonnet 4.6 (executor) is the primary
+model and makes all K8fy tool calls exactly as Opus does in K8fyAgent. Opus 4.8
+(advisor) is just another entry in `tools` — a server-side tool Sonnet can
+optionally call 0–3 times for strategic guidance. The client never sees the
+advisor sub-inference; it arrives pre-resolved inside the response.
 
 ```mermaid
 sequenceDiagram
     participant Router   as SkillRouter
     participant Skill    as DiagnoseSkill
     participant BE       as Backend API<br/>/api/agent/fetch
-    participant Server   as Anthropic Server
-    participant Sonnet   as Sonnet 4.6<br/>(executor · primary)
-    participant Opus     as Opus 4.8<br/>(advisor · server-side)
+    participant Anthropic as Anthropic Server
 
     Router->>Skill: dispatch("diagnose", data, context)
 
-    Note over Skill: [Pattern B] single beta.messages.create per loop iteration
+    Note over Skill: tools list = [advisor_20260301, get_service_health,<br/>query_pod, get_pod_events, get_pod_logs,<br/>get_metrics_history, get_change_history]
 
-    loop Agentic tool loop (up to max_iterations)
-        Skill->>Server: beta.messages.create<br/>model=sonnet-4-6 · tools=[advisor, get_service_health, …]
-        activate Server
+    loop Agentic tool loop · same structure as K8fyAgent (up to max_iterations)
 
-        Note over Server,Sonnet: Executor turn begins
+        Skill->>Anthropic: beta.messages.create<br/>model=sonnet-4-6 · tools=[advisor + 6 K8fy tools]
 
-        rect rgb(240, 248, 255)
-            Note over Server,Opus: [Server-side advisor sub-inference — no client round-trip]
-            Server->>Opus: advisor tool call<br/>full conversation forwarded automatically
-            Note over Opus: adaptive thinking · max_tokens=2048<br/>produces diagnostic plan / course correction
-            Opus-->>Server: advisor_tool_result (plan text)
+        opt Sonnet chooses to call the advisor tool (0–3 times total across the request)
+            rect rgb(235, 245, 255)
+                Note over Anthropic: Server-side Opus 4.8 sub-inference<br/>Full conversation forwarded automatically<br/>adaptive thinking · max_tokens=2048<br/>advisor_tool_result added to response
+            end
         end
 
-        Server-->>Skill: response with server_tool_use + advisor_tool_result + tool_use blocks
-        deactivate Server
+        Anthropic-->>Skill: response<br/>(may contain advisor_tool_result and/or tool_use blocks)
 
-        alt stop_reason == tool_use  (K8fy tool calls needed)
-            loop For each tool_use block
-                Skill->>BE: /api/agent/fetch {tool, args}
+        alt stop_reason == tool_use  (Sonnet requested K8fy data)
+            loop Execute each tool_use block in parallel
+                Skill->>BE: /api/agent/fetch {tool_name, args}
                 BE-->>Skill: tool result
             end
-            Note over Skill: append assistant turn + tool_results to messages
+            Note over Skill: append full assistant turn + tool_results<br/>(advisor_tool_result blocks passed through verbatim)
         else stop_reason == end_turn
-            Note over Skill: final answer reached
+            Note over Skill: final structured JSON answer
         end
+
     end
 
     Skill-->>Router: AgentResponse {findings, likely_cause, severity, …}
 ```
 
-**Cost profile:** per iteration — Sonnet tokens (executor) + Opus tokens (advisor, billed separately via `usage.iterations`).
-Advisor called up to **3 times** per request (`max_uses=3`). Tool iterations recorded in Prometheus: **actual count**.
+**How this differs from K8fyAgent fallback (Diagram 5):**
+
+| | DiagnoseSkill | K8fyAgent |
+|---|---|---|
+| Primary model | **Sonnet 4.6** (cheaper tool-caller) | **Opus 4.8** |
+| Advisor | **Opus 4.8** server-side tool (optional) | None |
+| Tool subset | 6 domain tools + advisor | All 7 tools, no advisor |
+| System prompt | Crash / causal correlation expert | General K8fy operations |
+| API | `client.beta.messages.create` | `client.messages.create` |
+| Billing | Sonnet rates + separate Opus advisor rates | Opus rates only |
+
+The tool loop body is structurally identical. The extra box (advisor) only
+appears when Sonnet decides to consult it — typically once before committing to
+a diagnostic sequence and optionally once before the final answer.
+
+**Cost profile:** Sonnet tokens (executor) + Opus tokens (advisor, reported
+separately in `usage.iterations` as `type: "advisor_message"`).
+Advisor called up to **3 times** per request. Tool iterations in Prometheus: **actual count**.
 
 ---
 
