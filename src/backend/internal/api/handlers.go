@@ -503,14 +503,46 @@ func toolCallNames(calls []AgentToolCall) []string {
 	return names
 }
 
-// formatPodData converts pod results to a human-readable string.
+// formatPodData returns a brief human-readable summary of the fetched pod data.
+// Called only when the agent service is unavailable; output is shown as the
+// fallback answer so the user knows data was fetched but reasoning is missing.
 func formatPodData(podData map[string]interface{}) string {
-	var result strings.Builder
-	result.WriteString("Query Results:\n")
-	for podID, data := range podData {
-		result.WriteString(fmt.Sprintf("  Pod %s: %+v\n", podID, data))
+	var sb strings.Builder
+	sb.WriteString("Agent service unavailable — raw data collected but not analysed by Claude.\n\n")
+
+	for podID, raw := range podData {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		events, _ := m["data"].([]interface{})
+		sb.WriteString(fmt.Sprintf("• %s  (%d events)\n", podID, len(events)))
+		for _, e := range events {
+			ev, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			payload, _ := ev["payload"].(map[string]interface{})
+			evType, _ := ev["type"].(string)
+			entityKey, _ := ev["entity_key"].(string)
+
+			switch evType {
+			case "pod_modified", "pod_added", "pod_deleted":
+				restarts, _ := payload["restarts"].(float64)
+				ready, _ := payload["ready"].(bool)
+				phase, _ := payload["phase"].(string)
+				sb.WriteString(fmt.Sprintf(
+					"  – %s  %-12s  phase=%-10s  ready=%-5v  restarts=%.0f\n",
+					evType, entityKey, phase, ready, restarts,
+				))
+			case "service_added":
+				clusterIP, _ := payload["cluster_ip"].(string)
+				sb.WriteString(fmt.Sprintf("  – %s  %s  ip=%s\n", evType, entityKey, clusterIP))
+			}
+		}
+		sb.WriteByte('\n')
 	}
-	return result.String()
+	return sb.String()
 }
 
 // extractPodIDs extracts pod IDs from a slice of pods.

@@ -8,8 +8,10 @@ import { SearchInput } from "./SearchInput";
 import { HealthCard } from "./HealthCard";
 import { CertCard } from "./CertCard";
 
-// Statuses that warrant escalating to Tier-2 (Claude Opus)
-const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error"]);
+// Statuses that warrant escalating to Tier-2 (Claude Opus).
+// "partial" means the agent was already attempted but unavailable — still show
+// the diagnosis section so the AgentUnavailableBanner is rendered.
+const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error", "partial"]);
 
 // ── Input parser ──────────────────────────────────────────────────────────────
 // Accepts K8s-style free text in these formats:
@@ -99,6 +101,32 @@ function CheckCard({ result }: { result: CheckResult }) {
   );
 }
 
+function AgentUnavailableBanner({ answer }: { answer: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="check-card check-card--warn">
+      <div className="check-card__header">
+        <span className="check-card__icon">⚠</span>
+        <span className="check-card__label">Claude agent unavailable</span>
+      </div>
+      <p className="check-card__answer">
+        Data was fetched from the cluster but could not be analysed — the agent
+        service is not reachable. Start it with{" "}
+        <code>cd src/agent && python main.py</code> and retry.
+      </p>
+      <button
+        type="button"
+        className="eval-options__info"
+        style={{ marginTop: 6 }}
+        onClick={() => setExpanded(v => !v)}
+      >
+        {expanded ? "▾" : "▸"} Show raw data
+      </button>
+      {expanded && <pre className="check-card__raw">{answer}</pre>}
+    </div>
+  );
+}
+
 function DiagnosisCard({
   resp, durationMs, error,
 }: { resp?: QueryResponse; durationMs?: number; error?: string }) {
@@ -109,6 +137,7 @@ function DiagnosisCard({
     </div>
   );
   if (!resp) return null;
+  if (resp.status === "partial") return <AgentUnavailableBanner answer={resp.answer} />;
   const d = resp.details ?? {};
   const sev = statusToSev(d.severity ?? resp.status);
   return (

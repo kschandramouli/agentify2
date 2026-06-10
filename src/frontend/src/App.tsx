@@ -1,5 +1,4 @@
 import { ServiceEvaluator } from "./components/ServiceEvaluator";
-import { PodsTable } from "./components/PodsTable";
 
 export function App() {
   return (
@@ -10,7 +9,6 @@ export function App() {
       </header>
       <main className="app__main">
         <ServiceEvaluator />
-        <PodsTable />
       </main>
     </div>
   );
