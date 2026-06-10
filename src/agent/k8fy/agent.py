@@ -192,10 +192,10 @@ class K8fyAgent:
                 tool_calls=tool_calls_made,
             )
 
-        except Exception as e:  # noqa: BLE001 - surface any failure as a degraded response
+        except Exception as e:  # noqa: BLE001
             logger.error("agent reasoning failed: %s", e)
             metrics.record_request("error")
-            return AgentResponse(answer=f"Error during reasoning: {e}", confidence=0.0)
+            return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
 
     # ------------------------------------------------------------------
     # Advisor/executor path — built-in advisor_20260301 server-side tool
@@ -313,7 +313,7 @@ class K8fyAgent:
         except Exception as e:  # noqa: BLE001
             logger.error("advisor/executor reasoning failed: %s", e)
             metrics.record_request("error")
-            return AgentResponse(answer=f"Error during reasoning: {e}", confidence=0.0)
+            return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
 
     # ------------------------------------------------------------------
     # Pattern A — pre-fetch then single call
@@ -370,7 +370,7 @@ class K8fyAgent:
         except Exception as e:  # noqa: BLE001
             logger.error("pattern-a reasoning failed: %s", e)
             metrics.record_request("error")
-            return AgentResponse(answer=f"Error during reasoning: {e}", confidence=0.0)
+            return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -422,6 +422,18 @@ class K8fyAgent:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+def _user_error_message(e: Exception) -> str:
+    """Return a user-facing error message that never leaks raw API responses."""
+    s = str(e)
+    if "rate_limit" in s or "429" in s:
+        return "Rate limit reached — too many requests in flight. Please wait a moment and try again."
+    if "timeout" in s.lower() or "timed out" in s.lower():
+        return "Request timed out — the query took too long. Try a more specific question or retry."
+    if "overloaded" in s.lower() or "529" in s:
+        return "The AI service is temporarily overloaded. Please retry in a few seconds."
+    return "Analysis failed — an unexpected error occurred. Please try again."
+
 
 def _record_loop_usage(
     response,

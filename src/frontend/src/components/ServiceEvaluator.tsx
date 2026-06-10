@@ -9,8 +9,8 @@ import { HealthCard } from "./HealthCard";
 import { CertCard } from "./CertCard";
 
 // Statuses that warrant escalating to Tier-2 (Claude Opus).
-// "partial" means the agent was already attempted but unavailable — still show
-// the diagnosis section so the AgentUnavailableBanner is rendered.
+// "partial" = agent unreachable (Go fallback) — show AgentUnavailableBanner.
+// "error"   = agent ran but Claude API failed — show Analysis failed card.
 const NEEDS_CLAUDE: Set<string> = new Set(["degraded", "unhealthy", "error", "partial"]);
 
 // ── Input parser ──────────────────────────────────────────────────────────────
@@ -138,6 +138,15 @@ function DiagnosisCard({
   );
   if (!resp) return null;
   if (resp.status === "partial") return <AgentUnavailableBanner answer={resp.answer} />;
+  if (resp.status === "error") return (
+    <div className="diagnosis-card diagnosis-card--crit">
+      <div className="diagnosis-card__header">
+        <h3>Analysis failed</h3>
+        <TierTag tier={2} ms={durationMs} />
+      </div>
+      <p className="diagnosis-card__answer">{resp.answer}</p>
+    </div>
+  );
   const d = resp.details ?? {};
   const sev = statusToSev(d.severity ?? resp.status);
   return (

@@ -505,17 +505,38 @@ func toolCallNames(calls []AgentToolCall) []string {
 
 // formatPodData returns a brief human-readable summary of the fetched pod data.
 // Called only when the agent service is unavailable; output is shown as the
-// fallback answer so the user knows data was fetched but reasoning is missing.
+// fallback answer so the user knows what data was fetched but not analysed.
 func formatPodData(podData map[string]interface{}) string {
 	var sb strings.Builder
-	sb.WriteString("Agent service unavailable — raw data collected but not analysed by Claude.\n\n")
 
+	// Count total events across all pods to distinguish "no data found" from
+	// "data found but Claude couldn't process it".
+	totalEvents := 0
+	for _, raw := range podData {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		events, _ := m["data"].([]interface{})
+		totalEvents += len(events)
+	}
+
+	if totalEvents == 0 {
+		sb.WriteString("No data found for this service. Check that the namespace and service name are correct, " +
+			"and that the adapter is syncing this namespace.")
+		return sb.String()
+	}
+
+	sb.WriteString("Agent service unavailable — data was collected but not analysed by Claude.\n\n")
 	for podID, raw := range podData {
 		m, ok := raw.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		events, _ := m["data"].([]interface{})
+		if len(events) == 0 {
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("• %s  (%d events)\n", podID, len(events)))
 		for _, e := range events {
 			ev, ok := e.(map[string]interface{})
