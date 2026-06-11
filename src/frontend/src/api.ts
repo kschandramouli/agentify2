@@ -189,6 +189,44 @@ export async function deleteIntegration(id: string): Promise<void> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 }
 
+// ── Query History (traces) ────────────────────────────────────────────────────
+
+export interface TraceRecord {
+  id: string;
+  trace_id: string;
+  question: string;
+  intent: string;
+  namespace: string;
+  tier: string;
+  status: string;
+  confidence: number;
+  sources: string[];
+  tool_calls: string[];
+  latency_ms: number;
+  created_at: string;
+}
+
+export function listTraces(): Promise<TraceRecord[]> {
+  return getJSON<TraceRecord[]>("/admin/traces");
+}
+
+// ── Metrics summary ───────────────────────────────────────────────────────────
+
+export interface MetricsSummary {
+  total_queries: number;
+  last_24h_count: number;
+  queries_by_tier: Record<string, number>;
+  queries_by_status: Record<string, number>;
+  queries_by_intent: Record<string, number>;
+  avg_agent_latency_ms: number;
+  p95_agent_latency_ms: number;
+  collected_at: string;
+}
+
+export function getMetricsSummary(): Promise<MetricsSummary> {
+  return getJSON<MetricsSummary>("/admin/metrics/summary");
+}
+
 export interface SyncResult {
   namespaces: { namespace: string; services: string[]; service_count: number }[];
   suggestions: string[];

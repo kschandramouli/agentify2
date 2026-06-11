@@ -76,6 +76,24 @@ func (c *Client) initSchema(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_current_state_pod ON current_state(pod_id);
 
+	-- Query traces: persisted per-query provenance records (spec 004).
+	CREATE TABLE IF NOT EXISTS traces (
+		id TEXT PRIMARY KEY,
+		trace_id TEXT NOT NULL,
+		question TEXT NOT NULL,
+		intent TEXT NOT NULL DEFAULT '',
+		namespace TEXT NOT NULL DEFAULT '',
+		tier TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT '',
+		confidence FLOAT NOT NULL DEFAULT 0,
+		sources JSONB NOT NULL DEFAULT '[]',
+		tool_calls JSONB NOT NULL DEFAULT '[]',
+		latency_ms BIGINT NOT NULL DEFAULT 0,
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_traces_created ON traces(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_traces_intent  ON traces(intent);
+
 	-- Admin integrations: configured K8s adapter connections.
 	CREATE TABLE IF NOT EXISTS integrations (
 		id TEXT PRIMARY KEY,
@@ -217,6 +235,139 @@ func (c *Client) HealthCheck(ctx context.Context) error { return c.db.PingContex
 
 // Close closes the shared connection pool (owns the DB lifecycle).
 func (c *Client) Close() error { return c.db.Close() }
+
+// --- Traces (query history) ---
+
+// TraceRecord is one persisted query provenance entry.
+type TraceRecord struct {
+	ID         string
+	TraceID    string
+	Question   string
+	Intent     string
+	Namespace  string
+	Tier       string
+	Status     string
+	Confidence float64
+	Sources    []string
+	ToolCalls  []string
+	LatencyMs  int64
+	CreatedAt  time.Time
+}
+
+// TracesSummary holds aggregated statistics derived from the traces table.
+type TracesSummary struct {
+	TotalQueries      int64
+	QueriesByTier     map[string]int64
+	QueriesByStatus   map[string]int64
+	QueriesByIntent   map[string]int64
+	AvgAgentLatencyMs float64
+	P95AgentLatencyMs float64
+	Last24hCount      int64
+}
+
+// InsertTrace persists one query trace row. Errors are logged by the caller.
+func (c *Client) InsertTrace(ctx context.Context, t TraceRecord) error {
+	srcJSON, _ := json.Marshal(t.Sources)
+	tcJSON, _ := json.Marshal(t.ToolCalls)
+	_, err := c.db.ExecContext(ctx,
+		`INSERT INTO traces (id, trace_id, question, intent, namespace, tier, status,
+		  confidence, sources, tool_calls, latency_ms, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+		 ON CONFLICT (id) DO NOTHING`,
+		t.ID, t.TraceID, t.Question, t.Intent, t.Namespace, t.Tier, t.Status,
+		t.Confidence, srcJSON, tcJSON, t.LatencyMs)
+	return err
+}
+
+// ListTraces returns the most recent traces (newest first), capped at limit.
+func (c *Client) ListTraces(ctx context.Context, limit int) ([]TraceRecord, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT id, trace_id, question, intent, namespace, tier, status,
+		        confidence, sources, tool_calls, latency_ms, created_at
+		 FROM traces ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list traces: %w", err)
+	}
+	defer rows.Close()
+
+	var result []TraceRecord
+	for rows.Next() {
+		var t TraceRecord
+		var srcJSON, tcJSON []byte
+		if err := rows.Scan(&t.ID, &t.TraceID, &t.Question, &t.Intent, &t.Namespace,
+			&t.Tier, &t.Status, &t.Confidence, &srcJSON, &tcJSON, &t.LatencyMs, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan trace: %w", err)
+		}
+		_ = json.Unmarshal(srcJSON, &t.Sources)
+		_ = json.Unmarshal(tcJSON, &t.ToolCalls)
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// GetTracesSummary returns aggregated query statistics for the metrics dashboard.
+func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
+	s := &TracesSummary{
+		QueriesByTier:   make(map[string]int64),
+		QueriesByStatus: make(map[string]int64),
+		QueriesByIntent: make(map[string]int64),
+	}
+
+	// Total + last 24h
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN created_at > NOW()-INTERVAL '24 hours' THEN 1 ELSE 0 END),0)
+		 FROM traces`).Scan(&s.TotalQueries, &s.Last24hCount); err != nil {
+		return nil, fmt.Errorf("summary totals: %w", err)
+	}
+
+	// By tier
+	tierRows, err := c.db.QueryContext(ctx, `SELECT tier, COUNT(*) FROM traces GROUP BY tier`)
+	if err == nil {
+		defer tierRows.Close()
+		for tierRows.Next() {
+			var k string; var v int64
+			if tierRows.Scan(&k, &v) == nil {
+				s.QueriesByTier[k] = v
+			}
+		}
+	}
+
+	// By status
+	statusRows, err := c.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM traces GROUP BY status`)
+	if err == nil {
+		defer statusRows.Close()
+		for statusRows.Next() {
+			var k string; var v int64
+			if statusRows.Scan(&k, &v) == nil {
+				s.QueriesByStatus[k] = v
+			}
+		}
+	}
+
+	// By intent
+	intentRows, err := c.db.QueryContext(ctx, `SELECT intent, COUNT(*) FROM traces GROUP BY intent`)
+	if err == nil {
+		defer intentRows.Close()
+		for intentRows.Next() {
+			var k string; var v int64
+			if intentRows.Scan(&k, &v) == nil {
+				s.QueriesByIntent[k] = v
+			}
+		}
+	}
+
+	// Avg + P95 agent latency (tier2 only)
+	c.db.QueryRowContext(ctx,
+		`SELECT COALESCE(AVG(latency_ms),0),
+		        COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms),0)
+		 FROM traces WHERE tier='tier2'`).
+		Scan(&s.AvgAgentLatencyMs, &s.P95AgentLatencyMs)
+
+	return s, nil
+}
 
 // --- Integrations (admin CRUD) ---
 

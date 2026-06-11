@@ -28,11 +28,12 @@ type Handler struct {
 	adapterClient    *AdapterClient
 	redactor         *governance.Redactor
 	integrationStore IntegrationStore // nil when postgres is not provisioned
+	traceStore       TraceStore       // nil when postgres is not provisioned
 	logger           *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -44,6 +45,7 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		adapterClient:    NewAdapterClient(adapterURL, adapterToken),
 		redactor:         redactor,
 		integrationStore: integrations,
+		traceStore:       traces,
 		logger:           logger,
 	}
 }
@@ -641,9 +643,10 @@ func buildPodQuery(reqContext map[string]interface{}) map[string]interface{} {
 	return query
 }
 
-// logTrace emits the per-query provenance record (spec 004). v1 is a structured
-// log line; app-level retrieval-by-id is a documented follow-up.
+// logTrace emits the per-query provenance record (spec 004): structured log +
+// async Postgres insert so the HTTP response is never blocked.
 func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status string, sources []string, confidence float64, toolCalls []string, start time.Time) {
+	latencyMs := time.Since(start).Milliseconds()
 	h.logger.Info("query.trace",
 		"trace_id", traceID,
 		"question", question,
@@ -654,8 +657,81 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 		"sources", sources,
 		"confidence", confidence,
 		"tool_calls", toolCalls,
-		"latency_ms", time.Since(start).Milliseconds(),
+		"latency_ms", latencyMs,
 	)
+	if h.traceStore != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := h.traceStore.InsertTrace(ctx, pgstore.TraceRecord{
+				ID:         uuid.New().String(),
+				TraceID:    traceID,
+				Question:   question,
+				Intent:     intent,
+				Namespace:  namespace,
+				Tier:       tier,
+				Status:     status,
+				Confidence: confidence,
+				Sources:    sources,
+				ToolCalls:  toolCalls,
+				LatencyMs:  latencyMs,
+			}); err != nil {
+				h.logger.Warn("trace persist failed", "error", err)
+			}
+		}()
+	}
+}
+
+// HandleTraceList returns recent query traces for the admin history view.
+func (h *Handler) HandleTraceList(w http.ResponseWriter, r *http.Request) {
+	if h.traceStore == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]TraceResponse{})
+		return
+	}
+	rows, err := h.traceStore.ListTraces(r.Context(), 200)
+	if err != nil {
+		h.logger.Error("list traces failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	resp := make([]TraceResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = traceToResponse(row)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// HandleMetricsSummary returns aggregated query statistics for the metrics dashboard.
+func (h *Handler) HandleMetricsSummary(w http.ResponseWriter, r *http.Request) {
+	if h.traceStore == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(MetricsSummaryResponse{
+			QueriesByTier:   map[string]int64{},
+			QueriesByStatus: map[string]int64{},
+			QueriesByIntent: map[string]int64{},
+			CollectedAt:     time.Now(),
+		})
+		return
+	}
+	s, err := h.traceStore.GetTracesSummary(r.Context())
+	if err != nil {
+		h.logger.Error("metrics summary failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(MetricsSummaryResponse{
+		TotalQueries:      s.TotalQueries,
+		Last24hCount:      s.Last24hCount,
+		QueriesByTier:     s.QueriesByTier,
+		QueriesByStatus:   s.QueriesByStatus,
+		QueriesByIntent:   s.QueriesByIntent,
+		AvgAgentLatencyMs: s.AvgAgentLatencyMs,
+		P95AgentLatencyMs: s.P95AgentLatencyMs,
+		CollectedAt:       time.Now(),
+	})
 }
 
 // toolCallNames extracts the tool names the agent invoked, for the trace.

@@ -23,6 +23,10 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// Agent tool callback: lets the Python agent fetch pod data during its loop
 	mux.HandleFunc("POST /api/agent/fetch", h.HandleAgentFetch)
 
+	// Admin: query history + metrics summary
+	mux.HandleFunc("GET /admin/traces", h.HandleTraceList)
+	mux.HandleFunc("GET /admin/metrics/summary", h.HandleMetricsSummary)
+
 	// Admin: integrations management
 	mux.HandleFunc("GET /admin/integrations", h.HandleIntegrationList)
 	mux.HandleFunc("POST /admin/integrations", h.HandleIntegrationCreate)

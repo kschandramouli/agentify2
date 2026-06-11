@@ -7,6 +7,58 @@ import (
 	pgstore "github.com/chan/agentify/backend/internal/storage/postgres"
 )
 
+// TraceStore is the query-history CRUD interface implemented by the Postgres client.
+type TraceStore interface {
+	InsertTrace(ctx context.Context, t pgstore.TraceRecord) error
+	ListTraces(ctx context.Context, limit int) ([]pgstore.TraceRecord, error)
+	GetTracesSummary(ctx context.Context) (*pgstore.TracesSummary, error)
+}
+
+// TraceResponse is the API representation of one query trace row.
+type TraceResponse struct {
+	ID         string    `json:"id"`
+	TraceID    string    `json:"trace_id"`
+	Question   string    `json:"question"`
+	Intent     string    `json:"intent"`
+	Namespace  string    `json:"namespace"`
+	Tier       string    `json:"tier"`
+	Status     string    `json:"status"`
+	Confidence float64   `json:"confidence"`
+	Sources    []string  `json:"sources"`
+	ToolCalls  []string  `json:"tool_calls"`
+	LatencyMs  int64     `json:"latency_ms"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// MetricsSummaryResponse is returned by GET /admin/metrics/summary.
+type MetricsSummaryResponse struct {
+	TotalQueries      int64            `json:"total_queries"`
+	Last24hCount      int64            `json:"last_24h_count"`
+	QueriesByTier     map[string]int64 `json:"queries_by_tier"`
+	QueriesByStatus   map[string]int64 `json:"queries_by_status"`
+	QueriesByIntent   map[string]int64 `json:"queries_by_intent"`
+	AvgAgentLatencyMs float64          `json:"avg_agent_latency_ms"`
+	P95AgentLatencyMs float64          `json:"p95_agent_latency_ms"`
+	CollectedAt       time.Time        `json:"collected_at"`
+}
+
+func traceToResponse(t pgstore.TraceRecord) TraceResponse {
+	src := t.Sources
+	if src == nil {
+		src = []string{}
+	}
+	tc := t.ToolCalls
+	if tc == nil {
+		tc = []string{}
+	}
+	return TraceResponse{
+		ID: t.ID, TraceID: t.TraceID, Question: t.Question, Intent: t.Intent,
+		Namespace: t.Namespace, Tier: t.Tier, Status: t.Status,
+		Confidence: t.Confidence, Sources: src, ToolCalls: tc,
+		LatencyMs: t.LatencyMs, CreatedAt: t.CreatedAt,
+	}
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.
