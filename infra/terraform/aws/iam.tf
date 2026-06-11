@@ -167,7 +167,10 @@ resource "aws_iam_role_policy" "ci" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # ECR: push images
+      # ECR: create repos + push images.
+      # GetAuthorizationToken is account-level (no resource ARN).
+      # Repo-level actions use a prefix wildcard so adding new agentify/* repos
+      # never requires a terraform apply to update this policy.
       {
         Effect   = "Allow"
         Action   = ["ecr:GetAuthorizationToken"]
@@ -176,11 +179,13 @@ resource "aws_iam_role_policy" "ci" {
       {
         Effect = "Allow"
         Action = [
+          "ecr:DescribeRepositories",
+          "ecr:CreateRepository",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload", "ecr:PutImage",
         ]
-        Resource = [for r in aws_ecr_repository.this : r.arn]
+        Resource = "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.this.account_id}:repository/agentify/*"
       },
       # IAM: read role ARNs for IRSA substitution in manifests during deploy
       {
