@@ -37,6 +37,18 @@ jobs:
         role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
         aws-region: ${{ secrets.AWS_REGION }}
 
+    - name: Ensure ECR repos exist
+      run: |
+        for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend; do
+          aws ecr describe-repositories --repository-names "$repo" \
+            --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 \
+          || aws ecr create-repository --repository-name "$repo" \
+            --region ${{ secrets.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE
+          echo "$repo ready"
+        done
+
     - name: Login to ECR
       id: ecr_login
       uses: aws-actions/amazon-ecr-login@v2
