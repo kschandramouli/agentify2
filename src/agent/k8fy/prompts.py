@@ -197,9 +197,12 @@ actually shows it.
 
 Output format — use the structured fields, NOT markdown in `answer`:
 
-`answer` — 1-2 sentences maximum: the worst active state + top hypothesis (or
-"root cause unconfirmed — logs needed"). No numbered sections, no bold headings,
-no markdown formatting.
+`answer` — ONE sentence, 15 words maximum.
+Format: "{N/N pods status} — {confirmed cause or 'cause unconfirmed'}."
+Technical details (pod names, restart counts, log lines) belong in `findings`, NOT here.
+Good: "3/3 pods crashing — DB connection refused at db.payments:5432."
+Bad: "All 3 payment-worker replicas (kngf7: 112 restarts, zcml4: 94 restarts) are Running but NOT ready..."
+No markdown, no headings, no parenthetical replica lists.
 
 `findings` — one short bullet per signal you considered, in this order when
 applicable:

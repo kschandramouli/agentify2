@@ -329,7 +329,7 @@ code {
   color: #79d88a;
 }
 
-/* ── Diagnosis card ── */
+/* ── Diagnosis card (shell — left-border + bg) ── */
 .diagnosis-card {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -341,37 +341,156 @@ code {
 .diagnosis-card--crit { border-left: 3px solid #e98080; }
 .diagnosis-card--error { border-left: 3px solid #e98080; }
 
-.diagnosis-card__header {
+/* Header row */
+.dc-header {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
-.diagnosis-card__header h3 { margin: 0; font-size: 14px; font-weight: 700; }
+.dc-header h3 { margin: 0; font-size: 14px; font-weight: 700; }
 
-.diagnosis-card__answer {
-  font-size: 14px;
-  line-height: 1.6;
-  margin: 0 0 14px;
+/* Severity icon */
+.dc-icon { font-size: 15px; font-weight: 700; width: 20px; text-align: center; flex-shrink: 0; }
+.dc-icon--ok   { color: #79d88a; }
+.dc-icon--warn { color: #e3c267; }
+.dc-icon--crit { color: #e98080; }
+.dc-icon--muted { color: var(--muted); }
+
+/* Confidence % */
+.dc-conf { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+/* Summary callout — headline answer */
+.dc-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 11px 14px;
+  border-radius: 6px;
 }
+.dc-summary--ok   { background: rgba(121,216,138,0.07); border: 1px solid rgba(121,216,138,0.18); }
+.dc-summary--warn { background: rgba(227,194,103,0.07); border: 1px solid rgba(227,194,103,0.18); }
+.dc-summary--crit { background: rgba(233,128,128,0.07); border: 1px solid rgba(233,128,128,0.18); }
+.dc-summary--muted { background: rgba(255,255,255,0.03); border: 1px solid var(--border); }
 
-.diagnosis-card__section { margin-bottom: 14px; }
-.diagnosis-card__section-label {
-  display: block;
-  font-size: 11px;
+.dc-sev-pill {
+  flex-shrink: 0;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  margin-bottom: 6px;
+  letter-spacing: 0.07em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  align-self: center;
 }
-.diagnosis-card__section p { margin: 0; font-size: 13px; line-height: 1.5; }
-.diagnosis-card__section ul,
-.diagnosis-card__section ol { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+.dc-sev-pill--ok   { background: #16351f; color: #79d88a; }
+.dc-sev-pill--warn { background: #3a3216; color: #e3c267; }
+.dc-sev-pill--crit { background: #3a1d1d; color: #e98080; }
+.dc-sev-pill--muted { background: #2a2f3a; color: var(--muted); }
 
-.diagnosis-card__findings li { color: var(--text); }
-.diagnosis-card__actions li { margin-bottom: 4px; line-height: 1.6; }
+.dc-summary__text {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* Section label */
+.dc-section { margin-bottom: 14px; }
+.dc-section__label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+
+/* Evidence list */
+.dc-findings {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dc-finding {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid transparent;
+}
+.dc-finding::before {
+  content: "·";
+  color: var(--muted);
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+/* Log/error excerpt — monospace + red tint */
+.dc-finding--log {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: rgba(233,128,128,0.06);
+  border-color: rgba(233,128,128,0.18);
+  color: #e98080;
+}
+.dc-finding--log::before { color: #e98080; }
+
+/* Likely cause box */
+.dc-cause {
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 10px 14px;
+  background: rgba(110,168,254,0.06);
+  border: 1px solid rgba(110,168,254,0.18);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+/* Recommended actions */
+.dc-actions {
+  padding-left: 20px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.dc-actions li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  padding: 2px 0;
+}
+.dc-actions li code { font-size: 11.5px; }
+
+/* Footer */
+.dc-footer {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
 
 .eval-results__no-llm {
   font-size: 11px;
@@ -382,15 +501,17 @@ code {
   border-radius: 999px;
 }
 
-.diagnosis-card__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--muted);
+/* ── Tier-2 check card summary box (change history, restart trend) ── */
+.check-card__summary {
+  margin: 9px 0 0 28px;
+  padding: 9px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 .answer__confidence { color: var(--muted); font-size: 13px; }

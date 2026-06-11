@@ -164,69 +164,96 @@ function DiagnosisCard({
 }) {
   if (error) return (
     <div className="diagnosis-card diagnosis-card--crit">
-      <h3>Diagnosis failed</h3>
-      <p className="error">{error}</p>
+      <div className="dc-header"><span className="dc-icon dc-icon--crit">✕</span><h3>Diagnosis failed</h3></div>
+      <p className="error" style={{ marginLeft: 28 }}>{error}</p>
     </div>
   );
   if (!resp) return null;
   if (resp.status === "partial") return <AgentUnavailableBanner answer={resp.answer} />;
   if (resp.status === "error") return (
     <div className="diagnosis-card diagnosis-card--crit">
-      <div className="diagnosis-card__header">
+      <div className="dc-header">
+        <span className="dc-icon dc-icon--crit">✕</span>
         <h3>Analysis failed</h3>
         <TierTag tier={2} ms={durationMs} />
       </div>
-      <p className="diagnosis-card__answer">{resp.answer}</p>
+      <div className="dc-summary dc-summary--crit">
+        <span className="dc-summary__text">{resp.answer}</span>
+      </div>
     </div>
   );
+
   const d = resp.details ?? {};
   const sev = statusToSev(d.severity ?? resp.status);
+  const sevIcon = sev === "ok" ? "✓" : sev === "warn" ? "▲" : sev === "crit" ? "✕" : "–";
+  const conf = Math.round(resp.confidence * 100);
+
+  // Heuristic: findings that look like log/error lines get code styling.
+  // Matches lines with error-ish keywords AND a colon (error: "msg") pattern.
+  const isLogFinding = (f: string) =>
+    /\b(log|dial|connect|refused|panic|oom|killed|error|failed|exit|timeout)\b/i.test(f) &&
+    (f.includes(":") || f.includes('"') || f.includes("'"));
+
   return (
     <div className={`diagnosis-card diagnosis-card--${sev}`}>
-      <div className="diagnosis-card__header">
+      {/* Header row */}
+      <div className="dc-header">
+        <span className={`dc-icon dc-icon--${sev}`}>{sevIcon}</span>
         <h3>Diagnosis</h3>
         {fromCache ? (
-          <span className="cache-tag">
-            Cached · {Math.round((cacheAgeMs ?? 0) / 60000)}m ago
-          </span>
+          <span className="cache-tag">Cached · {Math.round((cacheAgeMs ?? 0) / 60000)}m ago</span>
         ) : (
           <TierTag tier={2} ms={durationMs} />
         )}
-        {d.severity && <Badge status={d.severity} />}
-        <span className="answer__confidence">{(resp.confidence * 100).toFixed(0)}% confidence</span>
+        {conf > 0 && <span className="dc-conf">{conf}%</span>}
         {fromCache && onRerun && (
           <button className="rerun-btn" type="button" onClick={onRerun}>Rerun</button>
         )}
       </div>
-      <p className="diagnosis-card__answer">{resp.answer}</p>
+
+      {/* Summary callout — 1-sentence headline */}
+      <div className={`dc-summary dc-summary--${sev}`}>
+        {d.severity && (
+          <span className={`dc-sev-pill dc-sev-pill--${sev}`}>{d.severity}</span>
+        )}
+        <span className="dc-summary__text">{resp.answer}</span>
+      </div>
+
+      {/* Evidence (findings[]) */}
       {!!d.findings?.length && (
-        <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">Evidence</span>
-          <ul className="diagnosis-card__findings">
-            {d.findings.map((f, i) => <li key={i}>{f}</li>)}
+        <div className="dc-section">
+          <span className="dc-section__label">Evidence</span>
+          <ul className="dc-findings">
+            {d.findings.map((f, i) => (
+              <li key={i} className={`dc-finding${isLogFinding(f) ? " dc-finding--log" : ""}`}>
+                {f}
+              </li>
+            ))}
           </ul>
         </div>
       )}
+
+      {/* Likely cause */}
       {d.likely_cause && (
-        <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">Likely cause</span>
-          <p>{d.likely_cause}</p>
+        <div className="dc-section">
+          <span className="dc-section__label">Likely cause</span>
+          <div className="dc-cause">{d.likely_cause}</div>
         </div>
       )}
+
+      {/* Recommended actions */}
       {!!d.recommendations?.length && (
-        <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">Suggested actions</span>
-          <ol className="diagnosis-card__actions">
+        <div className="dc-section">
+          <span className="dc-section__label">Suggested actions</span>
+          <ol className="dc-actions">
             {d.recommendations.map((r, i) => <li key={i}>{r}</li>)}
           </ol>
         </div>
       )}
-      {/* Tool calls — shows which data Claude fetched to build this answer */}
-      {!!resp.tool_calls?.length && (
-        <div className="diagnosis-card__section">
-          <span className="diagnosis-card__section-label">
-            Tools called by Claude ({resp.tool_calls.length})
-          </span>
+
+      {/* Footer: tools used + provenance */}
+      <div className="dc-footer">
+        {!!resp.tool_calls?.length && (
           <div className="tool-calls">
             {resp.tool_calls.map((t, i) => (
               <span key={i} className="tool-call-badge" title={JSON.stringify(t.arguments, null, 2)}>
@@ -234,13 +261,13 @@ function DiagnosisCard({
               </span>
             ))}
           </div>
-        </div>
-      )}
-      <div className="diagnosis-card__meta">
-        {resp.sources.length > 0 && (
-          <span>sources: {resp.sources.map(s => <code key={s}>{s}</code>)}</span>
         )}
-        {resp.trace_id && <span>trace: <code>{resp.trace_id}</code></span>}
+        <div className="dc-meta">
+          {resp.sources.length > 0 && (
+            <span>sources: {resp.sources.map(s => <code key={s}>{s}</code>)}</span>
+          )}
+          {resp.trace_id && <span>trace: <code>{resp.trace_id}</code></span>}
+        </div>
       </div>
     </div>
   );
@@ -268,7 +295,7 @@ function Tier2CheckCard({ label, description, resp, durationMs, error, pending }
       {error && <p className="check-card__answer error">{error}</p>}
       {resp && (
         <>
-          {resp.answer && <p className="check-card__answer">{resp.answer}</p>}
+          {resp.answer && <div className="check-card__summary">{resp.answer}</div>}
           {!!resp.details?.findings?.length && (
             <ul className="check-card__timeline">
               {resp.details.findings.map((f, i) => <li key={i}>{f}</li>)}
