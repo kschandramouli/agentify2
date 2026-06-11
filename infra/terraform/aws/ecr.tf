@@ -4,7 +4,9 @@
 # the EKS module automatically).
 
 locals {
-  ecr_repos = ["backend", "agent", "k8fy-adapter", "frontend"]
+  ecr_repos = ["backend", "agent", "k8fy-adapter"]
+  # frontend ECR repo is created by the deploy pipeline (not Terraform) so the
+  # first deploy is self-contained without a manual terraform apply.
 }
 
 resource "aws_ecr_repository" "this" {
