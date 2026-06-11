@@ -75,6 +75,18 @@ func (c *Client) initSchema(ctx context.Context) error {
 		PRIMARY KEY (pod_id, entity_key)
 	);
 	CREATE INDEX IF NOT EXISTS idx_current_state_pod ON current_state(pod_id);
+
+	-- Admin integrations: configured K8s adapter connections.
+	CREATE TABLE IF NOT EXISTS integrations (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		adapter_url TEXT NOT NULL,
+		namespaces JSONB NOT NULL DEFAULT '[]',
+		status TEXT NOT NULL DEFAULT 'inactive',
+		token TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMP DEFAULT NOW(),
+		updated_at TIMESTAMP DEFAULT NOW()
+	);
 	`
 	if _, err := c.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -205,6 +217,104 @@ func (c *Client) HealthCheck(ctx context.Context) error { return c.db.PingContex
 
 // Close closes the shared connection pool (owns the DB lifecycle).
 func (c *Client) Close() error { return c.db.Close() }
+
+// --- Integrations (admin CRUD) ---
+
+// Integration is the storage-layer representation of an admin integration.
+// Token is stored plaintext in Postgres for the prototype; in production it
+// should be a reference to a Secrets Manager secret ID.
+type Integration struct {
+	ID         string
+	Name       string
+	AdapterURL string
+	Namespaces []string
+	Status     string
+	Token      string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// ListIntegrations returns all integrations ordered by creation time.
+func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT id, name, adapter_url, namespaces, status, token, created_at, updated_at
+		 FROM integrations ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list integrations: %w", err)
+	}
+	defer rows.Close()
+
+	var result []Integration
+	for rows.Next() {
+		var in Integration
+		var nsJSON []byte
+		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CreatedAt, &in.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan integration: %w", err)
+		}
+		if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
+			in.Namespaces = nil
+		}
+		result = append(result, in)
+	}
+	return result, rows.Err()
+}
+
+// GetIntegration returns one integration by ID, or sql.ErrNoRows if not found.
+func (c *Client) GetIntegration(ctx context.Context, id string) (*Integration, error) {
+	var in Integration
+	var nsJSON []byte
+	err := c.db.QueryRowContext(ctx,
+		`SELECT id, name, adapter_url, namespaces, status, token, created_at, updated_at
+		 FROM integrations WHERE id = $1`, id).
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CreatedAt, &in.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
+		in.Namespaces = nil
+	}
+	return &in, nil
+}
+
+// CreateIntegration inserts a new integration row. in.ID must be set by the caller.
+func (c *Client) CreateIntegration(ctx context.Context, in *Integration) error {
+	nsJSON, err := json.Marshal(in.Namespaces)
+	if err != nil {
+		return fmt.Errorf("marshal namespaces: %w", err)
+	}
+	_, err = c.db.ExecContext(ctx,
+		`INSERT INTO integrations (id, name, adapter_url, namespaces, status, token, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+		in.ID, in.Name, in.AdapterURL, nsJSON, in.Status, in.Token)
+	return err
+}
+
+// UpdateIntegration replaces all mutable fields for an existing integration.
+// Preserves created_at. Token is updated only when non-empty (empty = keep existing).
+func (c *Client) UpdateIntegration(ctx context.Context, in *Integration) error {
+	nsJSON, err := json.Marshal(in.Namespaces)
+	if err != nil {
+		return fmt.Errorf("marshal namespaces: %w", err)
+	}
+	if in.Token != "" {
+		_, err = c.db.ExecContext(ctx,
+			`UPDATE integrations SET name=$1, adapter_url=$2, namespaces=$3, status=$4, token=$5, updated_at=NOW()
+			 WHERE id=$6`,
+			in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.ID)
+	} else {
+		_, err = c.db.ExecContext(ctx,
+			`UPDATE integrations SET name=$1, adapter_url=$2, namespaces=$3, status=$4, updated_at=NOW()
+			 WHERE id=$5`,
+			in.Name, in.AdapterURL, nsJSON, in.Status, in.ID)
+	}
+	return err
+}
+
+// DeleteIntegration removes an integration by ID.
+func (c *Client) DeleteIntegration(ctx context.Context, id string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM integrations WHERE id = $1`, id)
+	return err
+}
 
 // --- Current-state ("kv") store ---
 

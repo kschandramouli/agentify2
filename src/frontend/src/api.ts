@@ -141,6 +141,54 @@ export function listPods(): Promise<Pod[]> {
   return getJSON<Pod[]>("/admin/pods");
 }
 
+// ── Integrations ─────────────────────────────────────────────────────────────
+
+export interface Integration {
+  id: string;
+  name: string;
+  adapter_url: string;
+  namespaces: string[];
+  status: "active" | "inactive" | "error";
+  has_token: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntegrationInput {
+  name: string;
+  adapter_url: string;
+  namespaces: string[];
+  token?: string;
+  status?: string;
+}
+
+export function listIntegrations(): Promise<Integration[]> {
+  return getJSON<Integration[]>("/admin/integrations");
+}
+
+export function getIntegration(id: string): Promise<Integration> {
+  return getJSON<Integration>(`/admin/integrations/${id}`);
+}
+
+export function createIntegration(input: IntegrationInput): Promise<Integration> {
+  return postJSON<Integration>("/admin/integrations", input);
+}
+
+export async function updateIntegration(id: string, input: IntegrationInput): Promise<Integration> {
+  const res = await fetch(`/admin/integrations/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<Integration>;
+}
+
+export async function deleteIntegration(id: string): Promise<void> {
+  const res = await fetch(`/admin/integrations/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+}
+
 export interface SyncResult {
   namespaces: { namespace: string; services: string[]; service_count: number }[];
   suggestions: string[];

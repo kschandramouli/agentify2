@@ -15,33 +15,36 @@ import (
 	"github.com/chan/agentify/backend/internal/ingestion"
 	"github.com/chan/agentify/backend/internal/models"
 	"github.com/chan/agentify/backend/internal/orchestrator"
+	pgstore "github.com/chan/agentify/backend/internal/storage/postgres"
 	"github.com/chan/agentify/backend/internal/telemetry"
 )
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	orch          *orchestrator.Router
-	ingester      *ingestion.Ingester
-	queryExec     *orchestrator.QueryExecutor
-	agentClient   *AgentClient
-	adapterClient *AdapterClient
-	redactor      *governance.Redactor
-	logger        *slog.Logger
+	orch             *orchestrator.Router
+	ingester         *ingestion.Ingester
+	queryExec        *orchestrator.QueryExecutor
+	agentClient      *AgentClient
+	adapterClient    *AdapterClient
+	redactor         *governance.Redactor
+	integrationStore IntegrationStore // nil when postgres is not provisioned
+	logger           *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
 	return &Handler{
-		orch:          orch,
-		ingester:      ingester,
-		queryExec:     queryExec,
-		agentClient:   NewAgentClient(agentServiceURL),
-		adapterClient: NewAdapterClient(adapterURL, adapterToken),
-		redactor:      redactor,
-		logger:        logger,
+		orch:             orch,
+		ingester:         ingester,
+		queryExec:        queryExec,
+		agentClient:      NewAgentClient(agentServiceURL),
+		adapterClient:    NewAdapterClient(adapterURL, adapterToken),
+		redactor:         redactor,
+		integrationStore: integrations,
+		logger:           logger,
 	}
 }
 
@@ -406,41 +409,176 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	json.NewEncoder(w).Encode(body)
 }
 
-// HandleIntegrationList returns all configured integrations.
+// HandleIntegrationList returns all configured integrations (tokens redacted).
 func (h *Handler) HandleIntegrationList(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	w.Header().Set("Content-Type", "application/json")
+	if h.integrationStore == nil {
+		json.NewEncoder(w).Encode([]IntegrationResponse{})
 		return
 	}
+	rows, err := h.integrationStore.ListIntegrations(r.Context())
+	if err != nil {
+		h.logger.Error("list integrations failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	resp := make([]IntegrationResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = integrationToResponse(row)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
 
-	// TODO: fetch integrations from DynamoDB
-	integrations := []map[string]interface{}{}
-
+// HandleIntegrationGet returns one integration by ID.
+func (h *Handler) HandleIntegrationGet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	row, err := h.integrationStore.GetIntegration(r.Context(), id)
+	if err != nil {
+		h.logger.Error("get integration failed", "id", id, "error", err)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(integrations)
+	json.NewEncoder(w).Encode(integrationToResponse(*row))
+}
+
+// integrationCreateRequest is the body accepted by POST /admin/integrations.
+type integrationCreateRequest struct {
+	Name       string   `json:"name"`
+	AdapterURL string   `json:"adapter_url"`
+	Namespaces []string `json:"namespaces"`
+	Token      string   `json:"token"`
 }
 
 // HandleIntegrationCreate adds a new integration.
 func (h *Handler) HandleIntegrationCreate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
 		return
 	}
-
-	var integration map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&integration); err != nil {
-		h.logger.Error("failed to decode integration", "error", err)
+	var req integrationCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if req.Name == "" || req.AdapterURL == "" {
+		http.Error(w, "name and adapter_url are required", http.StatusBadRequest)
+		return
+	}
+	if req.Namespaces == nil {
+		req.Namespaces = []string{}
+	}
 
-	// TODO: validate and store integration in DynamoDB
-	// TODO: emit event to SQS for adapter initialization
-
+	id := uuid.New().String()
+	row := &pgstore.Integration{
+		ID:         id,
+		Name:       req.Name,
+		AdapterURL: req.AdapterURL,
+		Namespaces: req.Namespaces,
+		Status:     "inactive",
+		Token:      req.Token,
+	}
+	if err := h.integrationStore.CreateIntegration(r.Context(), row); err != nil {
+		h.logger.Error("create integration failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	created, err := h.integrationStore.GetIntegration(r.Context(), id)
+	if err != nil {
+		h.logger.Error("fetch created integration failed", "id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(integration)
+	json.NewEncoder(w).Encode(integrationToResponse(*created))
+}
+
+// integrationUpdateRequest is the body accepted by PUT /admin/integrations/{id}.
+type integrationUpdateRequest struct {
+	Name       string   `json:"name"`
+	AdapterURL string   `json:"adapter_url"`
+	Namespaces []string `json:"namespaces"`
+	Status     string   `json:"status"`
+	Token      string   `json:"token"` // empty = keep existing token
+}
+
+// HandleIntegrationUpdate replaces mutable fields for an existing integration.
+func (h *Handler) HandleIntegrationUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req integrationUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" || req.AdapterURL == "" {
+		http.Error(w, "name and adapter_url are required", http.StatusBadRequest)
+		return
+	}
+	if req.Namespaces == nil {
+		req.Namespaces = []string{}
+	}
+	status := req.Status
+	if status == "" {
+		status = "inactive"
+	}
+
+	row := &pgstore.Integration{
+		ID:         id,
+		Name:       req.Name,
+		AdapterURL: req.AdapterURL,
+		Namespaces: req.Namespaces,
+		Status:     status,
+		Token:      req.Token,
+	}
+	if err := h.integrationStore.UpdateIntegration(r.Context(), row); err != nil {
+		h.logger.Error("update integration failed", "id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	updated, err := h.integrationStore.GetIntegration(r.Context(), id)
+	if err != nil {
+		h.logger.Error("fetch updated integration failed", "id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(integrationToResponse(*updated))
+}
+
+// HandleIntegrationDelete removes an integration by ID.
+func (h *Handler) HandleIntegrationDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := h.integrationStore.DeleteIntegration(r.Context(), id); err != nil {
+		h.logger.Error("delete integration failed", "id", id, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandlePodRegistryList returns all pods in the registry.

@@ -26,6 +26,9 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// Admin: integrations management
 	mux.HandleFunc("GET /admin/integrations", h.HandleIntegrationList)
 	mux.HandleFunc("POST /admin/integrations", h.HandleIntegrationCreate)
+	mux.HandleFunc("GET /admin/integrations/{id}", h.HandleIntegrationGet)
+	mux.HandleFunc("PUT /admin/integrations/{id}", h.HandleIntegrationUpdate)
+	mux.HandleFunc("DELETE /admin/integrations/{id}", h.HandleIntegrationDelete)
 
 	// Admin: pod registry (observability)
 	mux.HandleFunc("GET /admin/pods", h.HandlePodRegistryList)

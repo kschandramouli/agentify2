@@ -27,13 +27,23 @@ code {
 
 .app__header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
-  padding: 16px 24px;
+  padding: 12px 24px;
   border-bottom: 1px solid var(--border);
 }
 .app__header h1 { margin: 0; font-size: 20px; }
-.app__subtitle { color: var(--muted); font-size: 13px; }
+.app__subtitle { color: var(--muted); font-size: 13px; flex: 1; }
+
+/* Tab nav */
+.app__nav { display: flex; gap: 4px; margin-left: auto; }
+.app__nav-btn {
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 5px 14px; font-size: 13px; cursor: pointer; color: var(--muted);
+  transition: all .15s;
+}
+.app__nav-btn:hover { border-color: var(--border); color: var(--text); }
+.app__nav-btn--active { background: var(--border); color: var(--text); font-weight: 500; }
 
 .app__main {
   max-width: 900px;
@@ -779,4 +789,89 @@ code {
   font-size: 12px;
   color: var(--text);
   line-height: 1.7;
+}
+
+/* ── Integrations panel ──────────────────────────────────────────────────── */
+.int-panel { max-width: 760px; }
+.int-panel__header { margin-bottom: 20px; }
+.int-panel__header h2 { margin: 0 0 4px; font-size: 18px; }
+.int-panel__desc { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+
+.int-list { display: flex; flex-direction: column; gap: 10px; }
+
+.int-row {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.int-row__main { display: flex; align-items: center; gap: 8px; }
+.int-row__name { font-weight: 500; font-size: 14px; }
+.int-row__url  { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+.int-row__ns   { display: flex; gap: 6px; flex-wrap: wrap; }
+.int-row__actions { display: flex; gap: 6px; padding-top: 4px; }
+.int-row__token-dot { font-size: 12px; }
+
+.int-ns-chip {
+  background: rgba(110,168,254,0.1);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 12px;
+  margin: 0;
+}
+
+/* Status badge */
+.int-badge {
+  font-size: 11px; font-weight: 500; border-radius: 4px;
+  padding: 2px 8px; text-transform: uppercase; letter-spacing: .04em;
+}
+.int-badge--active   { background: rgba(80,200,120,.12); color: #50c878; }
+.int-badge--inactive { background: rgba(154,163,178,.1); color: var(--muted); }
+.int-badge--error    { background: rgba(233,128,128,.12); color: #e98080; }
+
+/* Buttons */
+.int-btn {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 14px; font-size: 13px; cursor: pointer; color: var(--text);
+  transition: border-color .15s, background .15s;
+}
+.int-btn:hover:not(:disabled) { border-color: var(--accent); }
+.int-btn:disabled { opacity: .5; cursor: not-allowed; }
+.int-btn--primary { background: var(--accent); color: #0f1115; border-color: var(--accent); font-weight: 500; }
+.int-btn--primary:hover:not(:disabled) { opacity: .88; }
+.int-btn--danger  { border-color: #e98080; color: #e98080; }
+.int-btn--danger:hover:not(:disabled) { background: rgba(233,128,128,.08); }
+.int-btn--sm      { padding: 4px 10px; font-size: 12px; }
+
+/* Form */
+.int-form-wrap {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 20px; margin-bottom: 20px;
+}
+.int-form-wrap h3 { margin: 0 0 16px; font-size: 15px; }
+.int-form { display: flex; flex-direction: column; gap: 14px; }
+.int-field { display: flex; flex-direction: column; gap: 5px; }
+.int-field span { font-size: 12px; color: var(--muted); }
+.int-field em { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 4px; }
+.int-field input, .int-field select {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; font-size: 13px; color: var(--text); outline: none;
+  transition: border-color .15s;
+}
+.int-field input:focus, .int-field select:focus { border-color: var(--accent); }
+.int-field select option { background: var(--bg); }
+.int-form__actions { display: flex; gap: 8px; padding-top: 4px; }
+
+/* Empty / loading / error states */
+.int-empty { text-align: center; padding: 48px 0; color: var(--muted); }
+.int-empty p { margin: 0 0 16px; }
+.int-loading { color: var(--muted); font-size: 13px; }
+.int-error {
+  background: rgba(233,128,128,.08); border: 1px solid rgba(233,128,128,.25);
+  border-radius: 6px; padding: 10px 14px; color: #e98080;
+  font-size: 13px; margin-bottom: 14px;
 }
