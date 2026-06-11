@@ -81,6 +81,15 @@ jobs:
           ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ steps.meta.outputs.tag }}
           ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:latest
 
+    - name: Build & push frontend
+      uses: docker/build-push-action@v5
+      with:
+        context: src/frontend
+        push: true
+        tags: |
+          ${{ secrets.ECR_REGISTRY }}/agentify/frontend:${{ steps.meta.outputs.tag }}
+          ${{ secrets.ECR_REGISTRY }}/agentify/frontend:latest
+
   deploy:
     name: Deploy to EKS
     needs: build-and-push
@@ -155,6 +164,8 @@ jobs:
         sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
         sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
         sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+        sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/frontend.yaml
+        sed -i "s|${REGISTRY}/agentify/frontend:latest|${REGISTRY}/agentify/frontend:${TAG}|g" infra/kubernetes/frontend.yaml
 
         # 3. Substitute IRSA role ARN placeholders from live IAM (no hardcoding).
         BACKEND_ROLE=$(aws iam get-role --role-name agentify-dev-backend --query 'Role.Arn' --output text)
@@ -173,13 +184,15 @@ jobs:
         kubectl apply -f infra/kubernetes/backend.yaml
         kubectl apply -f infra/kubernetes/agent.yaml
         kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+        kubectl apply -f infra/kubernetes/frontend.yaml
         kubectl apply -f infra/kubernetes/ingress.yaml
 
     - name: Wait for rollouts
       run: |
-        kubectl rollout status deployment/agentify-backend -n agentify --timeout=300s
-        kubectl rollout status deployment/agentify-agent   -n agentify --timeout=300s
-        kubectl rollout status deployment/k8fy-adapter     -n agentify --timeout=300s
+        kubectl rollout status deployment/agentify-backend  -n agentify --timeout=300s
+        kubectl rollout status deployment/agentify-agent    -n agentify --timeout=300s
+        kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
+        kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
 
     - name: Debug pod state (always runs — helps diagnose failures)
       if: always()
@@ -246,7 +259,8 @@ jobs:
 
         echo ""
         echo "── ECR images deployed ─────────────────────────"
-        echo "  Backend : ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ env.IMAGE_TAG }}"
-        echo "  Agent   : ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ env.IMAGE_TAG }}"
-        echo "  Adapter : ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ env.IMAGE_TAG }}"
+        echo "  Backend  : ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ env.IMAGE_TAG }}"
+        echo "  Agent    : ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ env.IMAGE_TAG }}"
+        echo "  Adapter  : ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ env.IMAGE_TAG }}"
+        echo "  Frontend : ${{ secrets.ECR_REGISTRY }}/agentify/frontend:${{ env.IMAGE_TAG }}"
         echo "=================================================="

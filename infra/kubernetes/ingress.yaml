@@ -1,6 +1,7 @@
-# ALB Ingress: exposes the backend API (ops UI + /api/*) to the internet.
+# ALB Ingress: routes traffic to frontend (/*) and backend API (/api, /admin, /health, /metrics).
 # Requires the AWS Load Balancer Controller (installed by Terraform).
-# The frontend is served from S3/CloudFront — not a K8s workload.
+# Path specificity: more-specific prefixes (/api, /admin, /health, /metrics) beat the
+# catch-all (/) because ALB evaluates longest-prefix first.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -52,3 +53,11 @@ spec:
             name: agentify-backend
             port:
               number: 8080
+      # Catch-all: frontend SPA. Must be last — ALB matches longest prefix first.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: agentify-frontend
+            port:
+              number: 80
