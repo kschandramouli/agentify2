@@ -6,11 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
 	_ "github.com/lib/pq" // registers the "postgres" SQL driver
 )
+
+// k8sPodSuffix matches the two trailing hash segments K8s appends to pod names:
+// {deployment}-{rs-hash(6-12 hex chars)}-{pod-hash(5 alphanum)}.
+// Stripping them recovers the deployment name (e.g. payment-worker-68795899ff-kngf7 → payment-worker).
+var k8sPodSuffix = regexp.MustCompile(`-[a-z0-9]{6,12}-[a-z0-9]{5}$`)
 
 // Client wraps a PostgreSQL connection. A single Client (one connection pool)
 // backs both store families for the MVP (see ADR 0010):
@@ -286,14 +292,18 @@ func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[
 // TrackedEntities returns active namespace/service pairs from the live-state
 // shards — used to power the frontend autocomplete. Each entry is formatted as
 // "namespace/service_name" (e.g. "payments/payment-worker").
-// Only service_* event types are included; pod_* rows (individual pod replicas
-// with hash suffixes) are intentionally excluded so the list stays service-level.
+//
+// K8s Services (event_type service_*) are included by name directly.
+// Deployments that have no K8s Service (workers, consumers) are derived from
+// pod_* rows by stripping the two trailing K8s hash segments
+// ({rs-hash}-{pod-hash}), recovering the deployment name. Results are
+// deduplicated so each namespace/name pair appears only once.
 func (s *CurrentState) TrackedEntities(ctx context.Context) ([]string, error) {
 	const q = `
-	SELECT pod_id, entity_key
+	SELECT pod_id, entity_key, event_type
 	FROM current_state
 	WHERE pod_id LIKE 'k8fy.live-state.%'
-	  AND event_type LIKE 'service_%'
+	  AND (event_type LIKE 'service_%' OR event_type LIKE 'pod_%')
 	ORDER BY pod_id, entity_key`
 
 	rows, err := s.db.QueryContext(ctx, q)
@@ -302,16 +312,27 @@ func (s *CurrentState) TrackedEntities(ctx context.Context) ([]string, error) {
 	}
 	defer rows.Close()
 
+	seen := make(map[string]struct{})
 	var result []string
+
 	for rows.Next() {
-		var podID, entityKey string
-		if err := rows.Scan(&podID, &entityKey); err != nil {
+		var podID, entityKey, eventType string
+		if err := rows.Scan(&podID, &entityKey, &eventType); err != nil {
 			continue
 		}
-		// "k8fy.live-state.payments" → "payments"
 		ns := strings.TrimPrefix(podID, "k8fy.live-state.")
-		if ns != "" && entityKey != "" {
-			result = append(result, ns+"/"+entityKey)
+		if ns == "" || entityKey == "" {
+			continue
+		}
+		// For pod rows, strip K8s hash suffixes to recover the deployment name.
+		name := entityKey
+		if strings.HasPrefix(eventType, "pod_") {
+			name = k8sPodSuffix.ReplaceAllString(entityKey, "")
+		}
+		key := ns + "/" + name
+		if _, dup := seen[key]; !dup {
+			seen[key] = struct{}{}
+			result = append(result, key)
 		}
 	}
 	return result, rows.Err()
