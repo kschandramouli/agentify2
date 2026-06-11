@@ -6,6 +6,12 @@ type QueryRequest struct {
 	Context  map[string]interface{} `json:"context"`
 }
 
+// ToolCallInfo describes one tool call made by Claude during reasoning.
+type ToolCallInfo struct {
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments,omitempty"`
+}
+
 // QueryResponse represents the answer to a query.
 type QueryResponse struct {
 	Answer     string                 `json:"answer"`
@@ -13,5 +19,6 @@ type QueryResponse struct {
 	Confidence float64                `json:"confidence"`
 	Sources    []string               `json:"sources"`
 	TraceID    string                 `json:"trace_id,omitempty"` // provenance correlation id (spec 004)
-	Details    map[string]interface{} `json:"details,omitempty"`  // structured data for UI rendering
+	ToolCalls  []ToolCallInfo         `json:"tool_calls,omitempty"` // tools Claude called during reasoning
+	Details    map[string]interface{} `json:"details,omitempty"`    // structured data for UI rendering
 }

@@ -205,12 +205,20 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if agentStatus == "" {
 		agentStatus = "ok"
 	}
+
+	var toolCalls []ToolCallInfo
+	for _, tc := range agentResp.ToolCalls {
+		toolCalls = append(toolCalls, ToolCallInfo{Name: tc.Name, Arguments: tc.Arguments})
+	}
+
 	resp := QueryResponse{
 		Answer:     agentResp.Answer,
 		Status:     agentStatus,
 		Confidence: agentResp.Confidence,
 		Sources:    agentResp.Sources,
 		TraceID:    traceID,
+		ToolCalls:  toolCalls,
+		Details:    agentResp.Details,
 	}
 	h.logTrace(traceID, req.Question, intent, namespace, "tier2", agentStatus, agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start)
 
