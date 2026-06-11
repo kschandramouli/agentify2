@@ -9,8 +9,10 @@ from typing import Any, Dict, Optional
 
 from k8fy.agent import K8fyAgent, get_k8fy_agent
 from k8fy.skills.cert_audit import CertAuditSkill
+from k8fy.skills.change_history import ChangeHistorySkill
 from k8fy.skills.diagnose import DiagnoseSkill
 from k8fy.skills.health_check import HealthSkill
+from k8fy.skills.restart_trend import RestartTrendSkill
 from models.response import AgentResponse
 
 logger = logging.getLogger(__name__)
@@ -24,8 +26,10 @@ class SkillRouter:
             "health_check": HealthSkill(),
             "cert_check": CertAuditSkill(),
             "diagnose": DiagnoseSkill(),
+            "change_history": ChangeHistorySkill(),
+            "metrics_history": RestartTrendSkill(),
         }
-        # Fallback: full K8fyAgent for general_query, metrics_query, or anything new.
+        # Fallback: full K8fyAgent for general_query or anything new.
         self._fallback: Optional[K8fyAgent] = None
 
     async def dispatch(

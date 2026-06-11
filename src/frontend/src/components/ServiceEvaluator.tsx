@@ -56,6 +56,24 @@ function parseInput(raw: string): ServiceContext | null {
 }
 
 
+// ── Diagnosis cache (module-level, survives re-renders, cleared on page reload) ─
+interface CachedDiagnosis { resp: QueryResponse; ts: number; }
+const diagnosisCache = new Map<string, CachedDiagnosis>();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function diagCacheKey(ctx: ServiceContext) { return `${ctx.namespace}/${ctx.service}`; }
+
+function getFromCache(ctx: ServiceContext): CachedDiagnosis | null {
+  const hit = diagnosisCache.get(diagCacheKey(ctx));
+  if (!hit) return null;
+  if (Date.now() - hit.ts > CACHE_TTL_MS) { diagnosisCache.delete(diagCacheKey(ctx)); return null; }
+  return hit;
+}
+
+function setInCache(ctx: ServiceContext, resp: QueryResponse) {
+  diagnosisCache.set(diagCacheKey(ctx), { resp, ts: Date.now() });
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 interface CheckResult {
@@ -139,8 +157,11 @@ function AgentUnavailableBanner({ answer }: { answer: string }) {
 }
 
 function DiagnosisCard({
-  resp, durationMs, error,
-}: { resp?: QueryResponse; durationMs?: number; error?: string }) {
+  resp, durationMs, error, fromCache, cacheAgeMs, onRerun,
+}: {
+  resp?: QueryResponse; durationMs?: number; error?: string;
+  fromCache?: boolean; cacheAgeMs?: number; onRerun?: () => void;
+}) {
   if (error) return (
     <div className="diagnosis-card diagnosis-card--crit">
       <h3>Diagnosis failed</h3>
@@ -164,9 +185,18 @@ function DiagnosisCard({
     <div className={`diagnosis-card diagnosis-card--${sev}`}>
       <div className="diagnosis-card__header">
         <h3>Diagnosis</h3>
-        <TierTag tier={2} ms={durationMs} />
+        {fromCache ? (
+          <span className="cache-tag">
+            Cached · {Math.round((cacheAgeMs ?? 0) / 60000)}m ago
+          </span>
+        ) : (
+          <TierTag tier={2} ms={durationMs} />
+        )}
         {d.severity && <Badge status={d.severity} />}
         <span className="answer__confidence">{(resp.confidence * 100).toFixed(0)}% confidence</span>
+        {fromCache && onRerun && (
+          <button className="rerun-btn" type="button" onClick={onRerun}>Rerun</button>
+        )}
       </div>
       <p className="diagnosis-card__answer">{resp.answer}</p>
       {!!d.findings?.length && (
@@ -236,7 +266,21 @@ function Tier2CheckCard({ label, description, resp, durationMs, error, pending }
         <p className="check-card__answer muted">{description}</p>
       )}
       {error && <p className="check-card__answer error">{error}</p>}
-      {resp && <p className="check-card__answer">{resp.answer}</p>}
+      {resp && (
+        <>
+          {resp.answer && <p className="check-card__answer">{resp.answer}</p>}
+          {!!resp.details?.findings?.length && (
+            <ul className="check-card__timeline">
+              {resp.details.findings.map((f, i) => <li key={i}>{f}</li>)}
+            </ul>
+          )}
+          {!!resp.details?.recommendations?.length && (
+            <ol className="check-card__recommendations">
+              {resp.details.recommendations.map((r, i) => <li key={i}>{r}</li>)}
+            </ol>
+          )}
+        </>
+      )}
       {resp?.tool_calls && resp.tool_calls.length > 0 && (
         <div className="tool-calls" style={{ marginTop: 6 }}>
           {resp.tool_calls.map((t, i) => (
@@ -271,6 +315,8 @@ interface EvalState {
   diagnosis?: QueryResponse;
   diagDurationMs?: number;
   diagError?: string;
+  diagFromCache?: boolean;
+  diagCacheAgeMs?: number;
   changeHistory?: Tier2Result;
   restartTrend?: Tier2Result;
   ctx?: ServiceContext;
@@ -331,15 +377,23 @@ export function ServiceEvaluator() {
 
     const promises: Promise<void>[] = [];
 
-    // Correlated diagnosis — only when issues exist
-    let diagResult: { diag?: QueryResponse; diagMs?: number; diagErr?: string } = {};
+    // Correlated diagnosis — only when issues exist; serve from cache if recent
+    let diagResult: { diag?: QueryResponse; diagMs?: number; diagErr?: string; fromCache?: boolean; cacheAgeMs?: number } = {};
     if (!allOk) {
-      const t2 = Date.now();
-      promises.push(
-        diagnoseService(ctx)
-          .then(diag => { diagResult = { diag, diagMs: Date.now() - t2 }; })
-          .catch(err => { diagResult = { diagErr: err instanceof Error ? err.message : "failed", diagMs: Date.now() - t2 }; })
-      );
+      const hit = getFromCache(ctx);
+      if (hit) {
+        diagResult = { diag: hit.resp, diagMs: 0, fromCache: true, cacheAgeMs: Date.now() - hit.ts };
+      } else {
+        const t2 = Date.now();
+        promises.push(
+          diagnoseService(ctx)
+            .then(diag => {
+              setInCache(ctx, diag);
+              diagResult = { diag, diagMs: Date.now() - t2 };
+            })
+            .catch(err => { diagResult = { diagErr: err instanceof Error ? err.message : "failed", diagMs: Date.now() - t2 }; })
+        );
+      }
     }
 
     // Optional Tier-2 extras
@@ -370,9 +424,26 @@ export function ServiceEvaluator() {
       diagnosis: diagResult.diag,
       diagDurationMs: diagResult.diagMs,
       diagError: diagResult.diagErr,
+      diagFromCache: diagResult.fromCache,
+      diagCacheAgeMs: diagResult.cacheAgeMs,
       changeHistory: chResult,
       restartTrend: rtResult,
     });
+  }
+
+  async function rerunDiagnosis() {
+    const ctx = state.ctx;
+    if (!ctx) return;
+    diagnosisCache.delete(diagCacheKey(ctx));
+    setState(s => ({ ...s, diagnosis: undefined, diagError: undefined, diagFromCache: false, phase: "tier2" }));
+    const t2 = Date.now();
+    try {
+      const diag = await diagnoseService(ctx);
+      setInCache(ctx, diag);
+      setState(s => ({ ...s, diagnosis: diag, diagDurationMs: Date.now() - t2, diagFromCache: false, phase: "done" }));
+    } catch (err) {
+      setState(s => ({ ...s, diagError: err instanceof Error ? err.message : "failed", phase: "done" }));
+    }
   }
 
   const s = state;
@@ -482,7 +553,11 @@ export function ServiceEvaluator() {
           {(s.diagnosis || s.diagError) && (
             <div className="eval-results__section">
               <h3 className="eval-results__section-title">Correlated diagnosis <TierTag tier={2} /></h3>
-              <DiagnosisCard resp={s.diagnosis} durationMs={s.diagDurationMs} error={s.diagError} />
+              <DiagnosisCard
+                resp={s.diagnosis} durationMs={s.diagDurationMs} error={s.diagError}
+                fromCache={s.diagFromCache} cacheAgeMs={s.diagCacheAgeMs}
+                onRerun={rerunDiagnosis}
+              />
             </div>
           )}
 
