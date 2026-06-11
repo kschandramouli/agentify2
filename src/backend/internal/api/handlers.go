@@ -267,6 +267,14 @@ func (h *Handler) HandleAgentFetch(w http.ResponseWriter, r *http.Request) {
 			query[p] = v
 		}
 	}
+	// get_service_health passes "service_name" (not "service") — map it explicitly
+	// so CurrentState.Query can do the service-prefix scan for Deployment-only
+	// workloads whose pods are stored as "{service}-{rs-hash}-{pod-hash}".
+	if req.Tool == "get_service_health" {
+		if svcName := stringArg(req.Args, "service_name"); svcName != "" {
+			query["service"] = svcName
+		}
+	}
 	if v, ok := req.Args["limit"]; ok {
 		query["limit"] = v
 	}
@@ -347,7 +355,12 @@ func mapToolToQuery(tool string, args map[string]interface{}) (intent, namespace
 	case "get_certificates":
 		return "cert_check", namespace, ""
 	case "get_service_health":
-		return "health_check", namespace, stringArg(args, "service_name")
+		// Don't use an exact key lookup — for Deployment-only workloads (queue
+		// workers, consumers) there is no service_* row keyed by the plain service
+		// name; only pod_* rows keyed by the full pod name exist. An exact match
+		// returns nothing. Return "" so HandleAgentFetch will use the service-prefix
+		// LIKE scan path in CurrentState.Query instead.
+		return "health_check", namespace, ""
 	case "query_pod", "get_pod_events":
 		return "health_check", namespace, stringArg(args, "pod_id")
 	case "get_metrics_history":

@@ -248,7 +248,13 @@ func (s *CurrentState) Store(ctx context.Context, podID string, data map[string]
 	return fmt.Sprintf("%s:%s", podID, entityKey), nil
 }
 
-// Query does a point lookup when given "key", else scans all entities in the pod.
+// Query does a point lookup when given "key", a prefix scan when given "service",
+// else returns all entities in the shard.
+//
+// "key"     — exact entity_key match (use for known full pod names)
+// "service" — matches the K8s Service row exactly OR any pod replica whose
+//             entity_key starts with "{service}-" (covers Deployment-only
+//             workloads that have no K8s Service object)
 func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[string]interface{}) ([]map[string]interface{}, error) {
 	var (
 		rows *sql.Rows
@@ -258,6 +264,11 @@ func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT entity_key, event_namespace, event_type, source, payload, updated_at
 			 FROM current_state WHERE pod_id = $1 AND entity_key = $2`, podID, key)
+	} else if svc, ok := queryParams["service"].(string); ok && svc != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT entity_key, event_namespace, event_type, source, payload, updated_at
+			 FROM current_state WHERE pod_id = $1 AND (entity_key = $2 OR entity_key LIKE $3)`,
+			podID, svc, svc+"-%")
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			`SELECT entity_key, event_namespace, event_type, source, payload, updated_at
