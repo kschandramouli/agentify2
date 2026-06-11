@@ -8,17 +8,33 @@ import {
   deleteIntegration,
 } from "../api";
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function fetchTrackedNamespaces(): Promise<string[]> {
+  const res = await fetch("/admin/tracked");
+  if (!res.ok) return [];
+  const data = (await res.json()) as string[] | null;
+  const entries = data ?? [];
+  // Each entry is "namespace/service" — extract unique namespaces.
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const ns = entry.split("/")[0];
+    if (ns) seen.add(ns);
+  }
+  return [...seen].sort();
+}
+
 // ── Status badge ──────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: string }) {
   const cls =
-    status === "active" ? "int-badge int-badge--active"
-    : status === "error" ? "int-badge int-badge--error"
+    status === "active"   ? "int-badge int-badge--active"
+    : status === "error"  ? "int-badge int-badge--error"
     : "int-badge int-badge--inactive";
   return <span className={cls}>{status}</span>;
 }
 
-// ── Empty-state ───────────────────────────────────────────────────────────────
+// ── Empty state ───────────────────────────────────────────────────────────────
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
@@ -48,19 +64,12 @@ function IntegrationForm({
 }) {
   const [form, setForm] = useState<IntegrationInput>(
     initial
-      ? { name: initial.name, adapter_url: initial.adapter_url, namespaces: initial.namespaces, token: "", status: initial.status }
+      ? { name: initial.name, adapter_url: initial.adapter_url, namespaces: [], token: "", status: initial.status }
       : BLANK
   );
-  const [nsRaw, setNsRaw] = useState(initial?.namespaces.join(", ") ?? "");
 
   function set<K extends keyof IntegrationInput>(k: K, v: IntegrationInput[K]) {
     setForm(f => ({ ...f, [k]: v }));
-  }
-
-  function handleNsChange(raw: string) {
-    setNsRaw(raw);
-    const parsed = raw.split(",").map(s => s.trim()).filter(Boolean);
-    set("namespaces", parsed);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -88,15 +97,6 @@ function IntegrationForm({
           onChange={e => set("adapter_url", e.target.value)}
           placeholder="http://k8fy-adapter:8080"
           required
-        />
-      </label>
-      <label className="int-field">
-        <span>Namespaces <em>(comma-separated)</em></span>
-        <input
-          type="text"
-          value={nsRaw}
-          onChange={e => handleNsChange(e.target.value)}
-          placeholder="payments, auth, default"
         />
       </label>
       <label className="int-field">
@@ -135,10 +135,12 @@ function IntegrationForm({
 
 function IntegrationRow({
   integration,
+  discoveredNamespaces,
   onEdit,
   onDelete,
 }: {
   integration: Integration;
+  discoveredNamespaces: string[];
   onEdit: (i: Integration) => void;
   onDelete: (id: string) => void;
 }) {
@@ -147,16 +149,19 @@ function IntegrationRow({
       <div className="int-row__main">
         <span className="int-row__name">{integration.name}</span>
         <StatusBadge status={integration.status} />
-        {integration.has_token && <span className="int-row__token-dot" title="bearer token configured">🔑</span>}
+        {integration.has_token && (
+          <span className="int-row__token-dot" title="bearer token configured">🔑</span>
+        )}
       </div>
       <div className="int-row__url">{integration.adapter_url}</div>
-      {integration.namespaces.length > 0 && (
-        <div className="int-row__ns">
-          {integration.namespaces.map(ns => (
-            <code key={ns} className="int-ns-chip">{ns}</code>
-          ))}
-        </div>
-      )}
+      <div className="int-row__watching">
+        <span className="int-row__watching-label">
+          {discoveredNamespaces.length > 0 ? "Watching:" : "No namespaces discovered yet"}
+        </span>
+        {discoveredNamespaces.map(ns => (
+          <code key={ns} className="int-ns-chip">{ns}</code>
+        ))}
+      </div>
       <div className="int-row__actions">
         <button className="int-btn int-btn--sm" onClick={() => onEdit(integration)}>Edit</button>
         <button className="int-btn int-btn--sm int-btn--danger" onClick={() => onDelete(integration.id)}>Delete</button>
@@ -171,16 +176,21 @@ type Mode = "list" | "create" | { editing: Integration };
 
 export function IntegrationsPanel() {
   const [integrations, setIntegrations] = useState<Integration[] | null>(null);
+  const [discoveredNamespaces, setDiscoveredNamespaces] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("list");
 
-  // Initial load
+  // Load integrations + discovered namespaces together on first render.
   if (integrations === null && !loading && !error) {
     setLoading(true);
-    listIntegrations()
-      .then(data => { setIntegrations(data); setLoading(false); })
+    Promise.all([listIntegrations(), fetchTrackedNamespaces()])
+      .then(([data, ns]) => {
+        setIntegrations(data);
+        setDiscoveredNamespaces(ns);
+        setLoading(false);
+      })
       .catch(e => { setError(String(e)); setLoading(false); });
   }
 
@@ -221,7 +231,8 @@ export function IntegrationsPanel() {
       <div className="int-panel__header">
         <h2>Integrations</h2>
         <p className="int-panel__desc">
-          Each integration connects agentify to a K8fy adapter watching one or more K8s namespaces.
+          Each integration connects agentify to a K8fy adapter.
+          Namespaces are discovered automatically from the adapter — no manual configuration needed.
         </p>
         {mode === "list" && (
           <button className="int-btn int-btn--primary" onClick={() => setMode("create")}>
@@ -256,6 +267,7 @@ export function IntegrationsPanel() {
                 <IntegrationRow
                   key={i.id}
                   integration={i}
+                  discoveredNamespaces={discoveredNamespaces}
                   onEdit={item => setMode({ editing: item })}
                   onDelete={handleDelete}
                 />

@@ -811,7 +811,8 @@ code {
 .int-row__main { display: flex; align-items: center; gap: 8px; }
 .int-row__name { font-weight: 500; font-size: 14px; }
 .int-row__url  { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
-.int-row__ns   { display: flex; gap: 6px; flex-wrap: wrap; }
+.int-row__watching { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.int-row__watching-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .int-row__actions { display: flex; gap: 6px; padding-top: 4px; }
 .int-row__token-dot { font-size: 12px; }
 
