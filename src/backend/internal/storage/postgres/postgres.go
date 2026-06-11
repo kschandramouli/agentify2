@@ -283,14 +283,17 @@ func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[
 	return results, rows.Err()
 }
 
-// TrackedEntities returns all known namespace/entity pairs from the live-state
+// TrackedEntities returns active namespace/service pairs from the live-state
 // shards — used to power the frontend autocomplete. Each entry is formatted as
-// "namespace/entity_key" (e.g. "payments/payment-worker").
+// "namespace/service_name" (e.g. "payments/payment-worker").
+// Only service_* event types are included; pod_* rows (individual pod replicas
+// with hash suffixes) are intentionally excluded so the list stays service-level.
 func (s *CurrentState) TrackedEntities(ctx context.Context) ([]string, error) {
 	const q = `
 	SELECT pod_id, entity_key
 	FROM current_state
 	WHERE pod_id LIKE 'k8fy.live-state.%'
+	  AND event_type LIKE 'service_%'
 	ORDER BY pod_id, entity_key`
 
 	rows, err := s.db.QueryContext(ctx, q)
