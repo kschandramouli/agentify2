@@ -38,6 +38,30 @@ def _fetch_secret(secret_name: str, region: str) -> str:
         return raw
 
 
+def _fetch_langfuse_secrets(secret_name: str, region: str) -> dict:
+    """Fetch Langfuse API keys from AWS Secrets Manager.
+
+    Returns a dict with LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY.
+    Langfuse is optional — returns an empty dict and logs a warning on failure
+    rather than raising, so the service can still start without it.
+    """
+    client = boto3.client("secretsmanager", region_name=region)
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+    except ClientError as e:
+        logger.warning(
+            "Langfuse secret '%s' not found in Secrets Manager: %s — prompt management disabled",
+            secret_name,
+            e,
+        )
+        return {}
+    raw = response.get("SecretString") or ""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -66,12 +90,15 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8080"
 
     # Langfuse prompt management (optional — falls back to local strings if not set)
+    # Keys are resolved from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY env vars,
+    # or fetched from AWS Secrets Manager using langfuse_secret_name below.
     langfuse_public_key: str = Field(default="", validation_alias=AliasChoices("LANGFUSE_PUBLIC_KEY"))
     langfuse_secret_key: str = Field(default="", validation_alias=AliasChoices("LANGFUSE_SECRET_KEY"))
     langfuse_base_url: str = Field(
         default="https://cloud.langfuse.com",
         validation_alias=AliasChoices("LANGFUSE_BASE_URL"),
     )
+    langfuse_secret_name: str = "agentify/dev/langfuse"
 
     # AWS
     aws_region: str = "ap-southeast-2"
@@ -89,15 +116,26 @@ class Settings(BaseSettings):
         case_sensitive = False
 
     @model_validator(mode="after")
-    def resolve_claude_api_key(self) -> "Settings":
-        """Fetch the API key from Secrets Manager if it wasn't set via env/file."""
-        if self.claude_api_key:
-            return self
-        logger.info(
-            "ANTHROPIC_API_KEY not set in environment; fetching from Secrets Manager",
-            extra={"secret": self.anthropic_secret_name, "region": self.aws_region},
-        )
-        self.claude_api_key = _fetch_secret(self.anthropic_secret_name, self.aws_region)
+    def resolve_api_keys(self) -> "Settings":
+        """Fetch API keys from Secrets Manager if not set via env/file."""
+        if not self.claude_api_key:
+            logger.info(
+                "ANTHROPIC_API_KEY not set in environment; fetching from Secrets Manager",
+                extra={"secret": self.anthropic_secret_name, "region": self.aws_region},
+            )
+            self.claude_api_key = _fetch_secret(self.anthropic_secret_name, self.aws_region)
+
+        if not self.langfuse_public_key or not self.langfuse_secret_key:
+            logger.info(
+                "LANGFUSE keys not set in environment; fetching from Secrets Manager",
+                extra={"secret": self.langfuse_secret_name, "region": self.aws_region},
+            )
+            lf = _fetch_langfuse_secrets(self.langfuse_secret_name, self.aws_region)
+            if not self.langfuse_public_key:
+                self.langfuse_public_key = lf.get("LANGFUSE_PUBLIC_KEY", "")
+            if not self.langfuse_secret_key:
+                self.langfuse_secret_key = lf.get("LANGFUSE_SECRET_KEY", "")
+
         return self
 
 

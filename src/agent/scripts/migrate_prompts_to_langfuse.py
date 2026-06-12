@@ -72,7 +72,7 @@ def main() -> None:
         except Exception as exc:
             print(f"  ✗  {name}  FAILED: {exc}", file=sys.stderr)
 
-    print("\nDone. Verify in Langfuse UI → Prompts.")
+    print("\nDone. Verify in Langfuse UI > Prompts.")
 
 
 if __name__ == "__main__":
