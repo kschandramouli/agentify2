@@ -89,8 +89,17 @@ func (c *Client) initSchema(ctx context.Context) error {
 		sources JSONB NOT NULL DEFAULT '[]',
 		tool_calls JSONB NOT NULL DEFAULT '[]',
 		latency_ms BIGINT NOT NULL DEFAULT 0,
-		created_at TIMESTAMP DEFAULT NOW()
+		started_at TIMESTAMP,
+		created_at TIMESTAMP DEFAULT NOW(),
+		input_tokens BIGINT NOT NULL DEFAULT 0,
+		output_tokens BIGINT NOT NULL DEFAULT 0,
+		estimated_cost_usd FLOAT NOT NULL DEFAULT 0
 	);
+	-- Idempotent migrations: add new columns to pre-existing tables.
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS input_tokens BIGINT NOT NULL DEFAULT 0;
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS estimated_cost_usd FLOAT NOT NULL DEFAULT 0;
 	CREATE INDEX IF NOT EXISTS idx_traces_created ON traces(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_traces_intent  ON traces(intent);
 
@@ -240,18 +249,22 @@ func (c *Client) Close() error { return c.db.Close() }
 
 // TraceRecord is one persisted query provenance entry.
 type TraceRecord struct {
-	ID         string
-	TraceID    string
-	Question   string
-	Intent     string
-	Namespace  string
-	Tier       string
-	Status     string
-	Confidence float64
-	Sources    []string
-	ToolCalls  []string
-	LatencyMs  int64
-	CreatedAt  time.Time
+	ID               string
+	TraceID          string
+	Question         string
+	Intent           string
+	Namespace        string
+	Tier             string
+	Status           string
+	Confidence       float64
+	Sources          []string
+	ToolCalls        []string
+	LatencyMs        int64
+	StartedAt        time.Time
+	CreatedAt        time.Time
+	InputTokens      int64
+	OutputTokens     int64
+	EstimatedCostUSD float64
 }
 
 // TracesSummary holds aggregated statistics derived from the traces table.
@@ -269,13 +282,19 @@ type TracesSummary struct {
 func (c *Client) InsertTrace(ctx context.Context, t TraceRecord) error {
 	srcJSON, _ := json.Marshal(t.Sources)
 	tcJSON, _ := json.Marshal(t.ToolCalls)
+	startedAt := t.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	_, err := c.db.ExecContext(ctx,
 		`INSERT INTO traces (id, trace_id, question, intent, namespace, tier, status,
-		  confidence, sources, tool_calls, latency_ms, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+		  confidence, sources, tool_calls, latency_ms, started_at, created_at,
+		  input_tokens, output_tokens, estimated_cost_usd)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),$13,$14,$15)
 		 ON CONFLICT (id) DO NOTHING`,
 		t.ID, t.TraceID, t.Question, t.Intent, t.Namespace, t.Tier, t.Status,
-		t.Confidence, srcJSON, tcJSON, t.LatencyMs)
+		t.Confidence, srcJSON, tcJSON, t.LatencyMs, startedAt,
+		t.InputTokens, t.OutputTokens, t.EstimatedCostUSD)
 	return err
 }
 
@@ -286,7 +305,10 @@ func (c *Client) ListTraces(ctx context.Context, limit int) ([]TraceRecord, erro
 	}
 	rows, err := c.db.QueryContext(ctx,
 		`SELECT id, trace_id, question, intent, namespace, tier, status,
-		        confidence, sources, tool_calls, latency_ms, created_at
+		        confidence, sources, tool_calls, latency_ms,
+		        COALESCE(started_at, created_at) AS started_at, created_at,
+		        COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+		        COALESCE(estimated_cost_usd, 0)
 		 FROM traces ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list traces: %w", err)
@@ -298,7 +320,8 @@ func (c *Client) ListTraces(ctx context.Context, limit int) ([]TraceRecord, erro
 		var t TraceRecord
 		var srcJSON, tcJSON []byte
 		if err := rows.Scan(&t.ID, &t.TraceID, &t.Question, &t.Intent, &t.Namespace,
-			&t.Tier, &t.Status, &t.Confidence, &srcJSON, &tcJSON, &t.LatencyMs, &t.CreatedAt); err != nil {
+			&t.Tier, &t.Status, &t.Confidence, &srcJSON, &tcJSON, &t.LatencyMs,
+			&t.StartedAt, &t.CreatedAt, &t.InputTokens, &t.OutputTokens, &t.EstimatedCostUSD); err != nil {
 			return nil, fmt.Errorf("scan trace: %w", err)
 		}
 		_ = json.Unmarshal(srcJSON, &t.Sources)

@@ -41,13 +41,16 @@ type AgentToolCall struct {
 
 // AgentResponse is returned from the agent service.
 type AgentResponse struct {
-	Answer     string                 `json:"answer"`
-	Status     string                 `json:"status"`   // "healthy","degraded","unhealthy","error","unknown"
-	Reasoning  string                 `json:"reasoning"`
-	Confidence float64                `json:"confidence"`
-	Sources    []string               `json:"sources"`
-	ToolCalls  []AgentToolCall        `json:"tool_calls"`
-	Details    map[string]interface{} `json:"details"` // severity, likely_cause, recommendations, findings (spec 005)
+	Answer           string                 `json:"answer"`
+	Status           string                 `json:"status"` // "healthy","degraded","unhealthy","error","unknown"
+	Reasoning        string                 `json:"reasoning"`
+	Confidence       float64                `json:"confidence"`
+	Sources          []string               `json:"sources"`
+	ToolCalls        []AgentToolCall        `json:"tool_calls"`
+	Details          map[string]interface{} `json:"details"` // severity, likely_cause, recommendations, findings (spec 005)
+	InputTokens      int64                  `json:"input_tokens"`
+	OutputTokens     int64                  `json:"output_tokens"`
+	EstimatedCostUSD float64                `json:"estimated_cost_usd"`
 }
 
 // Reason calls the agent service to reason about the data.

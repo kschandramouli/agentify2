@@ -203,7 +203,11 @@ export interface TraceRecord {
   sources: string[];
   tool_calls: string[];
   latency_ms: number;
+  started_at: string;
   created_at: string;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost_usd: number;
 }
 
 export async function listTraces(): Promise<TraceRecord[]> {

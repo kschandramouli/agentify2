@@ -874,6 +874,17 @@ code {
 .adm-nowrap  { white-space: nowrap; }
 .adm-code    { font-size: 12px; }
 .adm-question { max-width: 320px; }
+.adm-subtext  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.adm-date-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; color: var(--text); outline: none; cursor: pointer; }
+.adm-date-input:focus { border-color: var(--accent); }
+.adm-btn--ghost { background: transparent; }
+
+/* Cost summary bar above the traces table */
+.adm-cost-summary { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 12px; background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); border-radius: 8px; font-size: 13px; margin-bottom: 12px; }
+.adm-cost-summary__label { color: var(--muted); }
+.adm-cost-summary__item  { color: var(--text); }
+.adm-cost-summary__sep   { color: var(--border); }
+.adm-cost-summary__cost  { color: var(--accent); }
 
 /* Admin table */
 .adm-table-wrap { overflow-x: auto; }

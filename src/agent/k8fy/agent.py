@@ -24,6 +24,14 @@ _DEFAULT_TOOLS = TOOLS
 ADVISOR_MODEL = "claude-opus-4-8"
 EXECUTOR_MODEL = "claude-sonnet-4-6"
 
+# Indicative retail pricing (USD per million tokens) used for cost estimates
+# stored in traces. Not used for billing — informational only.
+_COST_PER_M: Dict[str, Dict[str, float]] = {
+    "claude-opus-4-8":   {"input": 5.0,  "output": 25.0},
+    "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
+    "claude-haiku-4-5":  {"input": 1.0,  "output":  5.0},
+}
+
 _ADVISOR_BETA = "advisor-tool-2026-03-01"
 
 # Timing guidance prepended to the executor's system prompt when the advisor
@@ -367,7 +375,15 @@ class K8fyAgent:
             final_text = next((b.text for b in response.content if b.type == "text"), "")
             metrics.record_request("ok")
             metrics.record_tool_iterations(0)  # 0 = pattern A, no loop
-            return self._to_agent_response(final_text, merged, [])
+            usage = getattr(response, "usage", None)
+            in_tok  = getattr(usage, "input_tokens",  0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
+            cost    = _estimate_cost(self.model, in_tok, out_tok)
+            result  = self._to_agent_response(final_text, merged, [])
+            result.input_tokens      = in_tok
+            result.output_tokens     = out_tok
+            result.estimated_cost_usd = cost
+            return result
         except Exception as e:  # noqa: BLE001
             logger.error("pattern-a reasoning failed: %s", e)
             metrics.record_request("error")
@@ -460,6 +476,12 @@ def _record_loop_usage(
             metrics.record_usage(model, iteration)
     else:
         metrics.record_usage(executor_model, usage)
+
+
+def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Return an indicative USD cost for one Claude call (informational, not billing)."""
+    rates = _COST_PER_M.get(model, {"input": 5.0, "output": 25.0})
+    return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
 
 
 def _sources_from(data: Dict[str, Any]) -> List[str]:

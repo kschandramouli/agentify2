@@ -20,6 +20,12 @@ class AgentResponse(BaseModel):
     tool_calls: List[ToolCall] = []
     details: Dict[str, Any] = {}
 
+    # Token usage + indicative cost for this single agent call (Tier-2 only).
+    # Populated by _reason_pattern_a(); zero for Tier-1 fast-path answers.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
 
 class QueryRequest(BaseModel):
     """Request to the agent for reasoning."""

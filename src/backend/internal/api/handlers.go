@@ -116,7 +116,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("failed to route query", "error", err)
 		telemetry.QueriesTotal.WithLabelValues(intent, "none", "error").Inc()
-		h.logTrace(traceID, req.Question, intent, namespace, "none", "error", nil, 0, nil, start)
+		h.logTrace(traceID, req.Question, intent, namespace, "none", "error", nil, 0, nil, start, nil)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -130,7 +130,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			TraceID:    traceID,
 		}
 		telemetry.QueriesTotal.WithLabelValues(intent, "no_data", "no_data").Inc()
-		h.logTrace(traceID, req.Question, intent, namespace, "no_data", "no_data", nil, 0, nil, start)
+		h.logTrace(traceID, req.Question, intent, namespace, "no_data", "no_data", nil, 0, nil, start, nil)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(resp)
@@ -166,7 +166,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info("answered via deterministic fast-path", "intent", intent, "pods", len(pods))
 		telemetry.QueriesTotal.WithLabelValues(intent, "tier1", "ok").Inc()
 		telemetry.QueryDuration.WithLabelValues("tier1").Observe(time.Since(start).Seconds())
-		h.logTrace(traceID, req.Question, intent, namespace, "tier1", resp.Status, resp.Sources, resp.Confidence, nil, start)
+		h.logTrace(traceID, req.Question, intent, namespace, "tier1", resp.Status, resp.Sources, resp.Confidence, nil, start, nil)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -192,7 +192,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			Sources:    extractPodIDs(pods),
 			TraceID:    traceID,
 		}
-		h.logTrace(traceID, req.Question, intent, namespace, "tier2", "partial", resp.Sources, 0.5, nil, start)
+		h.logTrace(traceID, req.Question, intent, namespace, "tier2", "partial", resp.Sources, 0.5, nil, start, nil)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(resp)
@@ -225,7 +225,7 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		ToolCalls:  toolCalls,
 		Details:    agentResp.Details,
 	}
-	h.logTrace(traceID, req.Question, intent, namespace, "tier2", agentStatus, agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start)
+	h.logTrace(traceID, req.Question, intent, namespace, "tier2", agentStatus, agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start, agentResp)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -645,8 +645,16 @@ func buildPodQuery(reqContext map[string]interface{}) map[string]interface{} {
 
 // logTrace emits the per-query provenance record (spec 004): structured log +
 // async Postgres insert so the HTTP response is never blocked.
-func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status string, sources []string, confidence float64, toolCalls []string, start time.Time) {
+// agentResp may be nil for Tier-1 / error paths (no LLM call was made).
+func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status string, sources []string, confidence float64, toolCalls []string, start time.Time, agentResp *AgentResponse) {
 	latencyMs := time.Since(start).Milliseconds()
+	var inTok, outTok int64
+	var cost float64
+	if agentResp != nil {
+		inTok = agentResp.InputTokens
+		outTok = agentResp.OutputTokens
+		cost = agentResp.EstimatedCostUSD
+	}
 	h.logger.Info("query.trace",
 		"trace_id", traceID,
 		"question", question,
@@ -658,23 +666,30 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 		"confidence", confidence,
 		"tool_calls", toolCalls,
 		"latency_ms", latencyMs,
+		"input_tokens", inTok,
+		"output_tokens", outTok,
+		"estimated_cost_usd", cost,
 	)
 	if h.traceStore != nil {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if err := h.traceStore.InsertTrace(ctx, pgstore.TraceRecord{
-				ID:         uuid.New().String(),
-				TraceID:    traceID,
-				Question:   question,
-				Intent:     intent,
-				Namespace:  namespace,
-				Tier:       tier,
-				Status:     status,
-				Confidence: confidence,
-				Sources:    sources,
-				ToolCalls:  toolCalls,
-				LatencyMs:  latencyMs,
+				ID:               uuid.New().String(),
+				TraceID:          traceID,
+				Question:         question,
+				Intent:           intent,
+				Namespace:        namespace,
+				Tier:             tier,
+				Status:           status,
+				Confidence:       confidence,
+				Sources:          sources,
+				ToolCalls:        toolCalls,
+				LatencyMs:        latencyMs,
+				StartedAt:        start,
+				InputTokens:      inTok,
+				OutputTokens:     outTok,
+				EstimatedCostUSD: cost,
 			}); err != nil {
 				h.logger.Warn("trace persist failed", "error", err)
 			}
