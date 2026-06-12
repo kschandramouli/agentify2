@@ -67,11 +67,14 @@ export function App() {
       <div className="app__body">
         <Sidebar page={page} onNavigate={setPage} />
         <main className="app__content">
-          {page === "observability" && <ServiceEvaluator />}
-          {page === "registry"      && <RegistryPanel />}
-          {page === "traces"        && <TracesPanel />}
-          {page === "sync"          && <SyncPanel />}
-          {page === "metrics"       && <MetricsPanel />}
+          {/* ServiceEvaluator stays mounted so search + results survive navigation */}
+          <div style={{ display: page === "observability" ? "" : "none" }}>
+            <ServiceEvaluator />
+          </div>
+          {page === "registry" && <RegistryPanel />}
+          {page === "traces"   && <TracesPanel />}
+          {page === "sync"     && <SyncPanel />}
+          {page === "metrics"  && <MetricsPanel />}
         </main>
       </div>
     </div>

@@ -2,8 +2,7 @@ import {
   useState, useRef, useEffect, useCallback,
   type ChangeEvent, type KeyboardEvent,
 } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { syncNamespaces } from "../api";
+import { useQuery } from "@tanstack/react-query";
 
 async function fetchTracked(): Promise<string[]> {
   const res = await fetch("/admin/tracked");
@@ -22,12 +21,9 @@ interface Props {
 export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef  = useRef<HTMLUListElement>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
-  const qc = useQueryClient();
 
   // Fetch tracked namespace/service pairs from the backend, refresh every 15s
   const { data: all = [] } = useQuery<string[]>({
@@ -35,23 +31,6 @@ export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
     queryFn: fetchTracked,
     refetchInterval: 15_000,
   });
-
-  async function handleSync(e: React.MouseEvent) {
-    e.stopPropagation();
-    setSyncing(true);
-    setSyncMsg("");
-    try {
-      const result = await syncNamespaces();
-      // Merge sync suggestions into the tracked list and refresh
-      await qc.invalidateQueries({ queryKey: ["tracked"] });
-      setSyncMsg(`✓ ${result.total} namespace${result.total !== 1 ? "s" : ""} discovered`);
-    } catch {
-      setSyncMsg("⚠ Adapter unreachable");
-    } finally {
-      setSyncing(false);
-      setTimeout(() => setSyncMsg(""), 4000);
-    }
-  }
 
   // Filter: match any part of the suggestion (namespace OR service)
   const q = value.trim().toLowerCase();
@@ -168,17 +147,6 @@ export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
         </ul>
       )}
     </div>
-    {/* Sync button lives outside the dropdown wrapper so it doesn't close on click */}
-    <button
-      type="button"
-      className={`sync-btn${syncing ? " sync-btn--spinning" : ""}`}
-      onClick={handleSync}
-      disabled={syncing}
-      title="Sync new namespaces from cluster"
-    >
-      ↻
-    </button>
-    {syncMsg && <span className="sync-msg">{syncMsg}</span>}
     </div>
   );
 }
