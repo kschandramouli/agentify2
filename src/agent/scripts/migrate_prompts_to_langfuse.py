@@ -68,9 +68,9 @@ def main() -> None:
                 prompt=content,
                 labels=["production"],
             )
-            print(f"  ✓  {name}  (version {prompt.version})")
+            print(f"  OK   {name}  (version {prompt.version})")
         except Exception as exc:
-            print(f"  ✗  {name}  FAILED: {exc}", file=sys.stderr)
+            print(f"  ERR  {name}  FAILED: {exc}", file=sys.stderr)
 
     print("\nDone. Verify in Langfuse UI > Prompts.")
 
