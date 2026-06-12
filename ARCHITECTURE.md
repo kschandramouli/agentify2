@@ -122,14 +122,16 @@ src/
 │   ├── app.py                     # FastAPI app setup + /reason endpoint
 │   ├── metrics.py                 # Prometheus token-usage metrics (ADR 0011)
 │   ├── k8fy/
-│   │   ├── agent.py               # K8fyAgent: agentic loop, advisor/executor strategy
-│   │   ├── prompts.py             # system prompts for each skill
+│   │   ├── agent.py               # K8fyAgent: base + _reason_pattern_a() + _fetch()
+│   │   ├── prompts.py             # system prompts for each skill (data keys, no tool instructions)
 │   │   ├── tools.py               # 7 Claude tool definitions
-│   │   └── skills/                # spec 010 — Pattern B skill router
+│   │   └── skills/                # spec 010 — Pattern A skill router (ADR 0017)
 │   │       ├── router.py          # SkillRouter: intent → skill dispatch table
-│   │       ├── health_check.py    # HealthSkill — 3 tools, health-model prompt
-│   │       ├── cert_audit.py      # CertAuditSkill — 1 tool, PKI prompt
-│   │       └── diagnose.py        # DiagnoseSkill — 6 tools, Opus advisor + Sonnet executor
+│   │       ├── health_check.py    # HealthSkill — pre-fetch service_health + pod_events
+│   │       ├── cert_audit.py      # CertAuditSkill — pre-fetch certificates
+│   │       ├── change_history.py  # ChangeHistorySkill — pre-fetch change_history
+│   │       ├── restart_trend.py   # RestartTrendSkill — pre-fetch metrics_history
+│   │       └── diagnose.py        # DiagnoseSkill — parallel pre-fetch 5 signals, Opus 4.8
 │   │   # deterministic health/cert rules now live in the Go backend's
 │   │   # internal/orchestrator/evaluator (Tier-1) — see spec 003
 │   ├── adapters/                  # adapter-specific agents (future)

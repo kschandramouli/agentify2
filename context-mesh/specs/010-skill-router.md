@@ -1,15 +1,21 @@
-# 010 – Skill router (Pattern A + Pattern B: specialised sub-agents per intent)
+# 010 – Skill router (Pattern A: deterministic pre-fetch + single Claude call per skill)
 
 > Builds on [ADR 0006](../decisions/0006-two-tier-query-path.md) (Tier-2 agentic
-> path), [spec 005](005-root-cause-correlation.md) (diagnose intent), and the P5
-> skills design recorded in [ROADMAP.md](../ROADMAP.md#p5--supporting-tooling-when-scaling).
+> path), [spec 005](005-root-cause-correlation.md) (diagnose intent), the P5
+> skills design in [ROADMAP.md](../ROADMAP.md#p5--supporting-tooling-when-scaling),
+> and [ADR 0017](../decisions/0017-pattern-a-skills-standardisation.md)
+> (Pattern A standardisation across all skills).
 
 ## Goal
 
 Replace the single monolithic `K8fyAgent` (all tools, one general prompt) with a
 lightweight skill router that dispatches each intent to a focused sub-agent, reducing
-token cost and improving answer quality by giving each skill only the tools and prompt
+token cost and improving answer quality by giving each skill only the data and prompt
 context relevant to its domain.
+
+All five skill classes use **Pattern A**: pre-fetch all predictable data in parallel
+before the Claude call, then make a single Claude call with the assembled payload.
+No tools are declared to Claude; the data is injected directly into the user message.
 
 ## Depends on
 
@@ -26,73 +32,86 @@ context relevant to its domain.
   table, zero extra classification cost.
 - The Go backend, the `/reason` HTTP contract, and `AgentResponse`/`QueryRequest`
   Pydantic models are **untouched** — the router is Python-layer only.
-- The `REASONING_SCHEMA` (structured JSON output) and the agentic tool-call loop in
-  `K8fyAgent.reason()` are **unchanged** — skills reuse that loop with a narrower
-  context (different prompt + tool subset).
-- `K8fyAgent` becomes the fallback for unrecognised intents (`general_query`,
+- The `REASONING_SCHEMA` (structured JSON output) is unchanged — all skills use it.
+- `K8fyAgent` remains the fallback for unrecognised intents (`general_query`,
   `metrics_query`) — all 7 tools, full prompt, existing behaviour preserved exactly.
-- **Non-goals:** Pattern A pre-fetch optimisation (one Claude call, pre-assembled
-  data) is a follow-up; this spec covers Pattern B routing only. No new HTTP
-  endpoints. No changes to Go.
 
 ## Skills
 
-| Intent | Skill class | Tool subset | Prompt focus | Model strategy |
-|--------|-------------|-------------|--------------|----------------|
-| `health_check` | `HealthSkill` | `get_service_health`, `query_pod`, `get_pod_events` | K8s health model expert | Single model |
-| `cert_check` | `CertAuditSkill` | `get_certificates` | PKI/TLS lifecycle expert | Single model |
-| `diagnose` | `DiagnoseSkill` | all except `get_certificates` (6 tools) | Failure-mode + causal correlation | Advisor/executor (see below) |
-| anything else | `K8fyAgent` (fallback) | all 7 tools | Existing general prompt | Single model |
+| Intent | Skill class | Pre-fetch calls | Data keys injected | Claude model |
+|--------|-------------|-----------------|-------------------|--------------|
+| `health_check` | `HealthSkill` | `get_service_health` + `get_pod_events` (degraded pods) | `service_health`, `events.<pod-id>` | `settings.claude_model` (Sonnet) |
+| `cert_check` | `CertAuditSkill` | `get_certificates(namespace)` | `certificates` | `settings.claude_model` |
+| `change_history` | `ChangeHistorySkill` | `get_change_history(namespace, service_name)` | `change_history` | `settings.claude_model` |
+| `metrics_history` | `RestartTrendSkill` | `get_metrics_history(namespace, service_name, asc)` | `metrics_history` | `settings.claude_model` |
+| `diagnose` | `DiagnoseSkill` | `get_service_health` + `get_pod_events` (all pods) + `get_metrics_history` + `get_change_history` + `get_pod_logs` (crashing pods only) | `service_health`, `events.<pod-id>`, `metrics_history`, `change_history`, `logs.<pod-id>` | `ADVISOR_MODEL` (Opus 4.8) |
+| anything else | `K8fyAgent` (fallback) | none (agentic loop) | — | `settings.claude_model` |
 
-`DiagnoseSkill` deliberately excludes `get_certificates` from its tool set: cert
-data already arrives in the pre-fetched `data` payload (fan-out routes to cert pods
-for `diagnose`), so the agent reads it from context without needing a tool call.
+### Pattern A — all five skill classes
 
-### Pattern A strategy (HealthSkill, CertAuditSkill)
+Every skill overrides `reason()` with the same two-step sequence:
 
-`HealthSkill` and `CertAuditSkill` use Pattern A: the skill derives exactly
-which tool calls are needed from `data` and `context` alone, fires them in
-parallel with `asyncio.gather`, then makes a single Claude call with the
-assembled result. No tools are declared in the Claude request; the pre-fetched
-data is injected directly into the user message.
+```python
+async def reason(self, intent, data, context):
+    prefetched = await self._prefetch(data, context)   # parallel asyncio.gather
+    return await self._reason_pattern_a(intent, data, context, prefetched)  # 1 call
+```
 
-Pre-fetch sequences:
-- `HealthSkill`: `get_service_health` (when `service_name` is in context) +
-  `get_pod_events` for every pod in initial data with `restarts > 0` or
-  `ready=False`. These are the only two tool calls the agentic loop would have
-  made anyway — pre-fetching eliminates the round-trip.
-- `CertAuditSkill`: `get_certificates(namespace)` — unconditionally, since
-  cert data is always the single data source for this intent.
+`_prefetch()` fires all predictable tool calls in parallel. Pre-fetch failures are
+caught per-key, logged as warnings, and excluded from the payload — a failed signal
+does not abort the request.
 
-Cost profile per request: N parallel backend fetches + exactly 1 Claude call.
+`_reason_pattern_a()` (in `K8fyAgent`) merges `data` + `prefetched`, builds the user
+message with a "All relevant data has been pre-fetched and is included above" suffix,
+and makes a single `messages.create` call with **no tools declared**. It records
+`tool_iterations=0` in metrics.
 
-### Advisor/executor strategy (DiagnoseSkill)
+Cost per request: **N parallel backend fetches + exactly 1 Claude call** (predictable).
 
-`DiagnoseSkill` uses the `advisor_20260301` server-side tool to pair two models in a
-single API call. The executor (`claude-sonnet-4-6`) is the primary model and handles
-all tool calls; the advisor (`claude-opus-4-8`) is a server-side tool the executor
-consults mid-generation for strategic guidance. This achieves close to Opus-solo
-diagnostic quality while the bulk of token generation happens at Sonnet rates.
+### Pre-fetch sequences
 
-The advisor is called when the executor is committing to a diagnostic approach, when
-signals conflict, and before producing the final answer. It is capped at 2,048 output
-tokens and 3 calls per request. See `agent.py` constants `ADVISOR_MODEL` /
-`EXECUTOR_MODEL` and `_reason_advisor_executor()` for the implementation.
+**HealthSkill** (`health_check`):
+- `get_service_health(service_name, namespace)` — when `service_name` is in context.
+- `get_pod_events(pod_id, namespace)` — for every pod with `restarts > 0` or
+  `ready=False`. These are the only calls the agentic loop would have made anyway.
+
+**CertAuditSkill** (`cert_check`):
+- `get_certificates(namespace)` — unconditionally; cert data is always the sole
+  data source for this intent.
+
+**ChangeHistorySkill** (`change_history`):
+- `get_change_history(namespace, service_name)` — unconditionally.
+
+**RestartTrendSkill** (`metrics_history`):
+- `get_metrics_history(namespace, service_name, order=asc)` — unconditionally.
+
+**DiagnoseSkill** (`diagnose`):
+- `get_service_health(service_name, namespace)` — when `service_name` is known.
+- `get_pod_events(pod_id, namespace)` — for every pod in initial `data`.
+- `get_metrics_history(namespace, service_name, order=asc)` — always.
+- `get_change_history(namespace, service_name)` — always.
+- `get_pod_logs(pod_id, namespace, previous=True)` — only for crashing pods
+  (`restarts >= 3` or `phase in {Failed, Unknown, CrashLoopBackOff}`).
+- `DiagnoseSkill` overrides `self.model = ADVISOR_MODEL` (`claude-opus-4-8`) after
+  `super().__init__()` — diagnosis warrants the most capable model.
 
 ## Behavior
 
-- **Given** intent `health_check` **when** the router dispatches **then** only
-  `get_service_health`, `query_pod`, `get_pod_events` are offered to Claude; the
-  prompt contains only the health model definitions.
-- **Given** intent `cert_check` **when** the router dispatches **then** only
-  `get_certificates` is offered; the prompt is PKI-focused.
-- **Given** intent `diagnose` **when** the router dispatches **then** 6 operational
-  tools (no cert tool) are offered; the prompt contains crash/failure/temporal
-  diagnosis guidance.
-- **Given** any other intent **when** the router dispatches **then** the full
-  `K8fyAgent` runs unchanged (backward-compatible fallback).
-- **Given** an unknown intent not in the dispatch table **then** falls back to
-  `K8fyAgent` — no error, no change in observable behaviour.
+- **Given** intent `health_check` **then** `HealthSkill._prefetch()` fires service
+  health + degraded-pod events; one Sonnet call assembles the answer.
+- **Given** intent `cert_check` **then** `CertAuditSkill._prefetch()` fetches all
+  namespace certs; one Sonnet call evaluates them.
+- **Given** intent `change_history` **then** `ChangeHistorySkill._prefetch()` fetches
+  change events; one Sonnet call produces the timeline.
+- **Given** intent `metrics_history` **then** `RestartTrendSkill._prefetch()` fetches
+  the restart time-series (asc); one Sonnet call produces the trend analysis.
+- **Given** intent `diagnose` **then** `DiagnoseSkill._prefetch()` fires up to
+  (4 + crashing-pod-count) calls in parallel; one Opus call synthesises the
+  causal narrative.
+- **Given** any other intent **then** the full `K8fyAgent` agentic loop runs
+  unchanged (backward-compatible fallback).
+- **Given** a pre-fetch call fails **then** that signal is excluded from the payload
+  with a warning log; the Claude call proceeds with available data.
 
 ## Interfaces
 
@@ -103,26 +122,33 @@ class SkillRouter:
 
 def get_skill_router() -> SkillRouter: ...   # singleton, thread-safe
 
-# src/agent/k8fy/agent.py  (parameterised K8fyAgent)
+# src/agent/k8fy/agent.py  (base — _reason_pattern_a is defined here)
 class K8fyAgent:
-    def __init__(
-        self,
-        system_prompt: str = SYSTEM_PROMPT,
-        tools: list = TOOLS,
-        advisor_model: str | None = None,   # None → single-model path
-        executor_model: str | None = None,  # defaults to settings.claude_model
-    ): ...
+    async def _reason_pattern_a(
+        self, intent: str, data: dict, context: dict, prefetched: dict
+    ) -> AgentResponse: ...
 
-# src/agent/app.py  (one-line change)
+    async def _fetch(self, tool_name: str, args: dict) -> Any: ...
+
+# src/agent/app.py  (one-line change from monolithic agent)
 # BEFORE: agent = get_k8fy_agent(); response = await agent.reason(...)
 # AFTER:  response = await get_skill_router().dispatch(request.intent, ...)
 ```
 
 ## Acceptance criteria
 
-- [ ] `health_check` query reaches `HealthSkill`; Claude is offered exactly 3 tools.
-- [ ] `cert_check` query reaches `CertAuditSkill`; Claude is offered exactly 1 tool.
-- [ ] `diagnose` query reaches `DiagnoseSkill`; Claude is offered exactly 6 tools.
-- [ ] `general_query` / `metrics_query` fall through to `K8fyAgent` (all 7 tools).
+- [ ] `health_check` query reaches `HealthSkill`; Claude is called with **no tools**
+      declared; `tool_iterations` metric records 0.
+- [ ] `cert_check` query reaches `CertAuditSkill`; Claude is called with **no tools**
+      declared; `tool_iterations` records 0.
+- [ ] `change_history` query reaches `ChangeHistorySkill`; change events appear in
+      the user message; `tool_iterations` records 0.
+- [ ] `metrics_history` query reaches `RestartTrendSkill`; restart time-series appears
+      in the user message; `tool_iterations` records 0.
+- [ ] `diagnose` query reaches `DiagnoseSkill`; all parallel pre-fetch signals appear
+      in the user message; `tool_iterations` records 0; model used is `claude-opus-4-8`.
+- [ ] `general_query` / `metrics_query` fall through to `K8fyAgent` (agentic loop,
+      all 7 tools).
 - [ ] `AgentResponse` schema is identical for all skill paths — Go backend unchanged.
-- [ ] Existing unit tests for `K8fyAgent.reason()` still pass (no breaking changes).
+- [ ] A pre-fetch failure on one signal does not fail the request; it is logged as a
+      warning and excluded from the assembled payload.

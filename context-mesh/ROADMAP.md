@@ -29,7 +29,8 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P4b** | Temporal spine (restart time-series → causal diagnosis); classical ML deferred | **✅ spine done (2026-06-05: k8fy.metrics append-only samples, windowed query, get_metrics_history tool); ML still Proposed** | [spec 006](specs/006-temporal-ingestion-and-history.md), [ADR 0013](decisions/0013-temporal-data-in-postgres-events-table.md) |
 | **P4b-ops** | Operational context for causal diagnosis: deploy/change events + on-demand pod logs | **✅ v1 done (2026-06-05: `k8fy.events` deploy events + `get_change_history`; ephemeral redacted log tail via `get_pod_logs`; live-validated deploy↔onset correlation). Hardened 2026-06-06: events-table retention janitor ([ADR 0015](decisions/0015-events-table-retention.md)) + bearer-token auth on the adapter `/logs` surface.** | [spec 007](specs/007-change-events.md), [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) |
 | **P4c** | Investigation-on-anomaly loop (human-in-loop, **no** auto-remediation) | **✅ v1 done (2026-06-06: opt-in periodic deterministic sweep → diagnose → Slack-compatible webhook; namespace incident dedup + cooldown + per-sweep cap; redacted egress; read-only)** | [spec 009](specs/009-investigation-on-anomaly.md), [ADR 0016](decisions/0016-proactive-investigation-loop.md); respects [ADR 0003](decisions/0003-read-only-to-actions-boundary.md) |
-| **P5** | Supporting tooling: AI gateway (semantic cache/budgets), eval harness + tool-call budgets, agent tracing | Later | ops/spec |
+| **P5** | Pattern A standardisation across all skill classes (deterministic pre-fetch + single Claude call per intent) | **✅ Done (2026-06-11: all 5 skills on Pattern A; DiagnoseSkill advisor/executor removed; [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md))** | [spec 010](specs/010-skill-router.md), [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md) |
+| **P5+** | Supporting tooling: AI gateway (semantic cache/budgets), eval harness + tool-call budgets, agent tracing | Later | ops/spec |
 
 ---
 
@@ -194,9 +195,19 @@ blip (instead of 500s), invalidates on pod formation, and exposes
   posts a summary to Slack/PagerDuty. **Human-in-the-loop; no auto-remediation** —
   consistent with [ADR 0003](decisions/0003-read-only-to-actions-boundary.md).
 
-## P5 — Supporting tooling (when scaling)
+## P5 — Pattern A skills standardisation ✅ Done (2026-06-11)
 
-### Tools vs Skills — the next abstraction layer
+All five skill classes (`HealthSkill`, `CertAuditSkill`, `ChangeHistorySkill`,
+`RestartTrendSkill`, `DiagnoseSkill`) now use Pattern A: deterministic parallel
+pre-fetch of all predictable signals + exactly one Claude call per request. No tools
+are declared to Claude; data is injected directly into the user message. The
+advisor/executor strategy (`advisor_20260301` beta) in `DiagnoseSkill` is removed.
+See [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md) and
+[spec 010](specs/010-skill-router.md) for the full implementation record.
+
+## P5+ — Supporting tooling (when scaling)
+
+### Tools vs Skills — context (historical)
 
 **Tools** are atomic, stateless functions the LLM calls during reasoning to fetch
 data. We already have seven: `get_service_health`, `get_pod_logs`,
