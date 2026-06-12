@@ -206,8 +206,11 @@ export interface TraceRecord {
   created_at: string;
 }
 
-export function listTraces(): Promise<TraceRecord[]> {
-  return getJSON<TraceRecord[]>("/admin/traces");
+export async function listTraces(): Promise<TraceRecord[]> {
+  const res = await fetch("/admin/traces");
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<TraceRecord[]>;
 }
 
 // ── Metrics summary ───────────────────────────────────────────────────────────
@@ -223,8 +226,16 @@ export interface MetricsSummary {
   collected_at: string;
 }
 
-export function getMetricsSummary(): Promise<MetricsSummary> {
-  return getJSON<MetricsSummary>("/admin/metrics/summary");
+export async function getMetricsSummary(): Promise<MetricsSummary> {
+  const res = await fetch("/admin/metrics/summary");
+  if (res.status === 404) return {
+    total_queries: 0, last_24h_count: 0,
+    queries_by_tier: {}, queries_by_status: {}, queries_by_intent: {},
+    avg_agent_latency_ms: 0, p95_agent_latency_ms: 0,
+    collected_at: new Date().toISOString(),
+  };
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<MetricsSummary>;
 }
 
 export interface SyncResult {
