@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict
 
 from k8fy.agent import K8fyAgent
+from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import CERT_AUDIT_PROMPT
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
@@ -26,7 +27,10 @@ class CertAuditSkill(K8fyAgent):
     """PKI/TLS lifecycle expert — Pattern A: pre-fetch certs + single Claude call."""
 
     def __init__(self) -> None:
-        super().__init__(system_prompt=CERT_AUDIT_PROMPT, tools=_CERT_TOOLS)
+        super().__init__(
+            system_prompt=get_prompt("k8fy/cert-audit", CERT_AUDIT_PROMPT),
+            tools=_CERT_TOOLS,
+        )
 
     async def reason(
         self, intent: str, data: Dict[str, Any], context: Dict[str, Any] | None = None

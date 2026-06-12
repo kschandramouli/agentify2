@@ -1,4 +1,19 @@
-"""System prompts for the K8fy agent and its skill sub-agents."""
+"""Local fallback prompts for the K8fy agent and its skill sub-agents.
+
+These strings are the source-of-truth fallbacks used when Langfuse is not
+configured or a prompt is not yet published there.  The live/editable copies
+live in Langfuse under the label "production":
+
+  k8fy/system          — SYSTEM_PROMPT
+  k8fy/health-check    — HEALTH_SKILL_PROMPT
+  k8fy/cert-audit      — CERT_AUDIT_PROMPT
+  k8fy/change-history  — CHANGE_HISTORY_PROMPT
+  k8fy/restart-trend   — RESTART_TREND_PROMPT
+  k8fy/diagnose        — DIAGNOSE_PROMPT
+
+Run `python scripts/migrate_prompts_to_langfuse.py` to push the current local
+strings into Langfuse for the first time.
+"""
 
 # ---------------------------------------------------------------------------
 # General-purpose prompt (fallback / K8fyAgent)
@@ -67,17 +82,6 @@ Be concise: a 1-2 sentence summary plus the key supporting facts (pod/replica
 counts, restart counts, expiry dates). Put any suggested operator actions in the
 `recommendations` field. For non-diagnostic answers, leave `findings` empty,
 `likely_cause` null, and `severity` "info".
-"""
-
-HEALTH_CHECK_PROMPT = """Given this pod/service status data, assess the health and provide a clear answer.
-Focus on: phase, ready condition, restart count, recent events, endpoint status.
-Apply the health model strictly.
-Return JSON with: answer (string), status (healthy|degraded|unhealthy), confidence (0-100), reasoning (string).
-"""
-
-CERTIFICATE_RENEWAL_PROMPT = """Evaluate certificate renewal needs.
-Given: certificate name, current expiry date, renewal threshold (30 days).
-Return JSON with: should_renew (bool), days_until_expiry (int), reason (string), confidence (0-100).
 """
 
 # ---------------------------------------------------------------------------

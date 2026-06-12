@@ -31,5 +31,8 @@ prescriptive-guidance.pdf
 .terraform/
 .terraform.lock.hcl.bak
 
-# Claude Code internal files
+# Claude Code internal files (settings, memory) — do not commit
 .claude/
+# ...but project-level skills are shared config and should be versioned
+!.claude/skills/
+!.claude/skills/**

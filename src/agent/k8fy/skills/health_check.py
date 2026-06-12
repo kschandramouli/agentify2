@@ -19,6 +19,7 @@ import logging
 from typing import Any, Dict, List
 
 from k8fy.agent import K8fyAgent
+from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import HEALTH_SKILL_PROMPT
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
@@ -34,7 +35,10 @@ class HealthSkill(K8fyAgent):
     """K8s health model expert — Pattern A: parallel pre-fetch + single Claude call."""
 
     def __init__(self) -> None:
-        super().__init__(system_prompt=HEALTH_SKILL_PROMPT, tools=_HEALTH_TOOLS)
+        super().__init__(
+            system_prompt=get_prompt("k8fy/health-check", HEALTH_SKILL_PROMPT),
+            tools=_HEALTH_TOOLS,
+        )
 
     async def reason(
         self, intent: str, data: Dict[str, Any], context: Dict[str, Any] | None = None

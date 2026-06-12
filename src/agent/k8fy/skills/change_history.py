@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict
 
 from k8fy.agent import K8fyAgent
+from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import CHANGE_HISTORY_PROMPT
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
@@ -27,7 +28,10 @@ class ChangeHistorySkill(K8fyAgent):
     """Deploy/rollout timeline expert — Pattern A: unconditional pre-fetch + single Claude call."""
 
     def __init__(self) -> None:
-        super().__init__(system_prompt=CHANGE_HISTORY_PROMPT, tools=_TOOLS)
+        super().__init__(
+            system_prompt=get_prompt("k8fy/change-history", CHANGE_HISTORY_PROMPT),
+            tools=_TOOLS,
+        )
 
     async def reason(
         self, intent: str, data: Dict[str, Any], context: Dict[str, Any] | None = None

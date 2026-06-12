@@ -20,6 +20,7 @@ import logging
 from typing import Any, Dict, List
 
 from k8fy.agent import ADVISOR_MODEL, K8fyAgent
+from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import DIAGNOSE_PROMPT
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
@@ -46,7 +47,10 @@ class DiagnoseSkill(K8fyAgent):
     """Failure-mode + causal correlation expert — Pattern A: parallel pre-fetch + one Opus call."""
 
     def __init__(self) -> None:
-        super().__init__(system_prompt=DIAGNOSE_PROMPT, tools=_DIAGNOSE_TOOLS)
+        super().__init__(
+            system_prompt=get_prompt("k8fy/diagnose", DIAGNOSE_PROMPT),
+            tools=_DIAGNOSE_TOOLS,
+        )
         # Diagnosis warrants the most capable model; override the default.
         self.model = ADVISOR_MODEL  # claude-opus-4-8
 

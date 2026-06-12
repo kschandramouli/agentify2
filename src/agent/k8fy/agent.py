@@ -10,11 +10,12 @@ from pydantic import ValidationError
 import metrics
 from config.claude_client import get_claude_client
 from config.settings import get_settings
+from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import SYSTEM_PROMPT
 from k8fy.tools import TOOLS, process_tool_call
 from models.response import AgentResponse, ReasoningOutput, ToolCall
 
-_DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT
+_DEFAULT_SYSTEM_PROMPT = get_prompt("k8fy/system", SYSTEM_PROMPT)
 _DEFAULT_TOOLS = TOOLS
 
 # Model pair for the advisor/executor strategy.

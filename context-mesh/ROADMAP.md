@@ -274,6 +274,19 @@ same point where Tier-1 currently hands off to Tier-2 (`handlers.go`
 **Implementation order:** Pattern A first (lower risk, immediate savings), then
 Pattern B (higher quality, requires skill router + per-domain prompts).
 
+### Langfuse prompt management ✅ Done (2026-06-11)
+
+All six K8fy skill prompts are now managed via Langfuse under the label
+`"production"` (names: `k8fy/system`, `k8fy/health-check`, `k8fy/cert-audit`,
+`k8fy/change-history`, `k8fy/restart-trend`, `k8fy/diagnose`). The agent fetches
+live prompts at startup via `k8fy/prompt_manager.py` with a local fallback so
+the service starts cleanly without credentials. Prompts can now be edited in the
+Langfuse UI and picked up without a code deploy (60 s cache TTL).
+
+Setup: set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` in
+environment or `.env`, then run `python scripts/migrate_prompts_to_langfuse.py`
+once to push local strings into Langfuse.
+
 ### Other P5 items
 
 - **AI gateway** — semantic caching (cache hits ~5ms vs ~2s full round-trip),

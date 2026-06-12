@@ -123,7 +123,8 @@ src/
 │   ├── metrics.py                 # Prometheus token-usage metrics (ADR 0011)
 │   ├── k8fy/
 │   │   ├── agent.py               # K8fyAgent: base + _reason_pattern_a() + _fetch()
-│   │   ├── prompts.py             # system prompts for each skill (data keys, no tool instructions)
+│   │   ├── prompt_manager.py      # Langfuse-first prompt fetcher; local fallback
+│   │   ├── prompts.py             # local fallback strings (source of truth when Langfuse absent)
 │   │   ├── tools.py               # 7 Claude tool definitions
 │   │   └── skills/                # spec 010 — Pattern A skill router (ADR 0017)
 │   │       ├── router.py          # SkillRouter: intent → skill dispatch table
@@ -134,6 +135,8 @@ src/
 │   │       └── diagnose.py        # DiagnoseSkill — parallel pre-fetch 5 signals, Opus 4.8
 │   │   # deterministic health/cert rules now live in the Go backend's
 │   │   # internal/orchestrator/evaluator (Tier-1) — see spec 003
+│   ├── scripts/
+│   │   └── migrate_prompts_to_langfuse.py  # one-time: push local prompts to Langfuse
 │   ├── adapters/                  # adapter-specific agents (future)
 │   │   └── __init__.py
 │   ├── models/                    # Pydantic models (shared)
