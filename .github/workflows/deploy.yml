@@ -194,31 +194,26 @@ jobs:
       run: |
         kubectl rollout status deployment/agentify-backend  -n agentify --timeout=300s
 
-        # Agent rollout: poll every 30s and force-delete any pod stuck in
-        # Terminating. On EKS after scale-down/up the kubelet can fail to
-        # process SIGKILL, leaving the old pod in Terminating indefinitely.
-        # Force-deleting removes the stale API object so the rollout proceeds.
-        # progressDeadlineSeconds on the Deployment is 900s — safely above
-        # this loop's 600s ceiling so the deployment never ProgressDeadlineExceeds
-        # while we are still retrying.
-        AGENT_OK=false
-        for i in $(seq 1 20); do
-          if kubectl rollout status deployment/agentify-agent -n agentify --timeout=30s 2>&1; then
-            AGENT_OK=true
-            break
-          fi
-          STUCK=$(kubectl get pods -n agentify -l app=agentify-agent -o json | \
-            jq -r '.items[] | select(.metadata.deletionTimestamp != null) | .metadata.name')
-          if [ -n "$STUCK" ]; then
-            echo "Force-deleting stuck Terminating pods: $STUCK"
-            printf '%s\n' "$STUCK" | xargs kubectl delete pod -n agentify --grace-period=0 --force
-          fi
-        done
-        if [ "$AGENT_OK" != "true" ]; then
-          echo "Error: agentify-agent rollout did not complete after 600s"
-          kubectl describe deployment agentify-agent -n agentify
-          exit 1
+        # Agent rollout: give K8s 60s to roll out normally, then force-delete
+        # any agent pods beyond the desired count of 1 (handles both pods stuck
+        # in Terminating AND zombie Running pods from old ReplicaSets that the
+        # deployment controller never cleaned up after prior failed deploys).
+        # Sort by creationTimestamp so the oldest pods are deleted first.
+        echo "=== agentify-agent rollout ==="
+        kubectl rollout status deployment/agentify-agent -n agentify --timeout=60s || true
+
+        PODS=$(kubectl get pods -n agentify -l app=agentify-agent \
+          --sort-by=.metadata.creationTimestamp \
+          -o jsonpath='{.items[*].metadata.name}')
+        COUNT=$(echo $PODS | wc -w)
+        if [ "$COUNT" -gt 1 ]; then
+          echo "$COUNT agent pods running — force-deleting $(($COUNT - 1)) stale pod(s)"
+          echo $PODS | tr ' ' '\n' | head -n $(($COUNT - 1)) | \
+            xargs kubectl delete pod -n agentify --grace-period=0 --force
+          sleep 10
         fi
+
+        kubectl rollout status deployment/agentify-agent -n agentify --timeout=300s
 
         kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
         kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
