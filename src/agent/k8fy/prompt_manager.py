@@ -33,7 +33,8 @@ def _get_client():
         return _langfuse
 
     _initialised = True
-    from config.settings import settings  # imported lazily to avoid circular deps
+    from config.settings import get_settings  # imported lazily to avoid circular deps
+    settings = get_settings()
 
     if not settings.langfuse_public_key:
         logger.info(
