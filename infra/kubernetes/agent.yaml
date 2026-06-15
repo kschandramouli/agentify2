@@ -5,6 +5,11 @@ metadata:
   namespace: agentify
 spec:
   replicas: 1
+  # Allow 900s before the deployment controller marks the rollout as failed.
+  # Must exceed the CI rollout-wait window (600s) so kubectl always sees the
+  # deployment as "in progress" rather than "ProgressDeadlineExceeded" while
+  # the stuck-pod cleanup loop is running.
+  progressDeadlineSeconds: 900
   selector:
     matchLabels:
       app: agentify-agent
