@@ -227,7 +227,7 @@ function DiagnosisCard({
         )}
       </div>
 
-      {/* Summary callout — headline (new format) or answer (old format) */}
+      {/* Headline callout — emoji + service status line */}
       <div className={`dc-summary dc-summary--${sev}`}>
         {d.severity && (
           <span className={`dc-sev-pill dc-sev-pill--${sev}`}>{d.severity}</span>
@@ -235,8 +235,15 @@ function DiagnosisCard({
         <span className="dc-summary__text">{d.headline ?? resp.answer}</span>
       </div>
 
-      {/* 40-word summary prose (new k8fy/health-check format only) */}
-      {d.summary && <p className="dc-body">{d.summary}</p>}
+      {/* ≤15-word answer (diagnose format) — shown below headline when both present */}
+      {d.headline && resp.answer && (
+        <p className="dc-body dc-body--answer">{resp.answer}</p>
+      )}
+
+      {/* Incident summary — ≤50 words (diagnose) or ≤40 words (health-check) */}
+      {(d.incident_summary || d.summary) && (
+        <p className="dc-body">{d.incident_summary ?? d.summary}</p>
+      )}
 
       {/* Service health metrics (new k8fy/health-check format only) */}
       {d.service_health && (
@@ -253,6 +260,16 @@ function DiagnosisCard({
               {d.service_health.endpoints} endpoint{d.service_health.endpoints !== 1 ? "s" : ""}
             </span>
           </div>
+        </div>
+      )}
+
+      {/* Timeline — chronological evidence trail (diagnose format) */}
+      {!!d.timeline?.length && (
+        <div className="dc-section">
+          <span className="dc-section__label">Timeline</span>
+          <ol className="dc-timeline">
+            {d.timeline.map((t, i) => <li key={i} className="dc-timeline__entry">{t}</li>)}
+          </ol>
         </div>
       )}
 

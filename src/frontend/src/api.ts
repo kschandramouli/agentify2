@@ -69,6 +69,9 @@ export interface QueryResponse {
     headline?: string;
     summary?: string;
     service_health?: ServiceHealthDetail;
+    // Diagnosis (Tier-2) — new k8fy/diagnose format
+    incident_summary?: string;
+    timeline?: string[];
   };
 }
 

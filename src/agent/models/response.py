@@ -71,10 +71,14 @@ class ReasoningOutput(BaseModel):
     confidence: float = 0.0  # 0.0–1.0
     recommendations: List[str] = []
 
-    # New k8fy/health-check fields (empty/None for old-format responses).
+    # New k8fy/health-check fields (empty/None for other prompts).
     headline: str = ""        # e.g. "🟢 checkout-api healthy (5/5 pods ready)"
-    summary: str = ""         # ≤40-word prose summary
+    summary: str = ""         # ≤40-word prose summary (health-check)
     service_health: Optional[ServiceHealthDetail] = None
+
+    # New k8fy/diagnose fields (empty/None for other prompts).
+    incident_summary: str = ""  # ≤50-word outage description
+    timeline: List[str] = []    # chronological evidence trail
 
     # findings: str for old format, FindingDetail for new health-check format.
     findings: List[Any] = []

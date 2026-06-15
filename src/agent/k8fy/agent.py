@@ -91,6 +91,41 @@ REASONING_SCHEMA: Dict[str, Any] = {
 }
 
 
+# Schema for the updated k8fy/diagnose prompt.
+# Adds headline, incident_summary, and timeline alongside the existing answer field.
+DIAGNOSE_REASONING_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "unhealthy", "unknown"],
+        },
+        "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+        "confidence": {"type": "number"},
+        "headline": {"type": "string", "description": "One sentence with emoji status indicator."},
+        "answer": {"type": "string", "description": "≤15 words: affected pods — confirmed cause or unconfirmed."},
+        "incident_summary": {"type": "string", "description": "≤50-word description of impact and affected replicas."},
+        "timeline": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Chronological observed evidence trail.",
+        },
+        "findings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "One evidence item per entry, ordered by severity.",
+        },
+        "likely_cause": {"type": ["string", "null"]},
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "status", "severity", "confidence",
+        "headline", "answer", "incident_summary",
+        "timeline", "findings", "likely_cause", "recommendations",
+    ],
+    "additionalProperties": False,
+}
+
 # Schema for the updated k8fy/health-check prompt.  headline + summary replace
 # answer; findings are structured objects; service_health is a new summary block.
 HEALTH_REASONING_SCHEMA: Dict[str, Any] = {
@@ -472,9 +507,11 @@ class K8fyAgent:
                 tool_calls=tool_calls,
             )
 
-        # headline takes precedence when the new k8fy/health-check format is used;
-        # fall back to answer for all other skills that still use the old format.
-        answer = parsed.headline or parsed.answer
+        # answer takes precedence when both answer and headline are provided
+        # (k8fy/diagnose format: answer is the ≤15-word operational statement,
+        #  headline is the emoji summary line — both should reach the frontend).
+        # For k8fy/health-check, answer is empty and headline becomes the answer.
+        answer = parsed.answer or parsed.headline
         details: Dict[str, Any] = {
             "recommendations": parsed.recommendations,
             "findings": [
@@ -490,6 +527,10 @@ class K8fyAgent:
             details["summary"] = parsed.summary
         if parsed.service_health is not None:
             details["service_health"] = parsed.service_health.model_dump()
+        if parsed.incident_summary:
+            details["incident_summary"] = parsed.incident_summary
+        if parsed.timeline:
+            details["timeline"] = parsed.timeline
 
         return AgentResponse(
             answer=answer,
