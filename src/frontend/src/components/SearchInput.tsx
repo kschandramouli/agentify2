@@ -2,7 +2,7 @@ import {
   useState, useRef, useEffect, useCallback,
   type ChangeEvent, type KeyboardEvent,
 } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 async function fetchTracked(): Promise<string[]> {
   const res = await fetch("/admin/tracked");
@@ -21,9 +21,11 @@ interface Props {
 export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  const [syncing, setSyncing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef  = useRef<HTMLUListElement>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
 
   // Fetch tracked namespace/service pairs from the backend, refresh every 15s
   const { data: all = [] } = useQuery<string[]>({
@@ -31,6 +33,16 @@ export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
     queryFn: fetchTracked,
     refetchInterval: 15_000,
   });
+
+  async function handleSync() {
+    setSyncing(true);
+    try {
+      await fetch("/admin/sync", { method: "POST" });
+      await queryClient.invalidateQueries({ queryKey: ["tracked"] });
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   // Filter: match any part of the suggestion (namespace OR service)
   const q = value.trim().toLowerCase();
@@ -111,6 +123,13 @@ export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
     <div className="search-wrap search-wrap--outer" ref={wrapRef}>
     <div className="search-wrap" style={{ flex: 1 }}>
       <span className="search-icon">⌕</span>
+      <button
+        type="button"
+        className={`sync-btn${syncing ? " sync-btn--spinning" : ""}`}
+        onClick={handleSync}
+        disabled={syncing || disabled}
+        title="Sync namespaces from cluster"
+      >↻</button>
       <input
         ref={inputRef}
         className="search-input"

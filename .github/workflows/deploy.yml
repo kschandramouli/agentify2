@@ -197,6 +197,26 @@ jobs:
         kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
         kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
 
+    - name: Seed namespace cache (post-deploy sync)
+      # Port-forward the backend and call /admin/sync so discovered namespaces/services
+      # are written into current_state immediately — without this the search autocomplete
+      # stays empty after a scale-up until the adapter re-emits all ingestion events.
+      run: |
+        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+        PF_PID=$!
+        SYNCED=false
+        for i in 1 2 3 4 5 6; do
+          sleep 5
+          if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
+            echo "Namespace sync succeeded on attempt $i"
+            SYNCED=true
+            break
+          fi
+          echo "Attempt $i: backend not ready yet, retrying..."
+        done
+        kill $PF_PID 2>/dev/null || true
+        $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until the adapter re-emits events"
+
     - name: Debug pod state (always runs — helps diagnose failures)
       if: always()
       run: |

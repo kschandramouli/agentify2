@@ -887,6 +887,30 @@ func (h *Handler) HandleSyncNamespaces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Persist discovered entities to current_state so /admin/tracked picks them up
+	// immediately — without this the search autocomplete stays empty after a
+	// scale-up until the adapter re-emits all ingestion events (can take minutes).
+	if kv, kerr := h.orch.GetBackendFactory().GetBackend("kv"); kerr == nil {
+		if seeder, ok := kv.(syncSeeder); ok {
+			seeded := 0
+			for _, ns := range namespaces {
+				podID := "k8fy.live-state." + ns.Namespace
+				for _, svc := range ns.Services {
+					if _, serr := seeder.Store(r.Context(), podID, map[string]interface{}{
+						"entity_key":      svc,
+						"event_namespace": ns.Namespace,
+						"type":            "service_synced",
+						"source":          "sync",
+						"payload":         map[string]interface{}{"name": svc},
+					}); serr == nil {
+						seeded++
+					}
+				}
+			}
+			h.logger.Info("seeded current_state from sync", "namespaces", len(namespaces), "services", seeded)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"namespaces":  namespaces,
 		"suggestions": suggestions,
@@ -897,6 +921,13 @@ func (h *Handler) HandleSyncNamespaces(w http.ResponseWriter, r *http.Request) {
 // trackedEntitiesProvider is satisfied by *postgres.CurrentState.
 type trackedEntitiesProvider interface {
 	TrackedEntities(ctx context.Context) ([]string, error)
+}
+
+// syncSeeder is satisfied by *postgres.CurrentState — it lets HandleSyncNamespaces
+// write discovered entities directly into current_state so the frontend autocomplete
+// reflects live adapter data without waiting for ingestion events to re-arrive.
+type syncSeeder interface {
+	Store(ctx context.Context, podID string, data map[string]interface{}) (string, error)
 }
 
 // HandleTrackedEntities returns all known namespace/service pairs from the
