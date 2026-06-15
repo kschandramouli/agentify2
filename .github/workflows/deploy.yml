@@ -204,10 +204,22 @@ jobs:
         echo "=== agentify-agent rollout ==="
         kubectl rollout status deployment/agentify-agent -n agentify --timeout=60s || true
 
-        # Step 1: scale all old RSes (non-current revision) to 0
+        # Identify the current RS by revision annotation (same mechanism K8s uses internally).
+        # We use the pod-template-hash label — not creation time — to distinguish
+        # current pods from stale ones. Creation time is unreliable: the zombie RS
+        # recreates its pod after each force-delete, so its pod can be newer than
+        # the current RS's pod, causing us to delete the wrong one.
         CURRENT_REV=$(kubectl get deployment agentify-agent -n agentify -o json | \
           jq -r '.metadata.annotations["deployment.kubernetes.io/revision"] // empty')
+
         if [ -n "$CURRENT_REV" ]; then
+          CURRENT_HASH=$(kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
+            jq -r --arg rev "$CURRENT_REV" \
+            '.items[] | select(.metadata.annotations["deployment.kubernetes.io/revision"] == $rev)
+             | .metadata.labels["pod-template-hash"]')
+          echo "Current RS hash: $CURRENT_HASH (revision $CURRENT_REV)"
+
+          # Scale all non-current RSes to 0 so deleted pods are not recreated
           kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
             jq -r --arg rev "$CURRENT_REV" \
             '.items[] | select(
@@ -219,18 +231,19 @@ jobs:
             echo "Scaling zombie RS to 0: $rs"
             kubectl scale replicaset "$rs" -n agentify --replicas=0
           done
-        fi
 
-        # Step 2: force-delete stale pods (oldest first, keep only the newest)
-        PODS=$(kubectl get pods -n agentify -l app=agentify-agent \
-          --sort-by=.metadata.creationTimestamp \
-          -o jsonpath='{.items[*].metadata.name}')
-        COUNT=$(echo $PODS | wc -w)
-        if [ "$COUNT" -gt 1 ]; then
-          echo "$COUNT agent pods — force-deleting $(($COUNT - 1)) stale pod(s)"
-          echo $PODS | tr ' ' '\n' | head -n $(($COUNT - 1)) | \
-            xargs kubectl delete pod -n agentify --grace-period=0 --force
-          sleep 5
+          # Force-delete pods not belonging to the current RS (matched by hash, not age)
+          if [ -n "$CURRENT_HASH" ]; then
+            kubectl get pods -n agentify -l app=agentify-agent -o json | \
+              jq -r --arg hash "$CURRENT_HASH" \
+              '.items[] | select(.metadata.labels["pod-template-hash"] != $hash) | .metadata.name' | \
+            while read pod; do
+              [ -z "$pod" ] && continue
+              echo "Force-deleting stale pod: $pod"
+              kubectl delete pod "$pod" -n agentify --grace-period=0 --force
+            done
+            sleep 5
+          fi
         fi
 
         kubectl rollout status deployment/agentify-agent -n agentify --timeout=300s
