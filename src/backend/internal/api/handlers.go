@@ -858,6 +858,64 @@ func (h *Handler) HandlePodRegistryGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(pod)
 }
 
+// seedNamespaceCache writes the given discovered namespaces into current_state so
+// TrackedEntities (and therefore the frontend autocomplete) reflects live data.
+// Returns the number of services seeded.
+func (h *Handler) seedNamespaceCache(ctx context.Context, namespaces []NamespaceEntry) int {
+	kv, err := h.orch.GetBackendFactory().GetBackend("kv")
+	if err != nil {
+		return 0
+	}
+	seeder, ok := kv.(syncSeeder)
+	if !ok {
+		return 0
+	}
+	seeded := 0
+	for _, ns := range namespaces {
+		podID := "k8fy.live-state." + ns.Namespace
+		for _, svc := range ns.Services {
+			if _, serr := seeder.Store(ctx, podID, map[string]interface{}{
+				"entity_key":      svc,
+				"event_namespace": ns.Namespace,
+				"type":            "service_synced",
+				"source":          "sync",
+				"payload":         map[string]interface{}{"name": svc},
+			}); serr == nil {
+				seeded++
+			}
+		}
+	}
+	return seeded
+}
+
+// SeedNamespaceCache runs once at startup in a background goroutine, polling the
+// adapter until it is ready, then seeding current_state with the full namespace/
+// service list. This ensures the search autocomplete is populated immediately
+// after any pod restart — including after a pause/resume cycle — without waiting
+// for the adapter to re-emit all ingestion events (which can take minutes).
+func (h *Handler) SeedNamespaceCache(ctx context.Context) {
+	const retryInterval = 30 * time.Second
+	const maxAttempts = 12 // 6 minutes total
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		namespaces, err := h.adapterClient.DiscoverNamespaces(ctx)
+		if err != nil {
+			h.logger.Info("startup namespace sync: adapter not ready, will retry",
+				"attempt", attempt, "max", maxAttempts, "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryInterval):
+			}
+			continue
+		}
+		seeded := h.seedNamespaceCache(ctx, namespaces)
+		h.logger.Info("startup namespace sync complete",
+			"namespaces", len(namespaces), "services", seeded)
+		return
+	}
+	h.logger.Warn("startup namespace sync: adapter did not become available within 6 minutes")
+}
+
 // HandleSyncNamespaces calls the adapter to discover current K8s namespaces +
 // services, and returns them so the frontend search autocomplete can be updated
 // immediately. The CronJob calls the same endpoint on a schedule.
@@ -887,29 +945,8 @@ func (h *Handler) HandleSyncNamespaces(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Persist discovered entities to current_state so /admin/tracked picks them up
-	// immediately — without this the search autocomplete stays empty after a
-	// scale-up until the adapter re-emits all ingestion events (can take minutes).
-	if kv, kerr := h.orch.GetBackendFactory().GetBackend("kv"); kerr == nil {
-		if seeder, ok := kv.(syncSeeder); ok {
-			seeded := 0
-			for _, ns := range namespaces {
-				podID := "k8fy.live-state." + ns.Namespace
-				for _, svc := range ns.Services {
-					if _, serr := seeder.Store(r.Context(), podID, map[string]interface{}{
-						"entity_key":      svc,
-						"event_namespace": ns.Namespace,
-						"type":            "service_synced",
-						"source":          "sync",
-						"payload":         map[string]interface{}{"name": svc},
-					}); serr == nil {
-						seeded++
-					}
-				}
-			}
-			h.logger.Info("seeded current_state from sync", "namespaces", len(namespaces), "services", seeded)
-		}
-	}
+	seeded := h.seedNamespaceCache(r.Context(), namespaces)
+	h.logger.Info("seeded current_state from sync", "namespaces", len(namespaces), "services", seeded)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"namespaces":  namespaces,

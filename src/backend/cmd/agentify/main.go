@@ -126,6 +126,12 @@ func main() {
 		}
 	}()
 
+	// Seed the namespace/service cache from the adapter on every startup.
+	// Runs in the background so it never delays serving traffic. Retries for
+	// up to 6 minutes so it works even when the adapter starts after the backend
+	// (common after a pause/resume cycle where all pods start simultaneously).
+	go handler.SeedNamespaceCache(janitorCtx)
+
 	// Graceful shutdown on SIGTERM / SIGINT
 	sigch := make(chan os.Signal, 1)
 	signal.Notify(sigch, syscall.SIGTERM, syscall.SIGINT)

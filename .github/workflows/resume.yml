@@ -96,6 +96,36 @@ jobs:
           sleep 10
         done
 
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --name ${{ secrets.EKS_CLUSTER_NAME }} \
+          --region ${{ secrets.AWS_REGION }}
+
+    - name: Seed namespace cache
+      # After pods reschedule the backend runs SeedNamespaceCache automatically,
+      # but this step provides an immediate fallback in case the adapter isn't
+      # ready yet when the backend first starts. Non-fatal if it fails.
+      run: |
+        echo "Waiting for backend pod to be ready..."
+        kubectl rollout status deployment/agentify-backend -n agentify --timeout=300s \
+          2>/dev/null || echo "Backend not ready (may need a deploy first)"
+
+        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+        PF_PID=$!
+        SYNCED=false
+        for i in 1 2 3 4 5 6; do
+          sleep 5
+          if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
+            echo "Namespace sync succeeded"
+            SYNCED=true
+            break
+          fi
+          echo "Attempt $i: backend not ready yet..."
+        done
+        kill $PF_PID 2>/dev/null || true
+        $SYNCED || echo "Warning: sync did not complete — autocomplete will populate once adapter emits events"
+
     - name: Verify payment test services (optional)
       if: github.event.inputs.verify_test_services == 'yes'
       run: |
