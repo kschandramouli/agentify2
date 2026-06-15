@@ -193,7 +193,8 @@ jobs:
     - name: Wait for rollouts
       run: |
         kubectl rollout status deployment/agentify-backend  -n agentify --timeout=300s
-        kubectl rollout status deployment/agentify-agent    -n agentify --timeout=300s
+        # Agent needs a longer window: new pod startup (~60s) + old pod terminationGracePeriodSeconds (200s) = ~260s minimum.
+        kubectl rollout status deployment/agentify-agent    -n agentify --timeout=600s
         kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
         kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
 

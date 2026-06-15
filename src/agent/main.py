@@ -19,4 +19,8 @@ if __name__ == "__main__":
         port=settings.port,
         reload=(settings.env == "dev"),
         log_level="info",
+        # Allow in-flight Claude Opus calls (up to 180s) to complete before
+        # uvicorn closes connections. K8s terminationGracePeriodSeconds (200s)
+        # is set slightly higher so SIGKILL never fires mid-request.
+        timeout_graceful_shutdown=190,
     )

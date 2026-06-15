@@ -14,11 +14,19 @@ spec:
         app: agentify-agent
     spec:
       serviceAccountName: agentify-agent
+      # 200s = 190s uvicorn graceful shutdown + 10s buffer.
+      # Ensures in-flight Claude Opus calls (up to 180s) complete before SIGKILL.
+      terminationGracePeriodSeconds: 200
       containers:
       - name: agent
         image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/agent:latest
         ports:
         - containerPort: 8001
+        lifecycle:
+          preStop:
+            exec:
+              # Give the ALB 10s to deregister this pod before connections are closed.
+              command: ["/bin/sh", "-c", "sleep 10"]
         env:
         - name: PORT
           value: "8001"
