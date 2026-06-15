@@ -36,22 +36,47 @@ class QueryRequest(BaseModel):
     trace_id: Optional[str] = None  # propagated from the backend for cross-service correlation (spec 004)
 
 
+class FindingDetail(BaseModel):
+    """Structured finding from the k8fy/health-check prompt (new format)."""
+    resource: str
+    status: str  # HEALTHY | DEGRADED | UNHEALTHY
+    reason: str
+
+
+class ServiceHealthDetail(BaseModel):
+    """Per-service health summary from the k8fy/health-check prompt (new format)."""
+    service: str
+    ready_replicas: int = 0
+    total_replicas: int = 0
+    ready_percent: float = 0.0
+    endpoints: int = 0
+
+
 class ReasoningOutput(BaseModel):
     """Structured output the model is constrained to emit (via output_config.format).
 
     Kept separate from AgentResponse: this is exactly what Claude returns, while
     AgentResponse is the service's wire shape (adds sources, tool_calls, etc.,
     which the agent fills in from provenance rather than the model).
+
+    Supports two prompt formats:
+    - Old (k8fy/system, k8fy/diagnose, etc.): answer field is populated.
+    - New (k8fy/health-check): headline + summary are populated; answer defaults "".
     """
 
-    answer: str
+    # Old-format answer field; optional so the new health-check schema (which omits
+    # it) still validates. In _to_agent_response, headline takes precedence.
+    answer: str = ""
     status: str = "unknown"  # healthy | degraded | unhealthy | unknown | not_applicable
     confidence: float = 0.0  # 0.0–1.0
     recommendations: List[str] = []
 
-    # Correlation / diagnosis fields (spec 005). Populated for `diagnose` intents;
-    # empty/None for single-signal answers. They ride along in AgentResponse.details
-    # for future UI consumers; the human-facing narrative still lives in `answer`.
-    findings: List[str] = []  # one per signal considered (health, cert, ...)
-    likely_cause: Optional[str] = None  # hypothesis; None when signals are insufficient
+    # New k8fy/health-check fields (empty/None for old-format responses).
+    headline: str = ""        # e.g. "🟢 checkout-api healthy (5/5 pods ready)"
+    summary: str = ""         # ≤40-word prose summary
+    service_health: Optional[ServiceHealthDetail] = None
+
+    # findings: str for old format, FindingDetail for new health-check format.
+    findings: List[Any] = []
+    likely_cause: Optional[str] = None
     severity: str = "info"  # info | warning | critical

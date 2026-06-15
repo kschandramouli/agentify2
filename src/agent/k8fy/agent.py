@@ -60,6 +60,7 @@ settings = get_settings()
 # Mirrors models.ReasoningOutput. Structured outputs require additionalProperties
 # to be false and don't support numeric min/max, so confidence is a bare number
 # (the system prompt asks for 0.0–1.0; we clamp/normalize on the way out).
+# Schema for skills that still use the original answer-centric format.
 REASONING_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -90,6 +91,56 @@ REASONING_SCHEMA: Dict[str, Any] = {
 }
 
 
+# Schema for the updated k8fy/health-check prompt.  headline + summary replace
+# answer; findings are structured objects; service_health is a new summary block.
+HEALTH_REASONING_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "unhealthy", "unknown"],
+        },
+        "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+        "confidence": {"type": "number"},
+        "headline": {"type": "string", "description": "One sentence with emoji indicator."},
+        "summary": {"type": "string", "description": "≤40-word prose (pod count, endpoints, restarts)."},
+        "service_health": {
+            "type": "object",
+            "properties": {
+                "service":        {"type": "string"},
+                "ready_replicas": {"type": "number"},
+                "total_replicas": {"type": "number"},
+                "ready_percent":  {"type": "number"},
+                "endpoints":      {"type": "number"},
+            },
+            "required": ["service", "ready_replicas", "total_replicas", "ready_percent", "endpoints"],
+            "additionalProperties": False,
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "resource": {"type": "string"},
+                    "status":   {"type": "string", "enum": ["HEALTHY", "DEGRADED", "UNHEALTHY"]},
+                    "reason":   {"type": "string"},
+                },
+                "required": ["resource", "status", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "likely_cause":    {"type": ["string", "null"]},
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "status", "severity", "confidence",
+        "headline", "summary", "service_health",
+        "findings", "likely_cause", "recommendations",
+    ],
+    "additionalProperties": False,
+}
+
+
 class K8fyAgent:
     """K8fy agent for Kubernetes operations reasoning.
 
@@ -105,6 +156,7 @@ class K8fyAgent:
         tools: List[Dict[str, Any]] = _DEFAULT_TOOLS,
         advisor_model: Optional[str] = None,
         executor_model: Optional[str] = None,
+        output_schema: Optional[Dict[str, Any]] = None,
     ):
         self.client: AsyncAnthropic = get_claude_client()
         self.model = settings.claude_model
@@ -114,9 +166,8 @@ class K8fyAgent:
         self.max_iterations = settings.agent_max_tool_iterations
         self._system_prompt = system_prompt
         self._tools = tools
+        self._output_schema = output_schema or REASONING_SCHEMA
         # Advisor/executor mode (advisor_model=None → single-model path).
-        # The executor is the PRIMARY model; the advisor is a server-side tool
-        # it consults mid-generation via client.beta.messages.create.
         self.advisor_model = advisor_model
         self.executor_model = executor_model or self.model
 
@@ -161,7 +212,7 @@ class K8fyAgent:
                     max_tokens=self.max_tokens,
                     system=system,
                     thinking={"type": "adaptive"},
-                    output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": REASONING_SCHEMA}},
+                    output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": self._output_schema}},
                     tools=self._tools,
                     messages=messages,
                 )
@@ -274,7 +325,7 @@ class K8fyAgent:
                     max_tokens=self.max_tokens,
                     system=system,
                     thinking={"type": "adaptive"},
-                    output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": REASONING_SCHEMA}},
+                    output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": self._output_schema}},
                     tools=tools,
                     messages=messages,
                 )
@@ -368,7 +419,7 @@ class K8fyAgent:
                 max_tokens=self.max_tokens,
                 system=system,
                 thinking={"type": "adaptive"},
-                output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": REASONING_SCHEMA}},
+                output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": self._output_schema}},
                 messages=[{"role": "user", "content": user_content}],
             )
             _record_loop_usage(response, self.model)
@@ -421,18 +472,32 @@ class K8fyAgent:
                 tool_calls=tool_calls,
             )
 
+        # headline takes precedence when the new k8fy/health-check format is used;
+        # fall back to answer for all other skills that still use the old format.
+        answer = parsed.headline or parsed.answer
+        details: Dict[str, Any] = {
+            "recommendations": parsed.recommendations,
+            "findings": [
+                f.model_dump() if hasattr(f, "model_dump") else f
+                for f in parsed.findings
+            ],
+            "likely_cause": parsed.likely_cause,
+            "severity": parsed.severity,
+        }
+        if parsed.headline:
+            details["headline"] = parsed.headline
+        if parsed.summary:
+            details["summary"] = parsed.summary
+        if parsed.service_health is not None:
+            details["service_health"] = parsed.service_health.model_dump()
+
         return AgentResponse(
-            answer=parsed.answer,
+            answer=answer,
             status=parsed.status,
             confidence=_normalize_confidence(parsed.confidence),
             sources=_sources_from(data),
             tool_calls=tool_calls,
-            details={
-                "recommendations": parsed.recommendations,
-                "findings": parsed.findings,
-                "likely_cause": parsed.likely_cause,
-                "severity": parsed.severity,
-            },
+            details=details,
         )
 
 

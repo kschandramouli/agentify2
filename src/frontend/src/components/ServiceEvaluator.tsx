@@ -189,10 +189,26 @@ function DiagnosisCard({
   const conf = Math.round(resp.confidence * 100);
 
   // Heuristic: findings that look like log/error lines get code styling.
-  // Matches lines with error-ish keywords AND a colon (error: "msg") pattern.
   const isLogFinding = (f: string) =>
     /\b(log|dial|connect|refused|panic|oom|killed|error|failed|exit|timeout)\b/i.test(f) &&
     (f.includes(":") || f.includes('"') || f.includes("'"));
+
+  // Support both old (string) and new ({resource, status, reason}) finding formats.
+  const renderFinding = (f: string | { resource: string; status: string; reason: string }, i: number) => {
+    if (typeof f === "string") {
+      return (
+        <li key={i} className={`dc-finding${isLogFinding(f) ? " dc-finding--log" : ""}`}>{f}</li>
+      );
+    }
+    const fSev = f.status === "UNHEALTHY" ? "crit" : f.status === "DEGRADED" ? "warn" : "ok";
+    return (
+      <li key={i} className="dc-finding dc-finding--structured">
+        <span className="dc-finding__resource">{f.resource}</span>
+        <span className={`dc-finding__status dc-finding__status--${fSev}`}>{f.status}</span>
+        <span className="dc-finding__reason">{f.reason}</span>
+      </li>
+    );
+  };
 
   return (
     <div className={`diagnosis-card diagnosis-card--${sev}`}>
@@ -211,24 +227,41 @@ function DiagnosisCard({
         )}
       </div>
 
-      {/* Summary callout — 1-sentence headline */}
+      {/* Summary callout — headline (new format) or answer (old format) */}
       <div className={`dc-summary dc-summary--${sev}`}>
         {d.severity && (
           <span className={`dc-sev-pill dc-sev-pill--${sev}`}>{d.severity}</span>
         )}
-        <span className="dc-summary__text">{resp.answer}</span>
+        <span className="dc-summary__text">{d.headline ?? resp.answer}</span>
       </div>
 
-      {/* Evidence (findings[]) */}
+      {/* 40-word summary prose (new k8fy/health-check format only) */}
+      {d.summary && <p className="dc-body">{d.summary}</p>}
+
+      {/* Service health metrics (new k8fy/health-check format only) */}
+      {d.service_health && (
+        <div className="dc-section">
+          <span className="dc-section__label">Service health</span>
+          <div className="dc-service-health">
+            <span className="dc-sh-item">
+              <strong>{d.service_health.ready_replicas}</strong>/{d.service_health.total_replicas} pods ready
+            </span>
+            <span className="dc-sh-sep">·</span>
+            <span className="dc-sh-item">{d.service_health.ready_percent}%</span>
+            <span className="dc-sh-sep">·</span>
+            <span className="dc-sh-item">
+              {d.service_health.endpoints} endpoint{d.service_health.endpoints !== 1 ? "s" : ""}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Evidence (findings[]) — handles both string and structured-object formats */}
       {!!d.findings?.length && (
         <div className="dc-section">
           <span className="dc-section__label">Evidence</span>
           <ul className="dc-findings">
-            {d.findings.map((f, i) => (
-              <li key={i} className={`dc-finding${isLogFinding(f) ? " dc-finding--log" : ""}`}>
-                {f}
-              </li>
-            ))}
+            {d.findings.map((f, i) => renderFinding(f as string | { resource: string; status: string; reason: string }, i))}
           </ul>
         </div>
       )}
@@ -298,7 +331,9 @@ function Tier2CheckCard({ label, description, resp, durationMs, error, pending }
           {resp.answer && <div className="check-card__summary">{resp.answer}</div>}
           {!!resp.details?.findings?.length && (
             <ul className="check-card__timeline">
-              {resp.details.findings.map((f, i) => <li key={i}>{f}</li>)}
+              {resp.details.findings.map((f, i) => (
+                <li key={i}>{typeof f === "string" ? f : `${f.resource}: ${f.reason}`}</li>
+              ))}
             </ul>
           )}
           {!!resp.details?.recommendations?.length && (

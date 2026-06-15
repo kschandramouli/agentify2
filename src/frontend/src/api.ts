@@ -26,13 +26,27 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
+export interface FindingDetail {
+  resource: string;
+  status: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
+  reason: string;
+}
+
+export interface ServiceHealthDetail {
+  service: string;
+  ready_replicas: number;
+  total_replicas: number;
+  ready_percent: number;
+  endpoints: number;
+}
+
 export interface QueryResponse {
   answer: string;
   status: string;
   confidence: number; // 0.0–1.0
   sources: string[];
   trace_id?: string;
-  tool_calls?: ToolCall[];  // tools Claude called to gather context
+  tool_calls?: ToolCall[];
   details?: {
     // Cert check (Tier-1)
     certs_checked?: number;
@@ -46,11 +60,15 @@ export interface QueryResponse {
     ratio?: number;
     service_status?: string;
     pods?: PodDetail[];
-    // Diagnosis (Tier-2)
+    // Diagnosis (Tier-2) — old format
     severity?: string;
     likely_cause?: string;
-    findings?: string[];
+    findings?: (string | FindingDetail)[];
     recommendations?: string[];
+    // Diagnosis (Tier-2) — new k8fy/health-check format
+    headline?: string;
+    summary?: string;
+    service_health?: ServiceHealthDetail;
   };
 }
 
