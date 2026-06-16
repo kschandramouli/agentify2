@@ -238,6 +238,8 @@ class K8fyAgent:
         ]
         tool_calls_made: List[ToolCall] = []
         iterations = 0
+        total_in_tok = 0
+        total_out_tok = 0
 
         try:
             for _ in range(self.max_iterations):
@@ -252,6 +254,10 @@ class K8fyAgent:
                     messages=messages,
                 )
                 _record_loop_usage(response, self.model)
+                usage = getattr(response, "usage", None)
+                if usage:
+                    total_in_tok  += getattr(usage, "input_tokens",  0) or 0
+                    total_out_tok += getattr(usage, "output_tokens", 0) or 0
 
                 if response.stop_reason == "tool_use":
                     # Preserve the full assistant turn (incl. thinking blocks) before
@@ -274,7 +280,11 @@ class K8fyAgent:
                 final_text = next((b.text for b in response.content if b.type == "text"), "")
                 metrics.record_request("ok")
                 metrics.record_tool_iterations(iterations)
-                return self._to_agent_response(final_text, data, tool_calls_made)
+                result = self._to_agent_response(final_text, data, tool_calls_made)
+                result.input_tokens       = total_in_tok
+                result.output_tokens      = total_out_tok
+                result.estimated_cost_usd = _estimate_cost(self.model, total_in_tok, total_out_tok)
+                return result
 
             logger.warning("agent did not converge within %d iterations", self.max_iterations)
             metrics.record_request("no_converge")
@@ -350,6 +360,10 @@ class K8fyAgent:
         messages: List[Dict[str, Any]] = [{"role": "user", "content": user_message}]
         tool_calls_made: List[ToolCall] = []
         iterations = 0
+        # Executor (Sonnet) and advisor (Opus) tokens are billed separately.
+        # Top-level usage = executor only; advisor tokens live in usage.iterations.
+        exec_in_tok = exec_out_tok = 0
+        adv_in_tok  = adv_out_tok  = 0
 
         try:
             for _ in range(self.max_iterations):
@@ -367,6 +381,14 @@ class K8fyAgent:
                 # Advisor tokens are in usage.iterations (type:"advisor_message"),
                 # not in the top-level usage totals.
                 _record_loop_usage(response, self.executor_model, self.advisor_model)
+                usage = getattr(response, "usage", None)
+                if usage:
+                    exec_in_tok  += getattr(usage, "input_tokens",  0) or 0
+                    exec_out_tok += getattr(usage, "output_tokens", 0) or 0
+                    for iter_ in (getattr(usage, "iterations", None) or []):
+                        if getattr(iter_, "type", "") == "advisor_message":
+                            adv_in_tok  += getattr(iter_, "input_tokens",  0) or 0
+                            adv_out_tok += getattr(iter_, "output_tokens", 0) or 0
 
                 if response.stop_reason == "tool_use":
                     # Preserve the full assistant turn including any server_tool_use
@@ -392,7 +414,13 @@ class K8fyAgent:
                 final_text = next((b.text for b in response.content if b.type == "text"), "")
                 metrics.record_request("ok")
                 metrics.record_tool_iterations(iterations)
-                return self._to_agent_response(final_text, data, tool_calls_made)
+                result = self._to_agent_response(final_text, data, tool_calls_made)
+                exec_cost = _estimate_cost(self.executor_model, exec_in_tok, exec_out_tok)
+                adv_cost  = _estimate_cost(self.advisor_model,  adv_in_tok,  adv_out_tok)
+                result.input_tokens       = exec_in_tok + adv_in_tok
+                result.output_tokens      = exec_out_tok + adv_out_tok
+                result.estimated_cost_usd = exec_cost + adv_cost
+                return result
 
             logger.warning("executor did not converge within %d iterations", self.max_iterations)
             metrics.record_request("no_converge")
@@ -585,8 +613,19 @@ def _record_loop_usage(
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Return an indicative USD cost for one Claude call (informational, not billing)."""
-    rates = _COST_PER_M.get(model, {"input": 5.0, "output": 25.0})
+    """Return an indicative USD cost for one Claude call (informational, not billing).
+
+    Falls back to prefix matching so versioned IDs like
+    'claude-opus-4-8-20251001' resolve correctly even if not in the table.
+    """
+    rates = _COST_PER_M.get(model)
+    if rates is None:
+        for key, r in _COST_PER_M.items():
+            if model.startswith(key):
+                rates = r
+                break
+    if rates is None:
+        rates = _COST_PER_M["claude-opus-4-8"]  # safe conservative default
     return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
 
 
