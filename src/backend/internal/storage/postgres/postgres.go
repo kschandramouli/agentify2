@@ -114,6 +114,30 @@ func (c *Client) initSchema(ctx context.Context) error {
 		created_at TIMESTAMP DEFAULT NOW(),
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
+
+	-- Model pricing: retail $/MTok rates shown in Admin UI and used for trace cost estimates.
+	-- Seeded with Anthropic list prices (June 2026). cache_write_per_mtok = 5-min TTL rate.
+	CREATE TABLE IF NOT EXISTS model_pricing (
+		model_id             TEXT PRIMARY KEY,
+		display_name         TEXT NOT NULL DEFAULT '',
+		input_per_mtok       FLOAT NOT NULL DEFAULT 0,
+		output_per_mtok      FLOAT NOT NULL DEFAULT 0,
+		cache_write_per_mtok FLOAT NOT NULL DEFAULT 0,
+		cache_read_per_mtok  FLOAT NOT NULL DEFAULT 0,
+		updated_at           TIMESTAMP DEFAULT NOW()
+	);
+	INSERT INTO model_pricing (model_id, display_name, input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok) VALUES
+		('claude-fable-5',    'Claude Fable 5',    10.0, 50.0, 12.50, 1.00),
+		('claude-mythos-5',   'Claude Mythos 5',   10.0, 50.0, 12.50, 1.00),
+		('claude-opus-4-8',   'Claude Opus 4.8',    5.0, 25.0,  6.25, 0.50),
+		('claude-opus-4-7',   'Claude Opus 4.7',    5.0, 25.0,  6.25, 0.50),
+		('claude-opus-4-6',   'Claude Opus 4.6',    5.0, 25.0,  6.25, 0.50),
+		('claude-opus-4-5',   'Claude Opus 4.5',    5.0, 25.0,  6.25, 0.50),
+		('claude-sonnet-4-6', 'Claude Sonnet 4.6',  3.0, 15.0,  3.75, 0.30),
+		('claude-sonnet-4-5', 'Claude Sonnet 4.5',  3.0, 15.0,  3.75, 0.30),
+		('claude-haiku-4-5',  'Claude Haiku 4.5',   1.0,  5.0,  1.25, 0.10),
+		('claude-haiku-3-5',  'Claude Haiku 3.5',   0.8,  4.0,  1.00, 0.08)
+	ON CONFLICT (model_id) DO NOTHING;
 	`
 	if _, err := c.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -712,4 +736,58 @@ func decodePayload(b []byte) interface{} {
 		return string(b)
 	}
 	return m
+}
+
+// ── Model pricing ────────────────────────────────────────────────────────────
+
+// ModelPricing holds the indicative retail $/MTok rates for one Claude model.
+type ModelPricing struct {
+	ModelID           string    `json:"model_id"`
+	DisplayName       string    `json:"display_name"`
+	InputPerMTok      float64   `json:"input_per_mtok"`
+	OutputPerMTok     float64   `json:"output_per_mtok"`
+	CacheWritePerMTok float64   `json:"cache_write_per_mtok"`
+	CacheReadPerMTok  float64   `json:"cache_read_per_mtok"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// ListModelPricing returns all rows from the model_pricing table, sorted by model_id.
+func (c *Client) ListModelPricing(ctx context.Context) ([]ModelPricing, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT model_id, display_name, input_per_mtok, output_per_mtok,
+		       cache_write_per_mtok, cache_read_per_mtok, updated_at
+		FROM model_pricing ORDER BY model_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []ModelPricing
+	for rows.Next() {
+		var p ModelPricing
+		if err := rows.Scan(&p.ModelID, &p.DisplayName, &p.InputPerMTok, &p.OutputPerMTok,
+			&p.CacheWritePerMTok, &p.CacheReadPerMTok, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
+// UpsertModelPricing inserts or updates a model pricing row.
+func (c *Client) UpsertModelPricing(ctx context.Context, p *ModelPricing) error {
+	_, err := c.db.ExecContext(ctx, `
+		INSERT INTO model_pricing
+		  (model_id, display_name, input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (model_id) DO UPDATE SET
+		  display_name         = EXCLUDED.display_name,
+		  input_per_mtok       = EXCLUDED.input_per_mtok,
+		  output_per_mtok      = EXCLUDED.output_per_mtok,
+		  cache_write_per_mtok = EXCLUDED.cache_write_per_mtok,
+		  cache_read_per_mtok  = EXCLUDED.cache_read_per_mtok,
+		  updated_at           = NOW()`,
+		p.ModelID, p.DisplayName, p.InputPerMTok, p.OutputPerMTok,
+		p.CacheWritePerMTok, p.CacheReadPerMTok)
+	return err
 }

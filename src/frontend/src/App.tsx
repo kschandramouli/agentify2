@@ -4,8 +4,9 @@ import { RegistryPanel } from "./components/RegistryPanel";
 import { TracesPanel } from "./components/TracesPanel";
 import { SyncPanel } from "./components/SyncPanel";
 import { MetricsPanel } from "./components/MetricsPanel";
+import { PricingPanel } from "./components/PricingPanel";
 
-type Page = "observability" | "registry" | "traces" | "sync" | "metrics";
+type Page = "observability" | "registry" | "traces" | "sync" | "metrics" | "pricing";
 
 interface NavItem {
   id: Page;
@@ -24,10 +25,11 @@ const MAIN_NAV: NavItem[] = [
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { id: "registry",  label: "Pod Registry",    icon: "▤", description: "Browse live pods"         },
-  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"    },
-  { id: "sync",      label: "Namespace Sync",  icon: "↻", description: "Sync cluster namespaces"  },
-  { id: "metrics",   label: "Metrics",         icon: "≈", description: "Token usage & cost"       },
+  { id: "registry",  label: "Pod Registry",    icon: "▤", description: "Browse live pods"          },
+  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"     },
+  { id: "sync",      label: "Namespace Sync",  icon: "↻", description: "Sync cluster namespaces"   },
+  { id: "metrics",   label: "Metrics",         icon: "≈", description: "Token usage & cost"        },
+  { id: "pricing",   label: "Model Pricing",   icon: "◈", description: "$/MTok rates for all models" },
 ];
 
 const ALL_NAV = [...MAIN_NAV, ...ADMIN_NAV];
@@ -119,6 +121,7 @@ export function App() {
           {page === "traces"   && <TracesPanel />}
           {page === "sync"     && <SyncPanel />}
           {page === "metrics"  && <MetricsPanel />}
+          {page === "pricing"  && <PricingPanel />}
         </main>
       </div>
     </div>

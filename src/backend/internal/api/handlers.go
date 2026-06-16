@@ -29,11 +29,12 @@ type Handler struct {
 	redactor         *governance.Redactor
 	integrationStore IntegrationStore // nil when postgres is not provisioned
 	traceStore       TraceStore       // nil when postgres is not provisioned
+	pricingStore     PricingStore     // nil when postgres is not provisioned
 	logger           *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -46,6 +47,7 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		redactor:         redactor,
 		integrationStore: integrations,
 		traceStore:       traces,
+		pricingStore:     pricing,
 		logger:           logger,
 	}
 }
@@ -1036,4 +1038,55 @@ func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) 
 		entities = []string{}
 	}
 	writeJSON(w, http.StatusOK, entities)
+}
+
+// HandleListPricing returns all model pricing rows from the database.
+// The Python agent and the Admin UI both consume this endpoint.
+func (h *Handler) HandleListPricing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.pricingStore == nil {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+	rows, err := h.pricingStore.ListModelPricing(r.Context())
+	if err != nil {
+		h.logger.Warn("failed to list model pricing", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if rows == nil {
+		rows = []pgstore.ModelPricing{}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// HandleUpsertPricing inserts or updates a single model pricing row.
+// Body: { model_id, display_name, input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok }
+func (h *Handler) HandleUpsertPricing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.pricingStore == nil {
+		http.Error(w, "pricing store not available", http.StatusServiceUnavailable)
+		return
+	}
+	var p pgstore.ModelPricing
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if p.ModelID == "" {
+		http.Error(w, "model_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := h.pricingStore.UpsertModelPricing(r.Context(), &p); err != nil {
+		h.logger.Warn("failed to upsert model pricing", "model_id", p.ModelID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }

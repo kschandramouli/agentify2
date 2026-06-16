@@ -65,6 +65,12 @@ func traceToResponse(t pgstore.TraceRecord) TraceResponse {
 	}
 }
 
+// PricingStore is the model-pricing CRUD interface implemented by the Postgres client.
+type PricingStore interface {
+	ListModelPricing(ctx context.Context) ([]pgstore.ModelPricing, error)
+	UpsertModelPricing(ctx context.Context, p *pgstore.ModelPricing) error
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.

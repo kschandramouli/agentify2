@@ -5,6 +5,7 @@ import logging
 
 import metrics
 from config.settings import get_settings
+from k8fy.agent import refresh_pricing_from_backend
 from k8fy.skills.router import get_skill_router
 from models.response import AgentResponse, QueryRequest
 
@@ -22,6 +23,7 @@ app = FastAPI(title="agentify-agent", version="0.1.0")
 async def startup_event():
     """Initialize skill router (and all sub-agents) on startup."""
     logger.info("Agent service starting up...")
+    refresh_pricing_from_backend(settings.backend_url)
     get_skill_router()
     logger.info(f"Skill router initialized with model: {settings.claude_model}")
 

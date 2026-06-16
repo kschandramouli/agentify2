@@ -74,10 +74,11 @@ func main() {
 		}
 	}
 
-	// Wire the integration + trace stores via type assertions on the relational backend.
-	// Both are nil when Postgres is not provisioned (memory mode).
+	// Wire the integration + trace + pricing stores via type assertions on the relational backend.
+	// All are nil when Postgres is not provisioned (memory mode).
 	var integrationStore api.IntegrationStore
 	var traceStore api.TraceStore
+	var pricingStore api.PricingStore
 	if relational, err := orch.GetBackendFactory().GetBackend("relational"); err == nil {
 		if store, ok := relational.(api.IntegrationStore); ok {
 			integrationStore = store
@@ -85,11 +86,14 @@ func main() {
 		if store, ok := relational.(api.TraceStore); ok {
 			traceStore = store
 		}
+		if store, ok := relational.(api.PricingStore); ok {
+			pricingStore = store
+		}
 	}
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.

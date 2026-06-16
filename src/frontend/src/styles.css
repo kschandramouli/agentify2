@@ -1192,3 +1192,50 @@ code {
   border-radius: 6px; padding: 10px 14px; color: #e98080;
   font-size: 13px; margin-bottom: 14px;
 }
+
+/* ── Pricing panel ── */
+.pricing-panel { max-width: 860px; }
+.pricing-note { font-size: 13px; margin: 0 0 18px; line-height: 1.5; }
+.pricing-table-wrap { overflow-x: auto; }
+.pricing-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.pricing-table th {
+  text-align: left; padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted); font-weight: 600; font-size: 11.5px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.pricing-td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.pricing-td--model { min-width: 200px; }
+.pricing-td--num   { font-family: ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.pricing-td--actions { text-align: right; white-space: nowrap; width: 100px; }
+.pricing-model-id   { display: block; font-family: ui-monospace, monospace; font-size: 12px; color: var(--accent); }
+.pricing-display-name { display: block; font-size: 11.5px; margin-top: 1px; }
+
+.pricing-row:hover { background: rgba(255,255,255,.025); }
+.pricing-row--editing { background: rgba(110,168,254,.06); }
+
+.pricing-edit-cell { display: flex; align-items: center; gap: 3px; }
+.pricing-dollar    { color: var(--muted); font-size: 12px; }
+.pricing-input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 5px; padding: 4px 7px; font-size: 12.5px; width: 80px;
+  font-family: ui-monospace, monospace;
+}
+.pricing-input[type="text"] { width: 130px; font-family: inherit; }
+.pricing-input:focus { outline: none; border-color: var(--accent); }
+
+.pricing-btn {
+  font-size: 12px; padding: 4px 10px; border-radius: 5px;
+  border: 1px solid var(--border); cursor: pointer; font-weight: 500;
+  background: none; color: var(--muted); transition: background .1s, color .1s;
+}
+.pricing-btn:hover          { background: rgba(255,255,255,.06); color: var(--text); }
+.pricing-btn--edit          { }
+.pricing-btn--save          { background: var(--accent); color: #0b1020; border-color: var(--accent); }
+.pricing-btn--save:hover    { background: #8bbffe; }
+.pricing-btn--save:disabled { opacity: .6; cursor: default; }
+.pricing-btn--cancel        { margin-left: 4px; }
+

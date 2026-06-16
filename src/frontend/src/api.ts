@@ -87,6 +87,32 @@ export interface Pod {
   tags: string[] | null;
 }
 
+export interface ModelPricing {
+  model_id: string;
+  display_name: string;
+  input_per_mtok: number;
+  output_per_mtok: number;
+  cache_write_per_mtok: number;
+  cache_read_per_mtok: number;
+  updated_at: string;
+}
+
+export async function listPricing(): Promise<ModelPricing[]> {
+  const res = await fetch("/admin/pricing");
+  if (!res.ok) return [];
+  return res.json() as Promise<ModelPricing[]>;
+}
+
+export async function upsertPricing(p: Omit<ModelPricing, "updated_at">): Promise<ModelPricing> {
+  const res = await fetch("/admin/pricing", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<ModelPricing>;
+}
+
 export interface ServiceContext {
   service: string;
   namespace: string;

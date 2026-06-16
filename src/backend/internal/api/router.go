@@ -45,6 +45,11 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /admin/sync", h.HandleSyncNamespaces)
 	mux.HandleFunc("GET /admin/sync", h.HandleSyncNamespaces) // also allow GET for CronJob curl
 
+	// Admin: model pricing — read/edit $/MTok rates shown in the UI and used for trace cost estimates
+	mux.HandleFunc("GET /admin/pricing", h.HandleListPricing)
+	mux.HandleFunc("PUT /admin/pricing", h.HandleUpsertPricing)
+	mux.HandleFunc("POST /admin/pricing", h.HandleUpsertPricing)
+
 	// TODO: add WebSocket handler for chat
 	// mux.HandleFunc("/ws/chat", h.HandleChatWebSocket)
 

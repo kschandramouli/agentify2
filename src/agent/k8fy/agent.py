@@ -24,10 +24,13 @@ _DEFAULT_TOOLS = TOOLS
 ADVISOR_MODEL = "claude-opus-4-8"
 EXECUTOR_MODEL = "claude-sonnet-4-6"
 
-# Indicative retail pricing (USD per million tokens) used for cost estimates
-# stored in traces. Not used for billing — informational only.
+# Indicative retail pricing (USD per million tokens) used for cost estimates.
 # Source: https://platform.claude.com/docs/en/about-claude/pricing (June 2026)
 # cache_write = 5-minute TTL rate (1.25× base input); cache_read = 0.1× base input.
+#
+# These defaults are overridden at startup by rates fetched from the backend DB
+# (GET /admin/pricing). Keeping them here means the agent still works if the
+# backend is temporarily unreachable.
 _COST_PER_M: Dict[str, Dict[str, float]] = {
     "claude-fable-5":    {"input": 10.0, "output": 50.0,  "cache_write": 12.50, "cache_read": 1.00},
     "claude-mythos-5":   {"input": 10.0, "output": 50.0,  "cache_write": 12.50, "cache_read": 1.00},
@@ -40,6 +43,34 @@ _COST_PER_M: Dict[str, Dict[str, float]] = {
     "claude-haiku-4-5":  {"input":  1.0, "output":  5.0,  "cache_write":  1.25, "cache_read": 0.10},
     "claude-haiku-3-5":  {"input":  0.8, "output":  4.0,  "cache_write":  1.00, "cache_read": 0.08},
 }
+
+
+def refresh_pricing_from_backend(backend_url: str) -> None:
+    """Fetch live pricing rates from the backend DB and update _COST_PER_M in-place.
+
+    Called once at startup. Falls back silently to the hardcoded defaults if the
+    backend is unavailable (cold start, network issue, local dev without DB).
+    """
+    import httpx  # imported lazily — not needed outside startup
+
+    try:
+        resp = httpx.get(f"{backend_url}/admin/pricing", timeout=5.0)
+        resp.raise_for_status()
+        for entry in resp.json():
+            mid = entry.get("model_id", "")
+            if not mid:
+                continue
+            _COST_PER_M[mid] = {
+                "input":       float(entry.get("input_per_mtok", 0)),
+                "output":      float(entry.get("output_per_mtok", 0)),
+                "cache_write": float(entry.get("cache_write_per_mtok", 0)),
+                "cache_read":  float(entry.get("cache_read_per_mtok", 0)),
+            }
+        logger.info("pricing refreshed from backend", extra={"models": len(_COST_PER_M)})
+    except Exception as exc:
+        logger.warning(
+            "could not fetch pricing from backend — using hardcoded defaults: %s", exc
+        )
 
 _ADVISOR_BETA = "advisor-tool-2026-03-01"
 
