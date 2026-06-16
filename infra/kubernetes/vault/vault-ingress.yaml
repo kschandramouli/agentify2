@@ -1,0 +1,57 @@
+# HashiCorp Vault — ALB Ingress
+#
+# Exposes the Vault UI and API at its own internet-facing ALB URL.
+# The URL is printed by: kubectl get ingress vault-ui -n vault
+#
+# Apply AFTER the Vault Helm release is installed and vault-setup.sh has run:
+#   kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
+#
+# Access the UI:
+#   http://<ALB-HOSTNAME>/ui/
+#   Login with the root token from .vault-dev-creds or with any Vault token.
+#
+# NOTE: This uses HTTP (no TLS) for dev/test convenience.
+# For production: add an ACM cert ARN and uncomment the ssl-redirect lines.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vault-ui
+  namespace: vault
+  annotations:
+    kubernetes.io/ingress.class:                             alb
+    alb.ingress.kubernetes.io/scheme:                        internet-facing
+    alb.ingress.kubernetes.io/target-type:                   ip
+
+    # Dev: HTTP only on port 80.
+    alb.ingress.kubernetes.io/listen-ports:                  '[{"HTTP":80}]'
+
+    # Vault health endpoint returns different codes based on state:
+    #   200 = active,  429 = standby,  473 = performance standby,
+    #   501 = not initialised,  503 = sealed.
+    # Accept all of them so ALB doesn't mark the target unhealthy while
+    # Vault is being initialised or unsealed.
+    alb.ingress.kubernetes.io/healthcheck-path:              /v1/sys/health
+    alb.ingress.kubernetes.io/success-codes:                 "200,429,473,501,503"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds:  "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds:   "5"
+
+    alb.ingress.kubernetes.io/load-balancer-attributes:      idle_timeout.timeout_seconds=60
+
+    # To enable HTTPS (recommended even for dev):
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    # alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+
+spec:
+  rules:
+  - http:
+      paths:
+        # Route everything to Vault — the UI is at /ui/, the API at /v1/.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vault
+            port:
+              number: 8200

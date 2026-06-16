@@ -67,7 +67,8 @@ injector:
       memory: "128Mi"
       cpu:    "250m"
 
-# UI disabled outside the cluster (ALB handles ingress separately if needed).
+# UI served by the vault server pod on port 8200.
+# Access via the vault-ingress.yaml ALB (see below) or kubectl port-forward.
 ui:
-  enabled:         true
-  serviceType:     ClusterIP
+  enabled:     true
+  serviceType: ClusterIP   # ALB Ingress handles external routing
