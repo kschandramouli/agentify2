@@ -7,51 +7,85 @@ import { MetricsPanel } from "./components/MetricsPanel";
 
 type Page = "observability" | "registry" | "traces" | "sync" | "metrics";
 
-const ADMIN_PAGES: { id: Page; label: string }[] = [
-  { id: "registry", label: "Pod Registry" },
-  { id: "traces",   label: "Query History" },
-  { id: "sync",     label: "Namespace Sync" },
-  { id: "metrics",  label: "Metrics" },
+interface NavItem {
+  id: Page;
+  label: string;
+  icon: string;
+  description: string;
+}
+
+const MAIN_NAV: NavItem[] = [
+  {
+    id: "observability",
+    label: "K8s Observability",
+    icon: "⬡",
+    description: "Diagnose services & pods",
+  },
 ];
 
-function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
-  const [adminOpen, setAdminOpen] = useState<boolean>(
-    ADMIN_PAGES.some(p => p.id === page)
-  );
+const ADMIN_NAV: NavItem[] = [
+  { id: "registry",  label: "Pod Registry",    icon: "▤", description: "Browse live pods"         },
+  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"    },
+  { id: "sync",      label: "Namespace Sync",  icon: "↻", description: "Sync cluster namespaces"  },
+  { id: "metrics",   label: "Metrics",         icon: "≈", description: "Token usage & cost"       },
+];
 
+const ALL_NAV = [...MAIN_NAV, ...ADMIN_NAV];
+
+function NavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      className={`sidebar__item${active ? " sidebar__item--active" : ""}`}
+      onClick={onClick}
+      title={item.description}
+    >
+      <span className="sidebar__icon">{item.icon}</span>
+      <span className="sidebar__item-text">
+        <span className="sidebar__item-label">{item.label}</span>
+        <span className="sidebar__item-desc">{item.description}</span>
+      </span>
+    </button>
+  );
+}
+
+function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (p: Page) => void }) {
   return (
     <nav className="sidebar">
-      <button
-        className={`sidebar__item${page === "observability" ? " sidebar__item--active" : ""}`}
-        onClick={() => onNavigate("observability")}
-      >
-        <span className="sidebar__icon">⬡</span>
-        K8s Observability
-      </button>
+      <div className="sidebar__group">
+        {MAIN_NAV.map(item => (
+          <NavButton key={item.id} item={item} active={page === item.id} onClick={() => onNavigate(item.id)} />
+        ))}
+      </div>
 
-      <div className="sidebar__section">
-        <button
-          className="sidebar__section-header"
-          onClick={() => setAdminOpen(o => !o)}
-        >
-          <span className="sidebar__section-arrow">{adminOpen ? "▾" : "▸"}</span>
-          Admin
-        </button>
-        {adminOpen && (
-          <div className="sidebar__children">
-            {ADMIN_PAGES.map(({ id, label }) => (
-              <button
-                key={id}
-                className={`sidebar__item sidebar__item--child${page === id ? " sidebar__item--active" : ""}`}
-                onClick={() => onNavigate(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        )}
+      <div className="sidebar__divider">
+        <span className="sidebar__divider-label">Admin</span>
+      </div>
+
+      <div className="sidebar__group">
+        {ADMIN_NAV.map(item => (
+          <NavButton key={item.id} item={item} active={page === item.id} onClick={() => onNavigate(item.id)} />
+        ))}
+      </div>
+
+      <div className="sidebar__footer">
+        <span className="sidebar__footer-text">agentify</span>
+        <span className="sidebar__footer-env">dev</span>
       </div>
     </nav>
+  );
+}
+
+function PageHeader({ page }: { page: Page }) {
+  const item = ALL_NAV.find(n => n.id === page);
+  if (!item) return null;
+  return (
+    <div className="page-header">
+      <span className="page-header__icon">{item.icon}</span>
+      <div className="page-header__text">
+        <h2 className="page-header__title">{item.label}</h2>
+        <p className="page-header__desc">{item.description}</p>
+      </div>
+    </div>
   );
 }
 
@@ -61,12 +95,22 @@ export function App() {
   return (
     <div className="app">
       <header className="app__header">
-        <h1>agentify</h1>
-        <span className="app__subtitle">Service Intelligence</span>
+        <div className="app__brand">
+          <span className="app__brand-icon">⎈</span>
+          <span className="app__brand-name">agentify</span>
+        </div>
+        <span className="app__header-divider" />
+        <span className="app__subtitle">K8s Service Intelligence</span>
+        <div className="app__header-spacer" />
+        <span className="app__status-badge">
+          <span className="app__status-dot" />
+          Connected
+        </span>
       </header>
       <div className="app__body">
         <Sidebar page={page} onNavigate={setPage} />
         <main className="app__content">
+          <PageHeader page={page} />
           {/* ServiceEvaluator stays mounted so search + results survive navigation */}
           <div style={{ display: page === "observability" ? "" : "none" }}>
             <ServiceEvaluator />

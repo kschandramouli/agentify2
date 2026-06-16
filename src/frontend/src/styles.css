@@ -28,74 +28,235 @@ code {
 .app__header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 20px;
+  gap: 12px;
+  padding: 0 20px;
+  height: 52px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  flex-shrink: 0;
 }
-.app__header h1 { margin: 0; font-size: 18px; font-weight: 600; }
-.app__subtitle { color: var(--muted); font-size: 12px; }
+
+.app__brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.app__brand-icon {
+  font-size: 20px;
+  color: var(--accent);
+  line-height: 1;
+}
+.app__brand-name {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.app__header-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.app__subtitle {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.app__header-spacer { flex: 1; }
+.app__status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #79d88a;
+  background: rgba(121, 216, 138, 0.08);
+  border: 1px solid rgba(121, 216, 138, 0.2);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.app__status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #79d88a;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px rgba(121,216,138,0.5);
+}
 
 /* Body = sidebar + content */
 .app__body {
   display: flex;
-  height: calc(100vh - 49px); /* 49px = header height */
+  height: calc(100vh - 52px);
   overflow: hidden;
 }
 
 /* ── Sidebar ── */
 .sidebar {
-  width: 200px;
-  min-width: 200px;
+  width: 236px;
+  min-width: 236px;
   background: var(--panel);
   border-right: 1px solid var(--border);
-  padding: 12px 8px;
+  padding: 10px 10px 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar__group {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  overflow-y: auto;
 }
 
 .sidebar__item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  padding: 7px 10px;
+  padding: 8px 10px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-left: 2px solid transparent;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  margin-left: -10px;
+  padding-left: 8px;
+  width: calc(100% + 10px);
+}
+.sidebar__item:hover {
+  background: rgba(255,255,255,0.04);
+}
+.sidebar__item:hover .sidebar__item-label { color: var(--text); }
+.sidebar__item:hover .sidebar__icon { color: var(--text); }
+
+.sidebar__item--active {
+  background: rgba(110,168,254,0.1);
+  border-left-color: var(--accent);
+}
+.sidebar__item--active .sidebar__item-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+.sidebar__item--active .sidebar__icon { color: var(--accent); }
+.sidebar__item--active .sidebar__item-desc { color: rgba(110,168,254,0.6); }
+
+.sidebar__icon {
+  font-size: 15px;
+  flex-shrink: 0;
+  color: var(--muted);
+  width: 20px;
+  text-align: center;
+  transition: color 0.15s;
+}
+
+.sidebar__item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.sidebar__item-label {
   font-size: 13px;
   color: var(--muted);
-  cursor: pointer;
-  text-align: left;
-  transition: background .12s, color .12s;
+  transition: color 0.15s;
+  line-height: 1.3;
 }
-.sidebar__item:hover { background: rgba(255,255,255,.04); color: var(--text); }
-.sidebar__item--active { background: rgba(110,168,254,.12); color: var(--accent); font-weight: 500; }
-.sidebar__item--child { padding-left: 28px; font-size: 12.5px; }
-.sidebar__icon { font-size: 14px; flex-shrink: 0; }
+.sidebar__item-desc {
+  font-size: 11px;
+  color: rgba(154, 163, 178, 0.6);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-.sidebar__section { display: flex; flex-direction: column; }
-.sidebar__section-header {
+.sidebar__divider {
   display: flex;
   align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 10px 4px;
-  background: none;
-  border: none;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  cursor: pointer;
-  text-align: left;
+  gap: 8px;
+  padding: 14px 4px 6px;
 }
-.sidebar__section-header:hover { color: var(--text); }
-.sidebar__section-arrow { font-size: 10px; }
-.sidebar__children { display: flex; flex-direction: column; gap: 1px; }
+.sidebar__divider::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.sidebar__divider-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(154, 163, 178, 0.5);
+  white-space: nowrap;
+}
+.sidebar__divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.sidebar__footer {
+  margin-top: auto;
+  padding: 12px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+}
+.sidebar__footer-text {
+  font-size: 11px;
+  color: rgba(154, 163, 178, 0.4);
+  font-weight: 500;
+}
+.sidebar__footer-env {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #e3c267;
+  background: rgba(227, 194, 103, 0.1);
+  border: 1px solid rgba(227, 194, 103, 0.2);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+/* ── Page header (inside content area) ── */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.page-header__icon {
+  font-size: 22px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(110,168,254,0.08);
+  border: 1px solid rgba(110,168,254,0.15);
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+.page-header__text { display: flex; flex-direction: column; gap: 2px; }
+.page-header__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+.page-header__desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
 
 /* ── Main content ── */
 .app__content {
