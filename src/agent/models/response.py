@@ -24,6 +24,8 @@ class AgentResponse(BaseModel):
     # Populated by _reason_pattern_a(); zero for Tier-1 fast-path answers.
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0  # tokens written to prompt cache
+    cache_read_input_tokens: int = 0      # tokens served from prompt cache
     estimated_cost_usd: float = 0.0
 
 

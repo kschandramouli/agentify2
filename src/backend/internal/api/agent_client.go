@@ -48,9 +48,11 @@ type AgentResponse struct {
 	Sources          []string               `json:"sources"`
 	ToolCalls        []AgentToolCall        `json:"tool_calls"`
 	Details          map[string]interface{} `json:"details"` // severity, likely_cause, recommendations, findings (spec 005)
-	InputTokens      int64                  `json:"input_tokens"`
-	OutputTokens     int64                  `json:"output_tokens"`
-	EstimatedCostUSD float64                `json:"estimated_cost_usd"`
+	InputTokens                int64   `json:"input_tokens"`
+	OutputTokens               int64   `json:"output_tokens"`
+	CacheCreationInputTokens   int64   `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens       int64   `json:"cache_read_input_tokens"`
+	EstimatedCostUSD           float64 `json:"estimated_cost_usd"`
 }
 
 // Reason calls the agent service to reason about the data.

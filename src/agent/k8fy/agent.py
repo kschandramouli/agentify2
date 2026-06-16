@@ -26,10 +26,19 @@ EXECUTOR_MODEL = "claude-sonnet-4-6"
 
 # Indicative retail pricing (USD per million tokens) used for cost estimates
 # stored in traces. Not used for billing — informational only.
+# Source: https://platform.claude.com/docs/en/about-claude/pricing (June 2026)
+# cache_write = 5-minute TTL rate (1.25× base input); cache_read = 0.1× base input.
 _COST_PER_M: Dict[str, Dict[str, float]] = {
-    "claude-opus-4-8":   {"input": 5.0,  "output": 25.0},
-    "claude-sonnet-4-6": {"input": 3.0,  "output": 15.0},
-    "claude-haiku-4-5":  {"input": 1.0,  "output":  5.0},
+    "claude-fable-5":    {"input": 10.0, "output": 50.0,  "cache_write": 12.50, "cache_read": 1.00},
+    "claude-mythos-5":   {"input": 10.0, "output": 50.0,  "cache_write": 12.50, "cache_read": 1.00},
+    "claude-opus-4-8":   {"input":  5.0, "output": 25.0,  "cache_write":  6.25, "cache_read": 0.50},
+    "claude-opus-4-7":   {"input":  5.0, "output": 25.0,  "cache_write":  6.25, "cache_read": 0.50},
+    "claude-opus-4-6":   {"input":  5.0, "output": 25.0,  "cache_write":  6.25, "cache_read": 0.50},
+    "claude-opus-4-5":   {"input":  5.0, "output": 25.0,  "cache_write":  6.25, "cache_read": 0.50},
+    "claude-sonnet-4-6": {"input":  3.0, "output": 15.0,  "cache_write":  3.75, "cache_read": 0.30},
+    "claude-sonnet-4-5": {"input":  3.0, "output": 15.0,  "cache_write":  3.75, "cache_read": 0.30},
+    "claude-haiku-4-5":  {"input":  1.0, "output":  5.0,  "cache_write":  1.25, "cache_read": 0.10},
+    "claude-haiku-3-5":  {"input":  0.8, "output":  4.0,  "cache_write":  1.00, "cache_read": 0.08},
 }
 
 _ADVISOR_BETA = "advisor-tool-2026-03-01"
@@ -238,8 +247,10 @@ class K8fyAgent:
         ]
         tool_calls_made: List[ToolCall] = []
         iterations = 0
-        total_in_tok = 0
-        total_out_tok = 0
+        total_in_tok         = 0
+        total_out_tok        = 0
+        total_cache_write    = 0
+        total_cache_read     = 0
 
         try:
             for _ in range(self.max_iterations):
@@ -256,8 +267,10 @@ class K8fyAgent:
                 _record_loop_usage(response, self.model)
                 usage = getattr(response, "usage", None)
                 if usage:
-                    total_in_tok  += getattr(usage, "input_tokens",  0) or 0
-                    total_out_tok += getattr(usage, "output_tokens", 0) or 0
+                    total_in_tok      += getattr(usage, "input_tokens",               0) or 0
+                    total_out_tok     += getattr(usage, "output_tokens",              0) or 0
+                    total_cache_write += getattr(usage, "cache_creation_input_tokens", 0) or 0
+                    total_cache_read  += getattr(usage, "cache_read_input_tokens",     0) or 0
 
                 if response.stop_reason == "tool_use":
                     # Preserve the full assistant turn (incl. thinking blocks) before
@@ -281,9 +294,14 @@ class K8fyAgent:
                 metrics.record_request("ok")
                 metrics.record_tool_iterations(iterations)
                 result = self._to_agent_response(final_text, data, tool_calls_made)
-                result.input_tokens       = total_in_tok
-                result.output_tokens      = total_out_tok
-                result.estimated_cost_usd = _estimate_cost(self.model, total_in_tok, total_out_tok)
+                result.input_tokens                = total_in_tok
+                result.output_tokens               = total_out_tok
+                result.cache_creation_input_tokens = total_cache_write
+                result.cache_read_input_tokens     = total_cache_read
+                result.estimated_cost_usd = _estimate_cost(
+                    self.model, total_in_tok, total_out_tok,
+                    total_cache_write, total_cache_read,
+                )
                 return result
 
             logger.warning("agent did not converge within %d iterations", self.max_iterations)
@@ -364,6 +382,8 @@ class K8fyAgent:
         # Top-level usage = executor only; advisor tokens live in usage.iterations.
         exec_in_tok = exec_out_tok = 0
         adv_in_tok  = adv_out_tok  = 0
+        exec_cache_write = exec_cache_read = 0
+        adv_cache_write  = adv_cache_read  = 0
 
         try:
             for _ in range(self.max_iterations):
@@ -383,12 +403,16 @@ class K8fyAgent:
                 _record_loop_usage(response, self.executor_model, self.advisor_model)
                 usage = getattr(response, "usage", None)
                 if usage:
-                    exec_in_tok  += getattr(usage, "input_tokens",  0) or 0
-                    exec_out_tok += getattr(usage, "output_tokens", 0) or 0
+                    exec_in_tok      += getattr(usage, "input_tokens",               0) or 0
+                    exec_out_tok     += getattr(usage, "output_tokens",              0) or 0
+                    exec_cache_write += getattr(usage, "cache_creation_input_tokens", 0) or 0
+                    exec_cache_read  += getattr(usage, "cache_read_input_tokens",     0) or 0
                     for iter_ in (getattr(usage, "iterations", None) or []):
                         if getattr(iter_, "type", "") == "advisor_message":
-                            adv_in_tok  += getattr(iter_, "input_tokens",  0) or 0
-                            adv_out_tok += getattr(iter_, "output_tokens", 0) or 0
+                            adv_in_tok      += getattr(iter_, "input_tokens",               0) or 0
+                            adv_out_tok     += getattr(iter_, "output_tokens",              0) or 0
+                            adv_cache_write += getattr(iter_, "cache_creation_input_tokens", 0) or 0
+                            adv_cache_read  += getattr(iter_, "cache_read_input_tokens",     0) or 0
 
                 if response.stop_reason == "tool_use":
                     # Preserve the full assistant turn including any server_tool_use
@@ -415,11 +439,19 @@ class K8fyAgent:
                 metrics.record_request("ok")
                 metrics.record_tool_iterations(iterations)
                 result = self._to_agent_response(final_text, data, tool_calls_made)
-                exec_cost = _estimate_cost(self.executor_model, exec_in_tok, exec_out_tok)
-                adv_cost  = _estimate_cost(self.advisor_model,  adv_in_tok,  adv_out_tok)
-                result.input_tokens       = exec_in_tok + adv_in_tok
-                result.output_tokens      = exec_out_tok + adv_out_tok
-                result.estimated_cost_usd = exec_cost + adv_cost
+                exec_cost = _estimate_cost(
+                    self.executor_model, exec_in_tok, exec_out_tok,
+                    exec_cache_write, exec_cache_read,
+                )
+                adv_cost = _estimate_cost(
+                    self.advisor_model, adv_in_tok, adv_out_tok,
+                    adv_cache_write, adv_cache_read,
+                )
+                result.input_tokens                = exec_in_tok + adv_in_tok
+                result.output_tokens               = exec_out_tok + adv_out_tok
+                result.cache_creation_input_tokens = exec_cache_write + adv_cache_write
+                result.cache_read_input_tokens     = exec_cache_read + adv_cache_read
+                result.estimated_cost_usd          = exec_cost + adv_cost
                 return result
 
             logger.warning("executor did not converge within %d iterations", self.max_iterations)
@@ -490,13 +522,17 @@ class K8fyAgent:
             metrics.record_request("ok")
             metrics.record_tool_iterations(0)  # 0 = pattern A, no loop
             usage = getattr(response, "usage", None)
-            in_tok  = getattr(usage, "input_tokens",  0) or 0
-            out_tok = getattr(usage, "output_tokens", 0) or 0
-            cost    = _estimate_cost(self.model, in_tok, out_tok)
-            result  = self._to_agent_response(final_text, merged, [])
-            result.input_tokens      = in_tok
-            result.output_tokens     = out_tok
-            result.estimated_cost_usd = cost
+            in_tok           = getattr(usage, "input_tokens",               0) or 0
+            out_tok          = getattr(usage, "output_tokens",              0) or 0
+            cache_write_tok  = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read_tok   = getattr(usage, "cache_read_input_tokens",     0) or 0
+            cost = _estimate_cost(self.model, in_tok, out_tok, cache_write_tok, cache_read_tok)
+            result = self._to_agent_response(final_text, merged, [])
+            result.input_tokens                 = in_tok
+            result.output_tokens                = out_tok
+            result.cache_creation_input_tokens  = cache_write_tok
+            result.cache_read_input_tokens      = cache_read_tok
+            result.estimated_cost_usd           = cost
             return result
         except Exception as e:  # noqa: BLE001
             logger.error("pattern-a reasoning failed: %s", e)
@@ -612,8 +648,17 @@ def _record_loop_usage(
         metrics.record_usage(executor_model, usage)
 
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def _estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
     """Return an indicative USD cost for one Claude call (informational, not billing).
+
+    Accounts for prompt-caching: cache_creation_tokens are billed at the
+    5-minute write rate (1.25× base input); cache_read_tokens at 0.1× base input.
 
     Falls back to prefix matching so versioned IDs like
     'claude-opus-4-8-20251001' resolve correctly even if not in the table.
@@ -626,7 +671,12 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
                 break
     if rates is None:
         rates = _COST_PER_M["claude-opus-4-8"]  # safe conservative default
-    return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
+    return (
+        input_tokens          * rates["input"]
+        + output_tokens       * rates["output"]
+        + cache_creation_tokens * rates["cache_write"]
+        + cache_read_tokens     * rates["cache_read"]
+    ) / 1_000_000
 
 
 def _sources_from(data: Dict[str, Any]) -> List[str]:
