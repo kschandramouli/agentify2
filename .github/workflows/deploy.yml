@@ -182,6 +182,156 @@ jobs:
         echo "Manifests updated — sample backend image:"
         grep "image:" infra/kubernetes/backend.yaml | head -1
 
+    - name: Install/upgrade HashiCorp Vault
+      run: |
+        helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
+        helm repo update
+
+        # Idempotent — installs on first run, upgrades on subsequent runs.
+        helm upgrade --install vault hashicorp/vault \
+          --namespace vault --create-namespace \
+          -f infra/kubernetes/vault/vault-values.yaml \
+          --timeout=120s --wait
+        echo "Vault Helm chart applied."
+
+    - name: Initialise and unseal Vault
+      run: |
+        # Port-forward so this step can reach Vault from the runner.
+        kubectl port-forward -n vault svc/vault 8200:8200 &
+        PF_PID=$!
+        for i in 1 2 3 4 5 6; do
+          sleep 5
+          curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1 && break
+          echo "Waiting for Vault to respond (attempt $i)..."
+        done
+
+        # Check initialisation status.
+        INIT_STATUS=$(curl -sf http://127.0.0.1:8200/v1/sys/health || echo '{}')
+        INITIALIZED=$(echo "$INIT_STATUS" | python3 -c \
+          "import sys,json; d=json.load(sys.stdin); print('true' if d.get('initialized') else 'false')" 2>/dev/null || echo "false")
+
+        if [ "$INITIALIZED" = "false" ]; then
+          echo "First-time Vault initialisation..."
+          INIT=$(curl -sf -X POST http://127.0.0.1:8200/v1/sys/init \
+            -H "Content-Type: application/json" \
+            -d '{"secret_shares":1,"secret_threshold":1}')
+
+          UNSEAL_KEY=$(echo "$INIT" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['keys_base64'][0])")
+          ROOT_TOKEN=$(echo "$INIT" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['root_token'])")
+
+          # Persist keys in a K8s secret so future deploys can unseal.
+          kubectl create secret generic vault-unseal-keys -n vault \
+            --from-literal=unseal-key="$UNSEAL_KEY" \
+            --from-literal=root-token="$ROOT_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Also expose the token to the agentify-agent pod (used by VaultCertSkill).
+          kubectl create secret generic agentify-vault-secret -n agentify \
+            --from-literal=token="$ROOT_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Vault initialised. Unseal key + root token stored in vault/vault-unseal-keys."
+        else
+          echo "Vault already initialised. Fetching unseal key from K8s secret..."
+          UNSEAL_KEY=$(kubectl get secret vault-unseal-keys -n vault \
+            -o jsonpath='{.data.unseal-key}' 2>/dev/null | base64 -d || echo "")
+          if [ -z "$UNSEAL_KEY" ]; then
+            echo "Warning: vault-unseal-keys secret not found — skipping unseal. Run vault-setup.sh manually."
+            kill $PF_PID 2>/dev/null || true
+            exit 0
+          fi
+        fi
+
+        # Unseal if sealed (pod restart clears in-memory keys).
+        SEALED=$(curl -sf http://127.0.0.1:8200/v1/sys/health | python3 -c \
+          "import sys,json; d=json.load(sys.stdin); print(str(d.get('sealed','true')).lower())" 2>/dev/null || echo "true")
+        if [ "$SEALED" = "true" ]; then
+          echo "Unsealing Vault..."
+          curl -sf -X POST http://127.0.0.1:8200/v1/sys/unseal \
+            -H "Content-Type: application/json" \
+            -d "{\"key\":\"$UNSEAL_KEY\"}" > /dev/null
+          echo "Vault unsealed."
+        else
+          echo "Vault already unsealed."
+        fi
+
+        kill $PF_PID 2>/dev/null || true
+
+    - name: Configure Vault (first deploy only — skipped when already configured)
+      run: |
+        # Check if PKI is already enabled (idempotency guard).
+        VAULT_CONFIGURED=$(kubectl get secret vault-unseal-keys -n vault \
+          -o jsonpath='{.metadata.annotations.vault-configured}' 2>/dev/null || echo "")
+        if [ "$VAULT_CONFIGURED" = "true" ]; then
+          echo "Vault already configured — skipping."
+          exit 0
+        fi
+
+        kubectl port-forward -n vault svc/vault 8200:8200 &
+        PF_PID=$!
+        sleep 5
+
+        ROOT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault \
+          -o jsonpath='{.data.root-token}' | base64 -d)
+        export VAULT_ADDR=http://127.0.0.1:8200
+        export VAULT_TOKEN="$ROOT_TOKEN"
+
+        # Install vault CLI on the runner.
+        curl -fsSL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip \
+          -o /tmp/vault.zip && unzip -q /tmp/vault.zip -d /tmp && chmod +x /tmp/vault
+        export PATH="/tmp:$PATH"
+
+        # Enable Kubernetes auth.
+        vault auth enable kubernetes 2>/dev/null || echo "Kubernetes auth already enabled."
+        K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+        vault write auth/kubernetes/config kubernetes_host="$K8S_HOST"
+
+        # Enable KV v2.
+        vault secrets enable -path=secret kv-v2 2>/dev/null || echo "KV already enabled."
+
+        # Enable PKI + create CA for payments namespace.
+        vault secrets enable pki 2>/dev/null || echo "PKI already enabled."
+        vault secrets tune -max-lease-ttl=8760h pki
+        vault write pki/root/generate/internal \
+          common_name="payments.svc.cluster.local Root CA" ttl=8760h > /dev/null 2>&1 || true
+        vault write pki/config/urls \
+          issuing_certificates="http://vault.vault.svc.cluster.local:8200/v1/pki/ca" \
+          crl_distribution_points="http://vault.vault.svc.cluster.local:8200/v1/pki/crl"
+        vault write pki/roles/payment-service \
+          allowed_domains="payments.svc.cluster.local,payment.payments.svc.cluster.local" \
+          allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
+
+        # Policies and Kubernetes roles.
+        vault policy write payment-service-policy - <<'HCL'
+        path "pki/issue/payment-service" { capabilities = ["create","update"] }
+        path "pki/cert/*"                { capabilities = ["read"] }
+        path "secret/data/payments/*"   { capabilities = ["read"] }
+        path "auth/token/renew-self"    { capabilities = ["update"] }
+        HCL
+        vault policy write cert-rotator-policy - <<'HCL'
+        path "pki/issue/payment-service" { capabilities = ["create","update"] }
+        path "pki/revoke"                { capabilities = ["create","update"] }
+        path "pki/cert/*"                { capabilities = ["read"] }
+        path "secret/data/payments/*"   { capabilities = ["create","update","read"] }
+        path "auth/token/renew-self"    { capabilities = ["update"] }
+        HCL
+        vault write auth/kubernetes/role/payment-service \
+          bound_service_account_names=payment-service \
+          bound_service_account_namespaces=payments \
+          policies=payment-service-policy ttl=1h
+        vault write auth/kubernetes/role/cert-rotator \
+          bound_service_account_names=cert-rotator \
+          bound_service_account_namespaces=payments \
+          policies=cert-rotator-policy ttl=1h
+
+        # Mark as configured so this step is skipped on future deploys.
+        kubectl annotate secret vault-unseal-keys -n vault vault-configured=true
+
+        kill $PF_PID 2>/dev/null || true
+        echo "Vault configuration complete."
+
     - name: Apply Kubernetes manifests
       run: |
         kubectl apply -f infra/kubernetes/backend.yaml
@@ -190,6 +340,8 @@ jobs:
         kubectl apply -f infra/kubernetes/frontend.yaml
         kubectl apply -f infra/kubernetes/ingress.yaml
         kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
+        kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
+        kubectl apply -f infra/kubernetes/vault/cert-rotator-cronjob.yaml
 
     - name: Wait for rollouts
       run: |
