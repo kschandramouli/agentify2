@@ -1,13 +1,57 @@
-# Healthy payment service — 2 replicas of nginx serving HTTP.
-# Phase 1: both replicas healthy → service HEALTHY (100% ready).
-# Phase 3: payment-worker crashes alongside this → service DEGRADED overall.
+# payment-service — nginx serving HTTPS using a TLS cert injected by Vault Agent.
+#
+# The Vault Agent sidecar reads the cert from the PKI secrets engine on startup
+# and writes it to /vault/secrets/tls.crt + tls.key.  nginx uses those files.
+# When the cert is renewed by the rotator CronJob, the Vault Agent sidecar
+# detects the change and sends nginx a SIGHUP for zero-downtime reload.
+#
+# Prerequisites: scripts/vault-setup.sh must have run to create:
+#   - Kubernetes auth role "payment-service"
+#   - PKI role "payment-service"
+
+# ── ServiceAccount bound to the Vault Kubernetes auth role ───────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payment-service
+  namespace: payments
+---
+# ── nginx TLS config (served via ConfigMap) ───────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-tls-config
+  namespace: payments
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 443 ssl;
+        server_name payment.payments.svc.cluster.local;
+        ssl_certificate     /vault/secrets/tls.crt;
+        ssl_certificate_key /vault/secrets/tls.key;
+        location / {
+          return 200 '{"status":"ok","service":"payment-service"}';
+          add_header Content-Type application/json;
+        }
+        location /health {
+          return 200 '{"status":"healthy"}';
+          add_header Content-Type application/json;
+        }
+      }
+    }
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: payment
   namespace: payments
+  labels:
+    app: payment
+    vault-managed-certs: "true"
   annotations:
-    # Tracked by k8fy adapter watch_deployments — rollout bumps this revision.
     deployment.kubernetes.io/revision: "1"
 spec:
   replicas: 2
@@ -18,33 +62,66 @@ spec:
     metadata:
       labels:
         app: payment
+      annotations:
+        # ── Vault Agent Injector annotations ─────────────────────────────────
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role:         "payment-service"
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+
+        # TLS certificate from the PKI engine.
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki/issue/payment-service"
+        vault.hashicorp.com/agent-inject-template-tls.crt: |
+          {{- with secret "pki/issue/payment-service" "common_name=payment.payments.svc.cluster.local" "ttl=720h" -}}
+          {{ .Data.certificate }}
+          {{ .Data.issuing_ca }}
+          {{- end }}
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki/issue/payment-service"
+        vault.hashicorp.com/agent-inject-template-tls.key: |
+          {{- with secret "pki/issue/payment-service" "common_name=payment.payments.svc.cluster.local" "ttl=720h" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+        # Reload nginx without downtime when the cert changes.
+        vault.hashicorp.com/agent-inject-command-tls.crt: "nginx -s reload || true"
+        vault.hashicorp.com/auth-path: "auth/kubernetes"
     spec:
+      serviceAccountName: payment-service
       containers:
       - name: payment
         image: nginx:1.25-alpine
         ports:
-        - containerPort: 80
+        - containerPort: 443
+          name: https
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
         readinessProbe:
           httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 5
+            path: /health
+            port: 443
+            scheme: HTTPS
+          initialDelaySeconds: 10
           periodSeconds: 10
         livenessProbe:
           httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 10
+            path: /health
+            port: 443
+            scheme: HTTPS
+          initialDelaySeconds: 15
           periodSeconds: 15
         resources:
           requests:
             memory: "32Mi"
-            cpu: "10m"
+            cpu:    "10m"
           limits:
             memory: "64Mi"
-            cpu: "100m"
-
+            cpu:    "100m"
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-tls-config
 ---
+# ── Service ───────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
@@ -54,6 +131,7 @@ spec:
   selector:
     app: payment
   ports:
-  - port: 80
-    targetPort: 80
+  - name: https
+    port: 443
+    targetPort: 443
   type: ClusterIP

@@ -13,6 +13,7 @@ from k8fy.skills.change_history import ChangeHistorySkill
 from k8fy.skills.diagnose import DiagnoseSkill
 from k8fy.skills.health_check import HealthSkill
 from k8fy.skills.restart_trend import RestartTrendSkill
+from k8fy.skills.vault_cert import VaultCertSkill
 from models.response import AgentResponse
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,12 @@ class SkillRouter:
 
     def __init__(self) -> None:
         self._skills: Dict[str, K8fyAgent] = {
-            "health_check": HealthSkill(),
-            "cert_check": CertAuditSkill(),
-            "diagnose": DiagnoseSkill(),
+            "health_check":   HealthSkill(),
+            "cert_check":     CertAuditSkill(),
+            "diagnose":       DiagnoseSkill(),
             "change_history": ChangeHistorySkill(),
-            "metrics_history": RestartTrendSkill(),
+            "metrics_history":RestartTrendSkill(),
+            "vault_cert":     VaultCertSkill(),
         }
         # Fallback: full K8fyAgent for general_query or anything new.
         self._fallback: Optional[K8fyAgent] = None

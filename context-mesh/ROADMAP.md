@@ -305,6 +305,60 @@ once to push local strings into Langfuse.
 All explicitly later — they matter once the two-tier path, governance gate, and
 skill layer land.
 
+## P6 — HashiCorp Vault Integration (cert management + autonomous rotation)
+
+**Context (2026-06-17):** Development/test scaffold implemented to mimic the client
+setup where TLS certificates are issued and rotated by HashiCorp Vault PKI rather
+than cert-manager or manual Kubernetes secrets. This demonstrates how agentify can
+act as an autonomous cert management agent for Vault-backed workloads.
+
+### What was implemented
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Vault Helm values | `infra/kubernetes/vault/vault-values.yaml` | Standalone Vault on EKS (dev/test) |
+| Vault setup script | `scripts/vault-setup.sh` | Init, unseal, K8s auth, PKI engine, policies, roles |
+| Payment service manifest | `infra/kubernetes/payments-test/payment-service.yaml` | nginx HTTPS with Vault Agent Injector annotations — cert injected from Vault PKI at runtime |
+| Cert rotator CronJob | `infra/kubernetes/vault/cert-rotator-cronjob.yaml` | Daily check: renews cert via Vault PKI if < 30 days remaining |
+| VaultCertSkill | `src/agent/k8fy/skills/vault_cert.py` | Pattern A skill: pre-fetches Vault cert status + K8s cert status, one Claude call to assess and optionally call `rotate_vault_cert` |
+| Vault tools | `src/agent/k8fy/tools.py` | `get_vault_cert_status` + `rotate_vault_cert` — call Vault HTTP API directly from the agent |
+| `vault_cert` intent | `inferIntent()` in `handlers.go` | Queries containing "vault", "pki", "rotate cert", etc. route to VaultCertSkill |
+
+### Architecture
+
+```
+HashiCorp Vault (helm, standalone)
+├── PKI engine  → issues TLS certs for payment.payments.svc.cluster.local
+├── KV v2       → stores renewed certs for audit
+└── K8s auth    → payment-service + cert-rotator ServiceAccounts
+
+payment-service pod
+└── Vault Agent Injector sidecar
+    ├── On start:  fetches cert from PKI → writes /vault/secrets/tls.crt
+    └── On renew:  detects lease expiry → fetches new cert → SIGHUP nginx
+
+cert-rotator CronJob (daily)
+└── Checks cert expiry via Vault KV
+    └── If < 30 days: vault write pki/issue/payment-service
+
+agentify Investigate / K8s Observability
+└── "Is the Vault cert for payment-service healthy?"
+    → vault_cert intent → VaultCertSkill
+    → get_vault_cert_status tool (queries Vault HTTP API)
+    → Claude: assess + optionally call rotate_vault_cert
+    → "Cert expires in 12 days — rotating now..."
+    → rotate_vault_cert tool → new cert issued + stored in KV
+```
+
+### Open items (deferred)
+
+- **Production Vault HA** — Raft storage, multi-node, TLS between Vault nodes
+- **Vault Agent template updates** — auto-restart pods (not just SIGHUP) on cert change
+- **Terraform Vault provider** — manage PKI roles and policies as code
+- **Vault Enterprise** — namespace isolation per tenant (aligns with P3a)
+- **Dynamic secrets** — extend VaultCertSkill to manage DB credentials, not just TLS
+- **Audit log integration** — stream Vault audit logs into agentify event store for anomaly detection
+
 ## Frontend — ops console (not a reviewer P-item; foundational gap)
 
 **Status (v1 scaffolded, 2026-06-04):** `src/frontend/` — Vite + React + TypeScript

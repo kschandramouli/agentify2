@@ -1,0 +1,73 @@
+# HashiCorp Vault — standalone dev/test deployment on EKS
+#
+# Install:
+#   helm repo add hashicorp https://helm.releases.hashicorp.com
+#   helm repo update
+#   helm install vault hashicorp/vault \
+#     --namespace vault --create-namespace \
+#     -f infra/kubernetes/vault/vault-values.yaml
+#
+# After install run scripts/vault-setup.sh to initialise, unseal, and
+# configure the Kubernetes auth method + PKI engine.
+
+global:
+  enabled: true
+
+server:
+  # Standalone mode: single pod + persistent file storage.
+  # NOT for production — use HA Raft for production.
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable = 1
+        address     = "[::]:8200"
+        cluster_address = "[::]:8201"
+      }
+
+      storage "file" {
+        path = "/vault/data"
+      }
+
+  # 1 GiB PVC keeps data across pod restarts (unlike dev mode which is in-memory).
+  dataStorage:
+    enabled:      true
+    size:         1Gi
+    storageClass: gp2   # EKS default; change to gp3 if available
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu:    "250m"
+    limits:
+      memory: "512Mi"
+      cpu:    "500m"
+
+  # Service account used by Vault itself (for K8s auth token review).
+  serviceAccount:
+    create: true
+    name:   vault
+
+  # Readiness / liveness — match Vault's /v1/sys/health response codes.
+  readinessProbe:
+    enabled: true
+    path:    /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+
+# Vault Agent Injector — mutates pods that carry vault.hashicorp.com annotations.
+injector:
+  enabled:   true
+  replicas:  1
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu:    "50m"
+    limits:
+      memory: "128Mi"
+      cpu:    "250m"
+
+# UI disabled outside the cluster (ALB handles ingress separately if needed).
+ui:
+  enabled:         true
+  serviceType:     ClusterIP

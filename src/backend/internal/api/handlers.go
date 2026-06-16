@@ -620,6 +620,12 @@ func inferIntent(question string) string {
 	if strings.Contains(lower, "health") || strings.Contains(lower, "healthy") {
 		return "health_check"
 	}
+	// Vault cert intent: questions about Vault-managed certs or cert rotation via Vault.
+	for _, kw := range []string{"vault", "rotate cert", "rotate tls", "pki", "cert rotat", "renew cert"} {
+		if strings.Contains(lower, kw) {
+			return "vault_cert"
+		}
+	}
 	if strings.Contains(lower, "certificate") || strings.Contains(lower, "cert") || strings.Contains(lower, "expir") {
 		return "cert_check"
 	}

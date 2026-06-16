@@ -45,6 +45,15 @@ spec:
             secretKeyRef:
               name: agentify-anthropic-secret
               key: api_key
+        # Vault connectivity for VaultCertSkill (optional — skill degrades gracefully if unset).
+        - name: VAULT_ADDR
+          value: "http://vault.vault.svc.cluster.local:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: agentify-vault-secret
+              key: token
+              optional: true   # agent starts normally if Vault is not deployed
         livenessProbe:
           httpGet:
             path: /health
