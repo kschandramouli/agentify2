@@ -888,14 +888,27 @@ func (h *Handler) seedNamespaceCache(ctx context.Context, namespaces []Namespace
 	return seeded
 }
 
-// SeedNamespaceCache runs once at startup in a background goroutine, polling the
-// adapter until it is ready, then seeding current_state with the full namespace/
-// service list. This ensures the search autocomplete is populated immediately
-// after any pod restart — including after a pause/resume cycle — without waiting
-// for the adapter to re-emit all ingestion events (which can take minutes).
+// SeedNamespaceCache runs in a background goroutine (called at startup and on
+// demand when current_state is empty). It first checks whether current_state
+// already has data — if so it exits immediately, which is the normal case after
+// a pod restart where Postgres data survived the cycle. When current_state is
+// empty it polls the adapter every 15 s for up to 5 minutes until the adapter
+// responds, then seeds the cache.
 func (h *Handler) SeedNamespaceCache(ctx context.Context) {
-	const retryInterval = 30 * time.Second
-	const maxAttempts = 12 // 6 minutes total
+	// Skip if current_state already has entries — Postgres persists data across
+	// pod restarts so this is usually true after a scale-up.
+	if kv, kerr := h.orch.GetBackendFactory().GetBackend("kv"); kerr == nil {
+		if p, ok := kv.(trackedEntitiesProvider); ok {
+			if existing, eerr := p.TrackedEntities(ctx); eerr == nil && len(existing) > 0 {
+				h.logger.Info("startup namespace sync: current_state already populated, skipping",
+					"count", len(existing))
+				return
+			}
+		}
+	}
+
+	const retryInterval = 15 * time.Second // tighter than before (was 30 s)
+	const maxAttempts = 20                 // 5 minutes total
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		namespaces, err := h.adapterClient.DiscoverNamespaces(ctx)
 		if err != nil {
@@ -913,7 +926,7 @@ func (h *Handler) SeedNamespaceCache(ctx context.Context) {
 			"namespaces", len(namespaces), "services", seeded)
 		return
 	}
-	h.logger.Warn("startup namespace sync: adapter did not become available within 6 minutes")
+	h.logger.Warn("startup namespace sync: adapter did not become available within 5 minutes")
 }
 
 // HandleSyncNamespaces calls the adapter to discover current K8s namespaces +
@@ -969,6 +982,13 @@ type syncSeeder interface {
 
 // HandleTrackedEntities returns all known namespace/service pairs from the
 // live-state current_state table. Powers the frontend search autocomplete.
+//
+// After a scale-up the table may be empty until the adapter re-emits events.
+// Rather than returning [] silently, the handler falls back to a live adapter
+// call (3 s timeout) and seeds current_state in the same request, so the first
+// page load after a scale-up always returns real data. If the adapter is not
+// yet ready the response is [] and a background seed is queued so the 3 s
+// frontend re-poll (active while the list is empty) picks up the data shortly.
 func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -993,6 +1013,25 @@ func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, []string{})
 		return
 	}
+
+	// Empty current_state — try a live adapter call so the first request after
+	// a scale-up returns real data without the user having to wait.
+	if len(entities) == 0 {
+		syncCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		namespaces, aerr := h.adapterClient.DiscoverNamespaces(syncCtx)
+		cancel()
+		if aerr == nil && len(namespaces) > 0 {
+			h.seedNamespaceCache(r.Context(), namespaces)
+			entities, _ = provider.TrackedEntities(r.Context())
+			h.logger.Info("tracked entities: live-seeded from adapter", "count", len(entities))
+		} else {
+			// Adapter not ready yet — seed in the background so the frontend's
+			// 3 s re-poll (active while the list is empty) picks it up shortly.
+			go h.SeedNamespaceCache(context.Background())
+			h.logger.Info("tracked entities: adapter not ready, seeding in background", "error", aerr)
+		}
+	}
+
 	if entities == nil {
 		entities = []string{}
 	}

@@ -27,11 +27,14 @@ export function SearchInput({ value, onChange, disabled, placeholder }: Props) {
   const wrapRef  = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
 
-  // Fetch tracked namespace/service pairs from the backend, refresh every 15s
+  // Fetch tracked namespace/service pairs from the backend.
+  // Poll every 3 s while the list is empty (recovering from scale-up), drop
+  // back to 15 s once data is present to avoid unnecessary traffic.
   const { data: all = [] } = useQuery<string[]>({
     queryKey: ["tracked"],
     queryFn: fetchTracked,
-    refetchInterval: 15_000,
+    refetchInterval: (query) =>
+      (query.state.data?.length ?? 0) === 0 ? 3_000 : 15_000,
   });
 
   async function handleSync() {

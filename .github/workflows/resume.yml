@@ -102,6 +102,11 @@ jobs:
           --name ${{ secrets.EKS_CLUSTER_NAME }} \
           --region ${{ secrets.AWS_REGION }}
 
+    - name: Re-apply CronJob manifest
+      run: |
+        kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml 2>/dev/null \
+          || echo "CronJob apply skipped (cluster may not be fully ready)"
+
     - name: Seed namespace cache
       # After pods reschedule the backend runs SeedNamespaceCache automatically,
       # but this step provides an immediate fallback in case the adapter isn't

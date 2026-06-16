@@ -14,7 +14,7 @@ metadata:
   name: namespace-sync
   namespace: agentify
 spec:
-  schedule: "0 */2 * * *"   # every 2 hours
+  schedule: "*/5 * * * *"   # every 5 minutes — ensures cache recovers quickly after scale-up
   concurrencyPolicy: Forbid  # skip if previous run is still in progress
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

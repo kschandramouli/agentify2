@@ -189,6 +189,7 @@ jobs:
         kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
         kubectl apply -f infra/kubernetes/frontend.yaml
         kubectl apply -f infra/kubernetes/ingress.yaml
+        kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
 
     - name: Wait for rollouts
       run: |
