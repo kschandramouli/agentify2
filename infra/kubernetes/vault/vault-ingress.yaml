@@ -1,17 +1,20 @@
-# HashiCorp Vault — ALB Ingress
+# HashiCorp Vault — ALB Ingress (shares the agentify ALB via IngressGroup)
 #
-# Exposes the Vault UI and API at its own internet-facing ALB URL.
-# The URL is printed by: kubectl get ingress vault-ui -n vault
+# The AWS Load Balancer Controller merges all Ingresses in the same
+# alb.ingress.kubernetes.io/group.name into a single ALB.  This means no
+# extra ALB is provisioned — Vault UI reuses the existing agentify ALB.
 #
-# Apply AFTER the Vault Helm release is installed and vault-setup.sh has run:
+# Vault is accessible at the SAME hostname as the agentify frontend:
+#   http://<agentify-alb>/ui/        ← Vault web UI  (login here)
+#   http://<agentify-alb>/v1/        ← Vault HTTP API
+#
+# These paths do not conflict with the agentify routes (/api, /admin, /health,
+# /metrics, /) because the ALB matches longest prefix first, so /ui/ and /v1/
+# are evaluated before the catch-all /.
+#
+# Apply after running scripts/vault-setup.sh:
 #   kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
-#
-# Access the UI:
-#   http://<ALB-HOSTNAME>/ui/
-#   Login with the root token from .vault-dev-creds or with any Vault token.
-#
-# NOTE: This uses HTTP (no TLS) for dev/test convenience.
-# For production: add an ACM cert ARN and uncomment the ssl-redirect lines.
+#   kubectl get ingress vault-ui -n vault   # shows the SAME hostname as agentify
 
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -19,36 +22,35 @@ metadata:
   name: vault-ui
   namespace: vault
   annotations:
-    kubernetes.io/ingress.class:                             alb
-    alb.ingress.kubernetes.io/scheme:                        internet-facing
-    alb.ingress.kubernetes.io/target-type:                   ip
+    kubernetes.io/ingress.class: alb
 
-    # Dev: HTTP only on port 80.
-    alb.ingress.kubernetes.io/listen-ports:                  '[{"HTTP":80}]'
+    # ── Join the existing agentify ALB (no new ALB created) ──────────────────
+    alb.ingress.kubernetes.io/group.name:  agentify
+    alb.ingress.kubernetes.io/group.order: "20"   # lower priority than agentify (order 10)
 
-    # Vault health endpoint returns different codes based on state:
-    #   200 = active,  429 = standby,  473 = performance standby,
-    #   501 = not initialised,  503 = sealed.
-    # Accept all of them so ALB doesn't mark the target unhealthy while
-    # Vault is being initialised or unsealed.
-    alb.ingress.kubernetes.io/healthcheck-path:              /v1/sys/health
-    alb.ingress.kubernetes.io/success-codes:                 "200,429,473,501,503"
-    alb.ingress.kubernetes.io/healthcheck-interval-seconds:  "30"
-    alb.ingress.kubernetes.io/healthcheck-timeout-seconds:   "5"
+    # Must match the main ingress — controller validates group members are consistent.
+    alb.ingress.kubernetes.io/scheme:      internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
 
-    alb.ingress.kubernetes.io/load-balancer-attributes:      idle_timeout.timeout_seconds=60
-
-    # To enable HTTPS (recommended even for dev):
-    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
-    # alb.ingress.kubernetes.io/ssl-redirect: "443"
-    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    # Vault returns 200/429/473/501/503 depending on seal/init state — accept all.
+    alb.ingress.kubernetes.io/healthcheck-path:             /v1/sys/health
+    alb.ingress.kubernetes.io/success-codes:                "200,429,473,501,503"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
 
 spec:
   rules:
   - http:
       paths:
-        # Route everything to Vault — the UI is at /ui/, the API at /v1/.
-      - path: /
+        # Vault web UI — assets and redirects all work under /ui/ natively.
+      - path: /ui
+        pathType: Prefix
+        backend:
+          service:
+            name: vault
+            port:
+              number: 8200
+        # Vault HTTP API — used by the VaultCertSkill and the cert rotator.
+      - path: /v1
         pathType: Prefix
         backend:
           service:
