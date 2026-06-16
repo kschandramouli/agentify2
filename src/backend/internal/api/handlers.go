@@ -650,12 +650,14 @@ func buildPodQuery(reqContext map[string]interface{}) map[string]interface{} {
 // agentResp may be nil for Tier-1 / error paths (no LLM call was made).
 func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status string, sources []string, confidence float64, toolCalls []string, start time.Time, agentResp *AgentResponse) {
 	latencyMs := time.Since(start).Milliseconds()
-	var inTok, outTok int64
+	var inTok, outTok, cacheWriteTok, cacheReadTok int64
 	var cost float64
 	if agentResp != nil {
-		inTok = agentResp.InputTokens
-		outTok = agentResp.OutputTokens
-		cost = agentResp.EstimatedCostUSD
+		inTok          = agentResp.InputTokens
+		outTok         = agentResp.OutputTokens
+		cacheWriteTok  = agentResp.CacheCreationInputTokens
+		cacheReadTok   = agentResp.CacheReadInputTokens
+		cost           = agentResp.EstimatedCostUSD
 	}
 	h.logger.Info("query.trace",
 		"trace_id", traceID,
@@ -670,6 +672,8 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 		"latency_ms", latencyMs,
 		"input_tokens", inTok,
 		"output_tokens", outTok,
+		"cache_creation_input_tokens", cacheWriteTok,
+		"cache_read_input_tokens", cacheReadTok,
 		"estimated_cost_usd", cost,
 	)
 	if h.traceStore != nil {
@@ -677,21 +681,23 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if err := h.traceStore.InsertTrace(ctx, pgstore.TraceRecord{
-				ID:               uuid.New().String(),
-				TraceID:          traceID,
-				Question:         question,
-				Intent:           intent,
-				Namespace:        namespace,
-				Tier:             tier,
-				Status:           status,
-				Confidence:       confidence,
-				Sources:          sources,
-				ToolCalls:        toolCalls,
-				LatencyMs:        latencyMs,
-				StartedAt:        start,
-				InputTokens:      inTok,
-				OutputTokens:     outTok,
-				EstimatedCostUSD: cost,
+				ID:                       uuid.New().String(),
+				TraceID:                  traceID,
+				Question:                 question,
+				Intent:                   intent,
+				Namespace:                namespace,
+				Tier:                     tier,
+				Status:                   status,
+				Confidence:               confidence,
+				Sources:                  sources,
+				ToolCalls:                toolCalls,
+				LatencyMs:                latencyMs,
+				StartedAt:                start,
+				InputTokens:              inTok,
+				OutputTokens:             outTok,
+				CacheCreationInputTokens: cacheWriteTok,
+				CacheReadInputTokens:     cacheReadTok,
+				EstimatedCostUSD:         cost,
 			}); err != nil {
 				h.logger.Warn("trace persist failed", "error", err)
 			}
@@ -718,6 +724,26 @@ func (h *Handler) HandleTraceList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// HandleTraceGet returns a single trace by its primary-key ID.
+func (h *Handler) HandleTraceGet(w http.ResponseWriter, r *http.Request) {
+	if h.traceStore == nil {
+		http.Error(w, "trace store not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	rec, err := h.traceStore.GetTrace(r.Context(), id)
+	if err != nil {
+		h.logger.Warn("get trace failed", "id", id, "error", err)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, traceToResponse(*rec))
 }
 
 // HandleMetricsSummary returns aggregated query statistics for the metrics dashboard.

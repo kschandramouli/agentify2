@@ -254,6 +254,8 @@ export interface TraceRecord {
   created_at: string;
   input_tokens: number;
   output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
   estimated_cost_usd: number;
 }
 
@@ -262,6 +264,12 @@ export async function listTraces(): Promise<TraceRecord[]> {
   if (res.status === 404) return [];
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<TraceRecord[]>;
+}
+
+export async function getTrace(id: string): Promise<TraceRecord> {
+  const res = await fetch(`/admin/traces/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<TraceRecord>;
 }
 
 // ── Metrics summary ───────────────────────────────────────────────────────────

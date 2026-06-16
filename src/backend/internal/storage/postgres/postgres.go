@@ -100,6 +100,8 @@ func (c *Client) initSchema(ctx context.Context) error {
 	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS input_tokens BIGINT NOT NULL DEFAULT 0;
 	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS output_tokens BIGINT NOT NULL DEFAULT 0;
 	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS estimated_cost_usd FLOAT NOT NULL DEFAULT 0;
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0;
+	ALTER TABLE IF EXISTS traces ADD COLUMN IF NOT EXISTS cache_read_input_tokens BIGINT NOT NULL DEFAULT 0;
 	CREATE INDEX IF NOT EXISTS idx_traces_created ON traces(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_traces_intent  ON traces(intent);
 
@@ -273,22 +275,24 @@ func (c *Client) Close() error { return c.db.Close() }
 
 // TraceRecord is one persisted query provenance entry.
 type TraceRecord struct {
-	ID               string
-	TraceID          string
-	Question         string
-	Intent           string
-	Namespace        string
-	Tier             string
-	Status           string
-	Confidence       float64
-	Sources          []string
-	ToolCalls        []string
-	LatencyMs        int64
-	StartedAt        time.Time
-	CreatedAt        time.Time
-	InputTokens      int64
-	OutputTokens     int64
-	EstimatedCostUSD float64
+	ID                       string
+	TraceID                  string
+	Question                 string
+	Intent                   string
+	Namespace                string
+	Tier                     string
+	Status                   string
+	Confidence               float64
+	Sources                  []string
+	ToolCalls                []string
+	LatencyMs                int64
+	StartedAt                time.Time
+	CreatedAt                time.Time
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	EstimatedCostUSD         float64
 }
 
 // TracesSummary holds aggregated statistics derived from the traces table.
@@ -313,13 +317,53 @@ func (c *Client) InsertTrace(ctx context.Context, t TraceRecord) error {
 	_, err := c.db.ExecContext(ctx,
 		`INSERT INTO traces (id, trace_id, question, intent, namespace, tier, status,
 		  confidence, sources, tool_calls, latency_ms, started_at, created_at,
-		  input_tokens, output_tokens, estimated_cost_usd)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),$13,$14,$15)
+		  input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+		  estimated_cost_usd)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),$13,$14,$15,$16,$17)
 		 ON CONFLICT (id) DO NOTHING`,
 		t.ID, t.TraceID, t.Question, t.Intent, t.Namespace, t.Tier, t.Status,
 		t.Confidence, srcJSON, tcJSON, t.LatencyMs, startedAt,
-		t.InputTokens, t.OutputTokens, t.EstimatedCostUSD)
+		t.InputTokens, t.OutputTokens,
+		t.CacheCreationInputTokens, t.CacheReadInputTokens,
+		t.EstimatedCostUSD)
 	return err
+}
+
+const traceSelectCols = `
+	SELECT id, trace_id, question, intent, namespace, tier, status,
+	       confidence, sources, tool_calls, latency_ms,
+	       COALESCE(started_at, created_at) AS started_at, created_at,
+	       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+	       COALESCE(cache_creation_input_tokens, 0), COALESCE(cache_read_input_tokens, 0),
+	       COALESCE(estimated_cost_usd, 0)
+	FROM traces`
+
+func scanTrace(row interface{ Scan(...any) error }) (TraceRecord, error) {
+	var t TraceRecord
+	var srcJSON, tcJSON []byte
+	err := row.Scan(
+		&t.ID, &t.TraceID, &t.Question, &t.Intent, &t.Namespace,
+		&t.Tier, &t.Status, &t.Confidence, &srcJSON, &tcJSON, &t.LatencyMs,
+		&t.StartedAt, &t.CreatedAt,
+		&t.InputTokens, &t.OutputTokens,
+		&t.CacheCreationInputTokens, &t.CacheReadInputTokens,
+		&t.EstimatedCostUSD)
+	if err != nil {
+		return t, err
+	}
+	_ = json.Unmarshal(srcJSON, &t.Sources)
+	_ = json.Unmarshal(tcJSON, &t.ToolCalls)
+	return t, nil
+}
+
+// GetTrace returns a single trace by its primary key ID.
+func (c *Client) GetTrace(ctx context.Context, id string) (*TraceRecord, error) {
+	row := c.db.QueryRowContext(ctx, traceSelectCols+` WHERE id = $1`, id)
+	t, err := scanTrace(row)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
 }
 
 // ListTraces returns the most recent traces (newest first), capped at limit.
@@ -328,12 +372,7 @@ func (c *Client) ListTraces(ctx context.Context, limit int) ([]TraceRecord, erro
 		limit = 100
 	}
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT id, trace_id, question, intent, namespace, tier, status,
-		        confidence, sources, tool_calls, latency_ms,
-		        COALESCE(started_at, created_at) AS started_at, created_at,
-		        COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
-		        COALESCE(estimated_cost_usd, 0)
-		 FROM traces ORDER BY created_at DESC LIMIT $1`, limit)
+		traceSelectCols+` ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list traces: %w", err)
 	}
@@ -341,15 +380,10 @@ func (c *Client) ListTraces(ctx context.Context, limit int) ([]TraceRecord, erro
 
 	var result []TraceRecord
 	for rows.Next() {
-		var t TraceRecord
-		var srcJSON, tcJSON []byte
-		if err := rows.Scan(&t.ID, &t.TraceID, &t.Question, &t.Intent, &t.Namespace,
-			&t.Tier, &t.Status, &t.Confidence, &srcJSON, &tcJSON, &t.LatencyMs,
-			&t.StartedAt, &t.CreatedAt, &t.InputTokens, &t.OutputTokens, &t.EstimatedCostUSD); err != nil {
+		t, err := scanTrace(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan trace: %w", err)
 		}
-		_ = json.Unmarshal(srcJSON, &t.Sources)
-		_ = json.Unmarshal(tcJSON, &t.ToolCalls)
 		result = append(result, t)
 	}
 	return result, rows.Err()

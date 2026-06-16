@@ -1039,6 +1039,39 @@ code {
 .adm-date-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; color: var(--text); outline: none; cursor: pointer; }
 .adm-date-input:focus { border-color: var(--accent); }
 .adm-btn--ghost { background: transparent; }
+.adm-row--clickable { cursor: pointer; }
+.adm-row--clickable:hover { background: rgba(255,255,255,.04); }
+
+/* Trace detail drawer (slide-in from right) */
+.trace-drawer {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.45);
+  display: flex; justify-content: flex-end;
+}
+.trace-drawer__panel {
+  width: min(480px, 92vw);
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+.trace-drawer__header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.trace-drawer__title { font-size: 14px; font-weight: 600; }
+.trace-drawer__close {
+  background: none; border: none; color: var(--muted);
+  font-size: 16px; cursor: pointer; padding: 4px 8px; border-radius: 4px;
+}
+.trace-drawer__close:hover { background: rgba(255,255,255,.06); color: var(--text); }
+.trace-drawer__body { padding: 20px; }
+.trace-detail-grid {
+  display: grid; grid-template-columns: 130px 1fr; gap: 10px 16px; font-size: 13px;
+}
+.trace-detail-label { color: var(--muted); align-self: start; padding-top: 1px; }
+.trace-detail-value { color: var(--text); word-break: break-all; }
 
 /* Cost summary bar above the traces table */
 .adm-cost-summary { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 12px; background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); border-radius: 8px; font-size: 13px; margin-bottom: 12px; }

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { listTraces, type TraceRecord } from "../api";
+import { listTraces, getTrace, type TraceRecord } from "../api";
 
 const TIER_CLS: Record<string, string> = {
   tier1:   "adm-badge adm-badge--tier1",
@@ -52,6 +52,15 @@ function fmtTokens(input: number, output: number): string {
   return `${fmt(input)} / ${fmt(output)}`;
 }
 
+function fmtCacheTokens(write: number, read: number): string | null {
+  if (!write && !read) return null;
+  const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+  const parts: string[] = [];
+  if (write) parts.push(`${fmt(write)} wrote`);
+  if (read)  parts.push(`${fmt(read)} read`);
+  return parts.join(" · ");
+}
+
 function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
@@ -60,11 +69,86 @@ function truncate(s: string, n: number) {
 function computeTotals(rows: TraceRecord[]) {
   const tier2 = rows.filter(r => r.tier === "tier2");
   return {
-    count: tier2.length,
-    cost: tier2.reduce((s, r) => s + (r.estimated_cost_usd ?? 0), 0),
+    count:       tier2.length,
+    cost:        tier2.reduce((s, r) => s + (r.estimated_cost_usd ?? 0), 0),
     inputTokens: tier2.reduce((s, r) => s + (r.input_tokens ?? 0), 0),
-    outputTokens: tier2.reduce((s, r) => s + (r.output_tokens ?? 0), 0),
+    outputTokens:tier2.reduce((s, r) => s + (r.output_tokens ?? 0), 0),
+    cacheWrite:  tier2.reduce((s, r) => s + (r.cache_creation_input_tokens ?? 0), 0),
+    cacheRead:   tier2.reduce((s, r) => s + (r.cache_read_input_tokens ?? 0), 0),
   };
+}
+
+// Drawer showing full detail for a single trace (GET /admin/traces/{id})
+function TraceDrawer({ id, onClose }: { id: string; onClose: () => void }) {
+  const { data, isLoading, isError } = useQuery<TraceRecord>({
+    queryKey: ["trace", id],
+    queryFn: () => getTrace(id),
+  });
+
+  return (
+    <div className="trace-drawer" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="trace-drawer__panel">
+        <div className="trace-drawer__header">
+          <span className="trace-drawer__title">Trace detail</span>
+          <button className="trace-drawer__close" onClick={onClose}>✕</button>
+        </div>
+        {isLoading && <p className="adm-loading">Loading…</p>}
+        {isError   && <p className="adm-error">Failed to load trace.</p>}
+        {data && (
+          <div className="trace-drawer__body">
+            <div className="trace-detail-grid">
+              <span className="trace-detail-label">Question</span>
+              <span className="trace-detail-value">{data.question}</span>
+
+              <span className="trace-detail-label">Trace ID</span>
+              <code className="trace-detail-value adm-code">{data.trace_id}</code>
+
+              <span className="trace-detail-label">Intent</span>
+              <code className="trace-detail-value adm-code">{data.intent}</code>
+
+              <span className="trace-detail-label">Tier / Status</span>
+              <span className="trace-detail-value">{data.tier} · {data.status}</span>
+
+              <span className="trace-detail-label">Namespace</span>
+              <span className="trace-detail-value">{data.namespace || "—"}</span>
+
+              <span className="trace-detail-label">Confidence</span>
+              <span className="trace-detail-value">{data.confidence ? `${Math.round(data.confidence * 100)}%` : "—"}</span>
+
+              <span className="trace-detail-label">Latency</span>
+              <span className="trace-detail-value">{fmtLatency(data.latency_ms)}</span>
+
+              <span className="trace-detail-label">Started</span>
+              <span className="trace-detail-value">{absTime(data.started_at || data.created_at)}</span>
+
+              {(data.input_tokens > 0 || data.output_tokens > 0) && (<>
+                <span className="trace-detail-label">Tokens in / out</span>
+                <span className="trace-detail-value">{fmtTokens(data.input_tokens, data.output_tokens)}</span>
+
+                <span className="trace-detail-label">Cache write / read</span>
+                <span className="trace-detail-value">
+                  {fmtCacheTokens(data.cache_creation_input_tokens, data.cache_read_input_tokens) ?? "—"}
+                </span>
+
+                <span className="trace-detail-label">Est. cost</span>
+                <span className="trace-detail-value">{fmtCost(data.estimated_cost_usd)}</span>
+              </>)}
+
+              {data.sources?.length > 0 && (<>
+                <span className="trace-detail-label">Sources</span>
+                <span className="trace-detail-value">{data.sources.join(", ")}</span>
+              </>)}
+
+              {data.tool_calls?.length > 0 && (<>
+                <span className="trace-detail-label">Tool calls</span>
+                <span className="trace-detail-value">{data.tool_calls.join(", ")}</span>
+              </>)}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function TracesPanel() {
@@ -72,6 +156,7 @@ export function TracesPanel() {
   const [tierFilter,   setTierFilter]   = useState("");
   const [fromDate,     setFromDate]     = useState("");
   const [toDate,       setToDate]       = useState("");
+  const [selectedId,   setSelectedId]   = useState<string | null>(null);
 
   const { data = [], isLoading, isError, error } = useQuery<TraceRecord[], Error>({
     queryKey: ["traces"],
@@ -99,6 +184,7 @@ export function TracesPanel() {
   const totals = computeTotals(rows);
 
   return (
+    <>
     <div className="adm-panel">
       <div className="adm-panel__header">
         <div>
@@ -152,8 +238,16 @@ export function TracesPanel() {
           <span className="adm-cost-summary__sep">·</span>
           <span className="adm-cost-summary__item">
             <strong>{(totals.inputTokens / 1000).toFixed(1)}k</strong> in&nbsp;/&nbsp;
-            <strong>{(totals.outputTokens / 1000).toFixed(1)}k</strong> out tokens
+            <strong>{(totals.outputTokens / 1000).toFixed(1)}k</strong> out
           </span>
+          {(totals.cacheWrite > 0 || totals.cacheRead > 0) && (<>
+            <span className="adm-cost-summary__sep">·</span>
+            <span className="adm-cost-summary__item adm-muted" title="Prompt cache activity">
+              {totals.cacheWrite > 0 && <><strong>{(totals.cacheWrite / 1000).toFixed(1)}k</strong> cache wrote</>}
+              {totals.cacheWrite > 0 && totals.cacheRead > 0 && " · "}
+              {totals.cacheRead  > 0 && <><strong>{(totals.cacheRead  / 1000).toFixed(1)}k</strong> cache read</>}
+            </span>
+          </>)}
           <span className="adm-cost-summary__sep">·</span>
           <span className="adm-cost-summary__item">
             est. <strong className="adm-cost-summary__cost">${totals.cost.toFixed(4)}</strong> USD
@@ -181,7 +275,8 @@ export function TracesPanel() {
                 <th>Tier</th>
                 <th>Status</th>
                 <th>Conf</th>
-                <th>Tokens (in/out)</th>
+                <th>In / Out tokens</th>
+                <th>Cache tokens</th>
                 <th>Cost</th>
                 <th>Tools</th>
               </tr>
@@ -192,8 +287,17 @@ export function TracesPanel() {
                 const completedAt = t.latency_ms > 0
                   ? new Date(new Date(startIso).getTime() + t.latency_ms).toLocaleTimeString()
                   : null;
+                const cacheInfo = fmtCacheTokens(
+                  t.cache_creation_input_tokens ?? 0,
+                  t.cache_read_input_tokens ?? 0,
+                );
                 return (
-                  <tr key={t.id}>
+                  <tr
+                    key={t.id}
+                    className="adm-row--clickable"
+                    onClick={() => setSelectedId(t.id)}
+                    title="Click to view full trace"
+                  >
                     <td className="adm-muted adm-nowrap" title={absTime(startIso)}>
                       {relTime(startIso)}
                       {completedAt && (
@@ -208,6 +312,7 @@ export function TracesPanel() {
                     <td><span className={STATUS_CLS[t.status] ?? "adm-badge adm-badge--muted"}>{t.status}</span></td>
                     <td className="adm-num">{t.confidence ? `${Math.round(t.confidence * 100)}%` : "—"}</td>
                     <td className="adm-num adm-nowrap adm-muted">{fmtTokens(t.input_tokens, t.output_tokens)}</td>
+                    <td className="adm-num adm-nowrap adm-muted">{cacheInfo ?? "—"}</td>
                     <td className="adm-num adm-nowrap">{fmtCost(t.estimated_cost_usd)}</td>
                     <td className="adm-muted">{t.tool_calls?.join(", ") || "—"}</td>
                   </tr>
@@ -218,5 +323,9 @@ export function TracesPanel() {
         </div>
       )}
     </div>
+    {selectedId && (
+      <TraceDrawer id={selectedId} onClose={() => setSelectedId(null)} />
+    )}
+    </>
   );
 }

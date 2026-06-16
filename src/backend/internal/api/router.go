@@ -25,6 +25,7 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 
 	// Admin: query history + metrics summary
 	mux.HandleFunc("GET /admin/traces", h.HandleTraceList)
+	mux.HandleFunc("GET /admin/traces/{id}", h.HandleTraceGet)
 	mux.HandleFunc("GET /admin/metrics/summary", h.HandleMetricsSummary)
 
 	// Admin: integrations management

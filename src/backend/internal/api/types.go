@@ -11,27 +11,30 @@ import (
 type TraceStore interface {
 	InsertTrace(ctx context.Context, t pgstore.TraceRecord) error
 	ListTraces(ctx context.Context, limit int) ([]pgstore.TraceRecord, error)
+	GetTrace(ctx context.Context, id string) (*pgstore.TraceRecord, error)
 	GetTracesSummary(ctx context.Context) (*pgstore.TracesSummary, error)
 }
 
 // TraceResponse is the API representation of one query trace row.
 type TraceResponse struct {
-	ID               string    `json:"id"`
-	TraceID          string    `json:"trace_id"`
-	Question         string    `json:"question"`
-	Intent           string    `json:"intent"`
-	Namespace        string    `json:"namespace"`
-	Tier             string    `json:"tier"`
-	Status           string    `json:"status"`
-	Confidence       float64   `json:"confidence"`
-	Sources          []string  `json:"sources"`
-	ToolCalls        []string  `json:"tool_calls"`
-	LatencyMs        int64     `json:"latency_ms"`
-	StartedAt        time.Time `json:"started_at"`
-	CreatedAt        time.Time `json:"created_at"`
-	InputTokens      int64     `json:"input_tokens"`
-	OutputTokens     int64     `json:"output_tokens"`
-	EstimatedCostUSD float64   `json:"estimated_cost_usd"`
+	ID                       string    `json:"id"`
+	TraceID                  string    `json:"trace_id"`
+	Question                 string    `json:"question"`
+	Intent                   string    `json:"intent"`
+	Namespace                string    `json:"namespace"`
+	Tier                     string    `json:"tier"`
+	Status                   string    `json:"status"`
+	Confidence               float64   `json:"confidence"`
+	Sources                  []string  `json:"sources"`
+	ToolCalls                []string  `json:"tool_calls"`
+	LatencyMs                int64     `json:"latency_ms"`
+	StartedAt                time.Time `json:"started_at"`
+	CreatedAt                time.Time `json:"created_at"`
+	InputTokens              int64     `json:"input_tokens"`
+	OutputTokens             int64     `json:"output_tokens"`
+	CacheCreationInputTokens int64     `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64     `json:"cache_read_input_tokens"`
+	EstimatedCostUSD         float64   `json:"estimated_cost_usd"`
 }
 
 // MetricsSummaryResponse is returned by GET /admin/metrics/summary.
@@ -60,8 +63,11 @@ func traceToResponse(t pgstore.TraceRecord) TraceResponse {
 		Namespace: t.Namespace, Tier: t.Tier, Status: t.Status,
 		Confidence: t.Confidence, Sources: src, ToolCalls: tc,
 		LatencyMs: t.LatencyMs, StartedAt: t.StartedAt, CreatedAt: t.CreatedAt,
-		InputTokens: t.InputTokens, OutputTokens: t.OutputTokens,
-		EstimatedCostUSD: t.EstimatedCostUSD,
+		InputTokens:              t.InputTokens,
+		OutputTokens:             t.OutputTokens,
+		CacheCreationInputTokens: t.CacheCreationInputTokens,
+		CacheReadInputTokens:     t.CacheReadInputTokens,
+		EstimatedCostUSD:         t.EstimatedCostUSD,
 	}
 }
 
