@@ -30,11 +30,12 @@ type Handler struct {
 	integrationStore IntegrationStore // nil when postgres is not provisioned
 	traceStore       TraceStore       // nil when postgres is not provisioned
 	pricingStore     PricingStore     // nil when postgres is not provisioned
+	chatStore        ChatStore        // nil when postgres is not provisioned
 	logger           *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -48,6 +49,7 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		integrationStore: integrations,
 		traceStore:       traces,
 		pricingStore:     pricing,
+		chatStore:        chat,
 		logger:           logger,
 	}
 }
@@ -1087,6 +1089,176 @@ func (h *Handler) HandleListPricing(w http.ResponseWriter, r *http.Request) {
 		rows = []pgstore.ModelPricing{}
 	}
 	writeJSON(w, http.StatusOK, rows)
+}
+
+// ── Chat handlers ─────────────────────────────────────────────────────────────
+
+// HandleCreateChatSession creates a new conversation session.
+// Optional body: { "namespace": "...", "service": "..." }
+func (h *Handler) HandleCreateChatSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.chatStore == nil {
+		http.Error(w, "chat store not available", http.StatusServiceUnavailable)
+		return
+	}
+	var init struct {
+		Namespace string `json:"namespace"`
+		Service   string `json:"service"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&init)
+
+	s := pgstore.ChatSession{
+		ID:        uuid.New().String(),
+		Namespace: init.Namespace,
+		Service:   init.Service,
+		Messages:  []pgstore.ChatMessage{},
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+	if err := h.chatStore.CreateChatSession(r.Context(), &s); err != nil {
+		h.logger.Error("create chat session failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, chatSessionToResponse(s))
+}
+
+// HandleListChatSessions returns the 20 most recently active sessions (no messages).
+func (h *Handler) HandleListChatSessions(w http.ResponseWriter, r *http.Request) {
+	if h.chatStore == nil {
+		writeJSON(w, http.StatusOK, []ChatSessionResponse{})
+		return
+	}
+	sessions, err := h.chatStore.ListChatSessions(r.Context(), 20)
+	if err != nil {
+		h.logger.Error("list chat sessions failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	resp := make([]ChatSessionResponse, len(sessions))
+	for i, s := range sessions {
+		r2 := chatSessionToResponse(s)
+		r2.Messages = nil // omit from list to keep payload small
+		resp[i] = r2
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// HandleGetChatSession returns one session with its full message history.
+func (h *Handler) HandleGetChatSession(w http.ResponseWriter, r *http.Request) {
+	if h.chatStore == nil {
+		http.Error(w, "chat store not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	s, err := h.chatStore.GetChatSession(r.Context(), id)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, chatSessionToResponse(*s))
+}
+
+// HandleSendChatMessage appends a user turn, calls the agent, and returns the
+// assistant reply.  Stage 2: synchronous (no streaming).
+func (h *Handler) HandleSendChatMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.chatStore == nil {
+		http.Error(w, "chat store not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	s, err := h.chatStore.GetChatSession(r.Context(), id)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	start := time.Now()
+
+	// Auto-title from first user message.
+	if s.Title == "" {
+		t := req.Content
+		if len(t) > 60 {
+			t = t[:60] + "…"
+		}
+		s.Title = t
+	}
+
+	userMsg := pgstore.ChatMessage{Role: "user", Content: req.Content, CreatedAt: time.Now()}
+	s.Messages = append(s.Messages, userMsg)
+
+	// Build message history for the agent in {role, content} format.
+	history := make([]map[string]string, len(s.Messages))
+	for i, m := range s.Messages {
+		history[i] = map[string]string{"role": m.Role, "content": m.Content}
+	}
+
+	traceID := uuid.New().String()
+	agentResp, agentErr := h.agentClient.Chat(
+		history,
+		map[string]interface{}{"namespace": s.Namespace, "service": s.Service},
+		traceID,
+	)
+
+	assistantContent := "I'm sorry, I encountered an error. Please try again."
+	if agentErr != nil {
+		h.logger.Warn("chat agent call failed", "session_id", id, "error", agentErr)
+	} else {
+		assistantContent = agentResp.Answer
+	}
+
+	assistantMsg := pgstore.ChatMessage{Role: "assistant", Content: assistantContent, CreatedAt: time.Now()}
+	s.Messages = append(s.Messages, assistantMsg)
+	s.LastActive = time.Now()
+	s.ExpiresAt = time.Now().Add(24 * time.Hour)
+
+	if err := h.chatStore.UpdateChatSession(r.Context(), s); err != nil {
+		h.logger.Warn("chat session update failed", "error", err)
+	}
+
+	if agentErr == nil && agentResp != nil {
+		h.logTrace(traceID, req.Content, "chat", s.Namespace, "tier2", "ok",
+			agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls),
+			start, agentResp)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": assistantMsg,
+		"session": chatSessionToResponse(*s),
+	})
+}
+
+// HandleDeleteChatSession permanently removes a session.
+func (h *Handler) HandleDeleteChatSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.chatStore == nil {
+		http.Error(w, "chat store not available", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.chatStore.DeleteChatSession(r.Context(), id); err != nil {
+		h.logger.Warn("delete chat session failed", "id", id, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandleUpsertPricing inserts or updates a single model pricing row.

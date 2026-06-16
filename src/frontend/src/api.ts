@@ -87,6 +87,63 @@ export interface Pod {
   tags: string[] | null;
 }
 
+// ── Chat ─────────────────────────────────────────────────────────────────────
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  namespace: string;
+  service: string;
+  messages: ChatMessage[] | null;
+  created_at: string;
+  last_active: string;
+}
+
+export async function createChatSession(init?: { namespace?: string; service?: string }): Promise<ChatSession> {
+  const res = await fetch("/api/chat/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(init ?? {}),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<ChatSession>;
+}
+
+export async function listChatSessions(): Promise<ChatSession[]> {
+  const res = await fetch("/api/chat/sessions");
+  if (!res.ok) return [];
+  return res.json() as Promise<ChatSession[]>;
+}
+
+export async function getChatSession(id: string): Promise<ChatSession> {
+  const res = await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<ChatSession>;
+}
+
+export async function sendChatMessage(
+  sessionId: string,
+  content: string,
+): Promise<{ message: ChatMessage; session: ChatSession }> {
+  const res = await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<{ message: ChatMessage; session: ChatSession }>;
+}
+
+export async function deleteChatSession(id: string): Promise<void> {
+  await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export interface ModelPricing {
   model_id: string;
   display_name: string;

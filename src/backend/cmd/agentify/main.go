@@ -79,6 +79,7 @@ func main() {
 	var integrationStore api.IntegrationStore
 	var traceStore api.TraceStore
 	var pricingStore api.PricingStore
+	var chatStore api.ChatStore
 	if relational, err := orch.GetBackendFactory().GetBackend("relational"); err == nil {
 		if store, ok := relational.(api.IntegrationStore); ok {
 			integrationStore = store
@@ -89,11 +90,14 @@ func main() {
 		if store, ok := relational.(api.PricingStore); ok {
 			pricingStore = store
 		}
+		if store, ok := relational.(api.ChatStore); ok {
+			chatStore = store
+		}
 	}
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.

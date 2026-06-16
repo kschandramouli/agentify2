@@ -5,8 +5,9 @@ import { TracesPanel } from "./components/TracesPanel";
 import { SyncPanel } from "./components/SyncPanel";
 import { MetricsPanel } from "./components/MetricsPanel";
 import { PricingPanel } from "./components/PricingPanel";
+import { ChatPanel } from "./components/ChatPanel";
 
-type Page = "observability" | "registry" | "traces" | "sync" | "metrics" | "pricing";
+type Page = "observability" | "registry" | "traces" | "sync" | "metrics" | "pricing" | "chat";
 
 interface NavItem {
   id: Page;
@@ -21,6 +22,12 @@ const MAIN_NAV: NavItem[] = [
     label: "K8s Observability",
     icon: "⬡",
     description: "Diagnose services & pods",
+  },
+  {
+    id: "chat",
+    label: "Investigate",
+    icon: "✦",
+    description: "Multi-turn AI conversation",
   },
 ];
 
@@ -111,8 +118,8 @@ export function App() {
       </header>
       <div className="app__body">
         <Sidebar page={page} onNavigate={setPage} />
-        <main className="app__content">
-          <PageHeader page={page} />
+        <main className={`app__content${page === "chat" ? " app__content--chat" : ""}`}>
+          {page !== "chat" && <PageHeader page={page} />}
           {/* ServiceEvaluator stays mounted so search + results survive navigation */}
           <div style={{ display: page === "observability" ? "" : "none" }}>
             <ServiceEvaluator />
@@ -122,6 +129,7 @@ export function App() {
           {page === "sync"     && <SyncPanel />}
           {page === "metrics"  && <MetricsPanel />}
           {page === "pricing"  && <PricingPanel />}
+          {page === "chat"     && <ChatPanel />}
         </main>
       </div>
     </div>

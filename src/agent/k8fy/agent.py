@@ -11,12 +11,13 @@ import metrics
 from config.claude_client import get_claude_client
 from config.settings import get_settings
 from k8fy.prompt_manager import get_prompt
-from k8fy.prompts import SYSTEM_PROMPT
+from k8fy.prompts import CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT
 from k8fy.tools import TOOLS, process_tool_call
 from models.response import AgentResponse, ReasoningOutput, ToolCall
 
 _DEFAULT_SYSTEM_PROMPT = get_prompt("k8fy/system", SYSTEM_PROMPT)
 _DEFAULT_TOOLS = TOOLS
+_CHAT_SYSTEM_PROMPT = get_prompt("k8fy/chat", CHAT_SYSTEM_PROMPT)
 
 # Model pair for the advisor/executor strategy.
 # Executor (EXECUTOR_MODEL) is the primary model — handles all tool calls cheaply.
@@ -571,6 +572,102 @@ class K8fyAgent:
             return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
 
     # ------------------------------------------------------------------
+    # Multi-turn chat path (free-form, no JSON schema constraint)
+    # ------------------------------------------------------------------
+
+    async def reason_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AgentResponse:
+        """Agentic reasoning over a full multi-turn conversation history.
+
+        Unlike reason() / _reason_pattern_a(), this method:
+        - Takes the raw conversation history instead of wrapping a single query
+        - Does NOT apply a JSON schema constraint (free-form prose responses)
+        - Lets Claude decide which tools to call based on conversational context
+
+        Ideal for the dedicated Chat page where users ask follow-up questions
+        and the agent builds on prior turns.
+        """
+        if context is None:
+            context = {}
+
+        system = [{"type": "text", "text": self._system_prompt, "cache_control": {"type": "ephemeral"}}]
+        chat_messages = list(messages)  # copy so we can append tool results
+        tool_calls_made: List[ToolCall] = []
+        total_in_tok = total_out_tok = total_cache_write = total_cache_read = 0
+        iterations = 0
+
+        try:
+            for _ in range(self.max_iterations):
+                iterations += 1
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=system,
+                    thinking={"type": "adaptive"},
+                    output_config={"effort": self.effort},  # no json_schema — free-form prose
+                    tools=self._tools,
+                    messages=chat_messages,
+                )
+                usage = getattr(response, "usage", None)
+                if usage:
+                    total_in_tok      += getattr(usage, "input_tokens",               0) or 0
+                    total_out_tok     += getattr(usage, "output_tokens",              0) or 0
+                    total_cache_write += getattr(usage, "cache_creation_input_tokens", 0) or 0
+                    total_cache_read  += getattr(usage, "cache_read_input_tokens",     0) or 0
+
+                if response.stop_reason == "tool_use":
+                    chat_messages.append({"role": "assistant", "content": response.content})
+                    tool_results = []
+                    for block in response.content:
+                        if block.type == "tool_use":
+                            tool_calls_made.append(ToolCall(name=block.name, arguments=block.input))
+                            result = await process_tool_call(block.name, block.input, self.backend_url)
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": json.dumps(result),
+                            })
+                    chat_messages.append({"role": "user", "content": tool_results})
+                    continue
+
+                # Final turn — extract prose text (no JSON parsing)
+                final_text = next((b.text for b in response.content if b.type == "text"), "")
+                metrics.record_request("ok")
+                metrics.record_tool_iterations(iterations)
+                cost = _estimate_cost(
+                    self.model, total_in_tok, total_out_tok, total_cache_write, total_cache_read,
+                )
+                return AgentResponse(
+                    answer=final_text,
+                    status="ok",
+                    confidence=1.0,
+                    sources=_sources_from(context),
+                    tool_calls=tool_calls_made,
+                    input_tokens=total_in_tok,
+                    output_tokens=total_out_tok,
+                    cache_creation_input_tokens=total_cache_write,
+                    cache_read_input_tokens=total_cache_read,
+                    estimated_cost_usd=cost,
+                )
+
+            logger.warning("chat agent did not converge within %d iterations", self.max_iterations)
+            metrics.record_request("no_converge")
+            return AgentResponse(
+                answer="I wasn't able to reach a conclusion within the tool-call budget. Please try a more specific question.",
+                status="error",
+                confidence=0.0,
+                tool_calls=tool_calls_made,
+            )
+
+        except Exception as e:  # noqa: BLE001
+            logger.error("chat reasoning failed: %s", e)
+            metrics.record_request("error")
+            return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
+
+    # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
 
@@ -732,3 +829,14 @@ def get_k8fy_agent() -> K8fyAgent:
     if _agent is None:
         _agent = K8fyAgent()
     return _agent
+
+
+_chat_agent: Optional[K8fyAgent] = None
+
+
+def get_chat_agent() -> K8fyAgent:
+    """Return the agent used for multi-turn chat (chat system prompt, all tools)."""
+    global _chat_agent
+    if _chat_agent is None:
+        _chat_agent = K8fyAgent(system_prompt=_CHAT_SYSTEM_PROMPT)
+    return _chat_agent

@@ -71,6 +71,33 @@ func traceToResponse(t pgstore.TraceRecord) TraceResponse {
 	}
 }
 
+// ChatStore is the multi-turn conversation interface implemented by the Postgres client.
+type ChatStore interface {
+	CreateChatSession(ctx context.Context, s *pgstore.ChatSession) error
+	GetChatSession(ctx context.Context, id string) (*pgstore.ChatSession, error)
+	UpdateChatSession(ctx context.Context, s *pgstore.ChatSession) error
+	ListChatSessions(ctx context.Context, limit int) ([]pgstore.ChatSession, error)
+	DeleteChatSession(ctx context.Context, id string) error
+}
+
+// ChatSessionResponse is the API shape of a chat session.
+type ChatSessionResponse struct {
+	ID         string                `json:"id"`
+	Title      string                `json:"title"`
+	Namespace  string                `json:"namespace"`
+	Service    string                `json:"service"`
+	Messages   []pgstore.ChatMessage `json:"messages"`
+	CreatedAt  time.Time             `json:"created_at"`
+	LastActive time.Time             `json:"last_active"`
+}
+
+func chatSessionToResponse(s pgstore.ChatSession) ChatSessionResponse {
+	return ChatSessionResponse{
+		ID: s.ID, Title: s.Title, Namespace: s.Namespace, Service: s.Service,
+		Messages: s.Messages, CreatedAt: s.CreatedAt, LastActive: s.LastActive,
+	}
+}
+
 // PricingStore is the model-pricing CRUD interface implemented by the Postgres client.
 type PricingStore interface {
 	ListModelPricing(ctx context.Context) ([]pgstore.ModelPricing, error)

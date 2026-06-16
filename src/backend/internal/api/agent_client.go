@@ -55,6 +55,42 @@ type AgentResponse struct {
 	EstimatedCostUSD           float64 `json:"estimated_cost_usd"`
 }
 
+// ChatRequest is sent to the agent's /reason-chat endpoint for multi-turn conversation.
+type ChatRequest struct {
+	Messages []map[string]string    `json:"messages"` // [{role, content}, ...]
+	Context  map[string]interface{} `json:"context"`
+	TraceID  string                 `json:"trace_id,omitempty"`
+}
+
+// Chat calls the agent for a multi-turn conversational response.
+// messages should be the full conversation history in [{role, content}] format.
+func (ac *AgentClient) Chat(messages []map[string]string, context map[string]interface{}, traceID string) (*AgentResponse, error) {
+	req := ChatRequest{Messages: messages, Context: context, TraceID: traceID}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal chat request: %w", err)
+	}
+	httpReq, err := http.NewRequest("POST", ac.baseURL+"/reason-chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create chat request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := ac.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("chat request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(body))
+	}
+	var agentResp AgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&agentResp); err != nil {
+		return nil, fmt.Errorf("failed to decode chat response: %w", err)
+	}
+	return &agentResp, nil
+}
+
 // Reason calls the agent service to reason about the data.
 func (ac *AgentClient) Reason(question string, intent string, data map[string]interface{}, context map[string]interface{}, traceID string) (*AgentResponse, error) {
 	req := AgentRequest{

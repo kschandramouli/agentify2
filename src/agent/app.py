@@ -5,9 +5,10 @@ import logging
 
 import metrics
 from config.settings import get_settings
-from k8fy.agent import refresh_pricing_from_backend
+from k8fy.agent import get_chat_agent, refresh_pricing_from_backend
 from k8fy.skills.router import get_skill_router
 from models.response import AgentResponse, QueryRequest
+from typing import Any, Dict, List, Optional
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -19,12 +20,20 @@ settings = get_settings()
 app = FastAPI(title="agentify-agent", version="0.1.0")
 
 
+class ChatRequest(BaseModel):
+    """Request body for the multi-turn chat endpoint."""
+    messages: List[Dict[str, Any]]  # [{role: "user"|"assistant", content: "..."}]
+    context: Dict[str, Any] = {}    # {namespace, service, ...}
+    trace_id: Optional[str] = None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize skill router (and all sub-agents) on startup."""
     logger.info("Agent service starting up...")
     refresh_pricing_from_backend(settings.backend_url)
     get_skill_router()
+    get_chat_agent()  # warm the chat agent singleton
     logger.info(f"Skill router initialized with model: {settings.claude_model}")
 
 
@@ -69,6 +78,25 @@ async def reason(request: QueryRequest) -> AgentResponse:
         return response
     except Exception as e:
         logger.error(f"Reasoning error (trace_id=%s): %s", request.trace_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reason-chat", response_model=AgentResponse)
+async def reason_chat(request: ChatRequest) -> AgentResponse:
+    """Multi-turn conversational reasoning endpoint.
+
+    Accepts the full conversation history and responds using the chat agent
+    (free-form prose, agentic tool use, no JSON schema constraint).
+    """
+    logger.info(
+        "chat request",
+        extra={"trace_id": request.trace_id, "turns": len(request.messages)},
+    )
+    try:
+        response = await get_chat_agent().reason_chat(request.messages, request.context)
+        return response
+    except Exception as e:
+        logger.error("Chat reasoning error (trace_id=%s): %s", request.trace_id, e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

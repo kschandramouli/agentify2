@@ -117,6 +117,21 @@ func (c *Client) initSchema(ctx context.Context) error {
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
 
+	-- Multi-turn chat sessions: persists conversation history across pod restarts.
+	CREATE TABLE IF NOT EXISTS chat_sessions (
+		id                 TEXT PRIMARY KEY,
+		title              TEXT NOT NULL DEFAULT '',
+		namespace          TEXT NOT NULL DEFAULT '',
+		service            TEXT NOT NULL DEFAULT '',
+		messages           JSONB NOT NULL DEFAULT '[]',
+		context_cache      JSONB NOT NULL DEFAULT '{}',
+		context_fetched_at TIMESTAMP,
+		created_at         TIMESTAMP DEFAULT NOW(),
+		last_active        TIMESTAMP DEFAULT NOW(),
+		expires_at         TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_chat_sessions_active ON chat_sessions(last_active DESC);
+
 	-- Model pricing: retail $/MTok rates shown in Admin UI and used for trace cost estimates.
 	-- Seeded with Anthropic list prices (June 2026). cache_write_per_mtok = 5-min TTL rate.
 	CREATE TABLE IF NOT EXISTS model_pricing (
@@ -770,6 +785,114 @@ func decodePayload(b []byte) interface{} {
 		return string(b)
 	}
 	return m
+}
+
+// ── Chat sessions ────────────────────────────────────────────────────────────
+
+// ChatMessage is one turn in a multi-turn conversation.
+type ChatMessage struct {
+	Role      string    `json:"role"`       // "user" | "assistant"
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ChatSession holds the full state of one multi-turn conversation.
+type ChatSession struct {
+	ID               string            `json:"id"`
+	Title            string            `json:"title"`
+	Namespace        string            `json:"namespace"`
+	Service          string            `json:"service"`
+	Messages         []ChatMessage     `json:"messages"`
+	ContextCache     map[string]any    `json:"context_cache"`
+	ContextFetchedAt *time.Time        `json:"context_fetched_at,omitempty"`
+	CreatedAt        time.Time         `json:"created_at"`
+	LastActive       time.Time         `json:"last_active"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+}
+
+// CreateChatSession inserts a new session and returns it.
+func (c *Client) CreateChatSession(ctx context.Context, s *ChatSession) error {
+	msgsJSON, _ := json.Marshal(s.Messages)
+	cacheJSON, _ := json.Marshal(s.ContextCache)
+	_, err := c.db.ExecContext(ctx,
+		`INSERT INTO chat_sessions (id, title, namespace, service, messages, context_cache,
+		  created_at, last_active, expires_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW(),$7)`,
+		s.ID, s.Title, s.Namespace, s.Service, msgsJSON, cacheJSON, s.ExpiresAt)
+	return err
+}
+
+// GetChatSession loads a session by id.
+func (c *Client) GetChatSession(ctx context.Context, id string) (*ChatSession, error) {
+	row := c.db.QueryRowContext(ctx,
+		`SELECT id, title, namespace, service, messages, context_cache,
+		        context_fetched_at, created_at, last_active, expires_at
+		 FROM chat_sessions WHERE id = $1`, id)
+	return scanChatSession(row)
+}
+
+// UpdateChatSession persists the full session state (messages, cache, timestamps).
+func (c *Client) UpdateChatSession(ctx context.Context, s *ChatSession) error {
+	msgsJSON, _ := json.Marshal(s.Messages)
+	cacheJSON, _ := json.Marshal(s.ContextCache)
+	_, err := c.db.ExecContext(ctx,
+		`UPDATE chat_sessions SET
+		   title = $2, messages = $3, context_cache = $4,
+		   context_fetched_at = $5, last_active = NOW(), expires_at = $6
+		 WHERE id = $1`,
+		s.ID, s.Title, msgsJSON, cacheJSON, s.ContextFetchedAt, s.ExpiresAt)
+	return err
+}
+
+// ListChatSessions returns the most recently active sessions (newest first).
+func (c *Client) ListChatSessions(ctx context.Context, limit int) ([]ChatSession, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT id, title, namespace, service, messages, context_cache,
+		        context_fetched_at, created_at, last_active, expires_at
+		 FROM chat_sessions ORDER BY last_active DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ChatSession
+	for rows.Next() {
+		s, err := scanChatSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *s)
+	}
+	return result, rows.Err()
+}
+
+// DeleteChatSession removes a session permanently.
+func (c *Client) DeleteChatSession(ctx context.Context, id string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM chat_sessions WHERE id = $1`, id)
+	return err
+}
+
+func scanChatSession(row interface{ Scan(...any) error }) (*ChatSession, error) {
+	var s ChatSession
+	var msgsJSON, cacheJSON []byte
+	err := row.Scan(
+		&s.ID, &s.Title, &s.Namespace, &s.Service,
+		&msgsJSON, &cacheJSON, &s.ContextFetchedAt,
+		&s.CreatedAt, &s.LastActive, &s.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(msgsJSON, &s.Messages)
+	if s.Messages == nil {
+		s.Messages = []ChatMessage{}
+	}
+	if s.ContextCache == nil {
+		s.ContextCache = map[string]any{}
+	}
+	_ = json.Unmarshal(cacheJSON, &s.ContextCache)
+	return &s, nil
 }
 
 // ── Model pricing ────────────────────────────────────────────────────────────

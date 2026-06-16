@@ -46,6 +46,13 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /admin/sync", h.HandleSyncNamespaces)
 	mux.HandleFunc("GET /admin/sync", h.HandleSyncNamespaces) // also allow GET for CronJob curl
 
+	// Chat: multi-turn conversational debugging
+	mux.HandleFunc("POST /api/chat/sessions",          h.HandleCreateChatSession)
+	mux.HandleFunc("GET /api/chat/sessions",           h.HandleListChatSessions)
+	mux.HandleFunc("GET /api/chat/sessions/{id}",      h.HandleGetChatSession)
+	mux.HandleFunc("POST /api/chat/sessions/{id}/messages", h.HandleSendChatMessage)
+	mux.HandleFunc("DELETE /api/chat/sessions/{id}",   h.HandleDeleteChatSession)
+
 	// Admin: model pricing — read/edit $/MTok rates shown in the UI and used for trace cost estimates
 	mux.HandleFunc("GET /admin/pricing", h.HandleListPricing)
 	mux.HandleFunc("PUT /admin/pricing", h.HandleUpsertPricing)
