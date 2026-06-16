@@ -2,13 +2,15 @@
 
 from fastapi import FastAPI, HTTPException, Response
 import logging
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
 
 import metrics
 from config.settings import get_settings
 from k8fy.agent import get_chat_agent, refresh_pricing_from_backend
 from k8fy.skills.router import get_skill_router
 from models.response import AgentResponse, QueryRequest
-from typing import Any, Dict, List, Optional
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
