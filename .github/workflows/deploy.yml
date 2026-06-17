@@ -196,12 +196,26 @@ jobs:
           || echo "not-installed")
         echo "Vault Helm release status: $HELM_STATUS"
 
-        if [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
+        # ── Handle StatefulSet immutable-field conflicts ───────────────────────
+        # volumeClaimTemplates.storageClass cannot be patched after creation.
+        # If the current StatefulSet has a different storageClass than the desired
+        # value in vault-values.yaml, delete the StatefulSet (and its PVC) so
+        # Helm can recreate it — Helm upgrades CREATE when the object is absent.
+        DESIRED_SC="gp2"
+        CURRENT_SC=$(kubectl get statefulset vault -n vault \
+          -o jsonpath='{.spec.volumeClaimTemplates[0].spec.storageClassName}' \
+          2>/dev/null || echo "not-found")
+        echo "StatefulSet storageClass: current='$CURRENT_SC', desired='$DESIRED_SC'"
+
+        if [ "$CURRENT_SC" != "not-found" ] && [ "$CURRENT_SC" != "$DESIRED_SC" ]; then
+          echo "StorageClass mismatch — deleting StatefulSet + PVC so Helm can recreate them..."
+          kubectl delete statefulset vault -n vault --ignore-not-found=true
+          kubectl delete pvc data-vault-0 -n vault --ignore-not-found=true
+          sleep 5
+        elif [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
           echo "Cleaning up failed Vault release before reinstalling..."
           helm uninstall vault -n vault --wait 2>/dev/null || true
-          # Delete any Pending PVCs left over (immutable field prevented them binding).
           kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
-          # Give the namespace a moment to settle.
           sleep 10
         fi
 
