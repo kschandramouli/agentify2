@@ -196,6 +196,32 @@ jobs:
 
     - name: Initialise and unseal Vault
       run: |
+        # Wait for vault-0 to be Running before attempting port-forward.
+        # Pending usually means the PVC is still being provisioned.
+        echo "Waiting for vault-0 pod to be Running..."
+        for i in $(seq 1 24); do
+          STATUS=$(kubectl get pod vault-0 -n vault \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+          echo "  vault-0 status: $STATUS (attempt $i/24)"
+          [ "$STATUS" = "Running" ] && break
+          if [ "$STATUS" = "Pending" ]; then
+            # Print why it's pending to help diagnose PVC / scheduling issues.
+            kubectl describe pod vault-0 -n vault 2>/dev/null \
+              | grep -A5 "Events:" | tail -6 || true
+          fi
+          sleep 10
+        done
+
+        STATUS=$(kubectl get pod vault-0 -n vault \
+          -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+        if [ "$STATUS" != "Running" ]; then
+          echo "Error: vault-0 is not Running after 4 minutes (status: $STATUS)"
+          kubectl get pods -n vault -o wide || true
+          kubectl get pvc  -n vault          || true
+          kubectl get storageclass           || true
+          exit 1
+        fi
+
         # Port-forward so this step can reach Vault from the runner.
         kubectl port-forward -n vault svc/vault 8200:8200 &
         PF_PID=$!

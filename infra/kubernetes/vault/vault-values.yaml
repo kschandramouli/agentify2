@@ -32,10 +32,12 @@ server:
       }
 
   # 1 GiB PVC keeps data across pod restarts (unlike dev mode which is in-memory).
+  # storageClass is left empty so the cluster default is used automatically —
+  # avoids hard-coding gp2 vs gp3 which varies by EKS version and region.
   dataStorage:
     enabled:      true
     size:         1Gi
-    storageClass: gp2   # EKS default; change to gp3 if available
+    storageClass: ""   # use cluster default (gp2 or gp3)
 
   resources:
     requests:
