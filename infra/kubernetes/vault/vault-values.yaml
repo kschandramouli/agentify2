@@ -31,13 +31,14 @@ server:
         path = "/vault/data"
       }
 
-  # 1 GiB PVC keeps data across pod restarts (unlike dev mode which is in-memory).
-  # storageClass is left empty so the cluster default is used automatically —
-  # avoids hard-coding gp2 vs gp3 which varies by EKS version and region.
+  # 1 GiB PVC for Vault data.  Must be set explicitly — an empty string creates
+  # a PVC with storageClass=<unset> which no provisioner will claim, leaving
+  # vault-0 Pending forever.  This cluster has 'gp2' (kubernetes.io/aws-ebs,
+  # WaitForFirstConsumer) — the EBS volume is provisioned once vault-0 schedules.
   dataStorage:
     enabled:      true
     size:         1Gi
-    storageClass: ""   # use cluster default (gp2 or gp3)
+    storageClass: gp2
 
   resources:
     requests:
