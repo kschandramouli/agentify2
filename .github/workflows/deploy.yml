@@ -187,11 +187,29 @@ jobs:
         helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
         helm repo update
 
-        # Idempotent — installs on first run, upgrades on subsequent runs.
+        # If a previous release is in a failed state (e.g. immutable StatefulSet
+        # field conflict from a prior attempt), uninstall cleanly before reinstalling.
+        # Also delete any Pending PVCs left over from the broken install so the new
+        # release can provision a fresh one with the correct storage class.
+        HELM_STATUS=$(helm status vault -n vault -o json 2>/dev/null \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null \
+          || echo "not-installed")
+        echo "Vault Helm release status: $HELM_STATUS"
+
+        if [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
+          echo "Cleaning up failed Vault release before reinstalling..."
+          helm uninstall vault -n vault --wait 2>/dev/null || true
+          # Delete any Pending PVCs left over (immutable field prevented them binding).
+          kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
+          # Give the namespace a moment to settle.
+          sleep 10
+        fi
+
+        # Idempotent install/upgrade — uses cluster-default StorageClass for PVC.
         helm upgrade --install vault hashicorp/vault \
           --namespace vault --create-namespace \
           -f infra/kubernetes/vault/vault-values.yaml \
-          --timeout=120s --wait
+          --timeout=180s --wait
         echo "Vault Helm chart applied."
 
     - name: Initialise and unseal Vault
