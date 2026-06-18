@@ -1,4 +1,11 @@
-# HashiCorp Vault — standalone dev/test deployment on EKS
+# HashiCorp Vault — dev/test deployment on EKS
+#
+# Uses Vault dev mode: in-memory storage, pre-initialised, pre-unsealed.
+# No PVC required — eliminates all StorageClass / WaitForFirstConsumer issues.
+#
+# Trade-off: Vault data is lost when the pod restarts.  For dev/test cert
+# rotation testing this is acceptable — re-run scripts/vault-setup.sh after
+# a pod restart to restore PKI engine, auth, and policies (~60 seconds).
 #
 # Install:
 #   helm repo add hashicorp https://helm.releases.hashicorp.com
@@ -7,38 +14,22 @@
 #     --namespace vault --create-namespace \
 #     -f infra/kubernetes/vault/vault-values.yaml
 #
-# After install run scripts/vault-setup.sh to initialise, unseal, and
-# configure the Kubernetes auth method + PKI engine.
+# After install the deploy pipeline calls vault-setup.sh automatically.
+# To access the UI: http://<agentify-alb>/ui/  token = "root"
 
 global:
   enabled: true
 
 server:
-  # Standalone mode: single pod + persistent file storage.
-  # NOT for production — use HA Raft for production.
-  standalone:
-    enabled: true
-    config: |
-      ui = true
-
-      listener "tcp" {
-        tls_disable = 1
-        address     = "[::]:8200"
-        cluster_address = "[::]:8201"
-      }
-
-      storage "file" {
-        path = "/vault/data"
-      }
-
-  # 1 GiB PVC for Vault data.  Must be set explicitly — an empty string creates
-  # a PVC with storageClass=<unset> which no provisioner will claim, leaving
-  # vault-0 Pending forever.  This cluster has 'gp2' (kubernetes.io/aws-ebs,
-  # WaitForFirstConsumer) — the EBS volume is provisioned once vault-0 schedules.
-  dataStorage:
+  # Dev mode: in-memory storage, pre-initialised, pre-unsealed.
+  # Root token is "root" — predictable, fine for dev.
+  dev:
     enabled:      true
-    size:         1Gi
-    storageClass: gp2
+    devRootToken: "root"
+
+  # No persistent storage in dev mode.
+  dataStorage:
+    enabled: false
 
   resources:
     requests:
@@ -48,20 +39,20 @@ server:
       memory: "512Mi"
       cpu:    "500m"
 
-  # Service account used by Vault itself (for K8s auth token review).
   serviceAccount:
     create: true
     name:   vault
 
-  # Readiness / liveness — match Vault's /v1/sys/health response codes.
+  # Dev mode starts sealed=false and initialized=true so the health endpoint
+  # returns 200 immediately — no custom readiness path needed.
   readinessProbe:
     enabled: true
-    path:    /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+    path:    /v1/sys/health
 
-# Vault Agent Injector — mutates pods that carry vault.hashicorp.com annotations.
+# Vault Agent Injector — mutates pods carrying vault.hashicorp.com annotations.
 injector:
-  enabled:   true
-  replicas:  1
+  enabled:  true
+  replicas: 1
   resources:
     requests:
       memory: "64Mi"
@@ -70,8 +61,6 @@ injector:
       memory: "128Mi"
       cpu:    "250m"
 
-# UI served by the vault server pod on port 8200.
-# Access via the vault-ingress.yaml ALB (see below) or kubectl port-forward.
 ui:
   enabled:     true
-  serviceType: ClusterIP   # ALB Ingress handles external routing
+  serviceType: ClusterIP   # exposed via vault-ingress.yaml (shared agentify ALB)

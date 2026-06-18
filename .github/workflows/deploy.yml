@@ -226,20 +226,21 @@ jobs:
           --timeout=180s --wait
         echo "Vault Helm chart applied."
 
-    - name: Initialise and unseal Vault
+    - name: Wait for Vault to be ready
+      # Dev mode: Vault starts pre-initialised and pre-unsealed — no init/unseal
+      # steps needed.  Root token is "root" (set in vault-values.yaml).
+      # We just wait for vault-0 to be Running and store the known token in
+      # the K8s secrets so VaultCertSkill and vault-setup.sh can use them.
       run: |
-        # Wait for vault-0 to be Running before attempting port-forward.
-        # Pending usually means the PVC is still being provisioned.
         echo "Waiting for vault-0 pod to be Running..."
-        for i in $(seq 1 24); do
+        for i in $(seq 1 18); do
           STATUS=$(kubectl get pod vault-0 -n vault \
             -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
-          echo "  vault-0 status: $STATUS (attempt $i/24)"
+          echo "  vault-0 status: $STATUS (attempt $i/18)"
           [ "$STATUS" = "Running" ] && break
           if [ "$STATUS" = "Pending" ]; then
-            # Print why it's pending to help diagnose PVC / scheduling issues.
             kubectl describe pod vault-0 -n vault 2>/dev/null \
-              | grep -A5 "Events:" | tail -6 || true
+              | grep -A8 "Events:" | tail -8 || true
           fi
           sleep 10
         done
@@ -247,75 +248,24 @@ jobs:
         STATUS=$(kubectl get pod vault-0 -n vault \
           -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
         if [ "$STATUS" != "Running" ]; then
-          echo "Error: vault-0 is not Running after 4 minutes (status: $STATUS)"
+          echo "Error: vault-0 is not Running after 3 minutes (status: $STATUS)"
           kubectl get pods -n vault -o wide || true
-          kubectl get pvc  -n vault          || true
-          kubectl get storageclass           || true
           exit 1
         fi
+        echo "vault-0 is Running."
 
-        # Port-forward so this step can reach Vault from the runner.
-        kubectl port-forward -n vault svc/vault 8200:8200 &
-        PF_PID=$!
-        for i in 1 2 3 4 5 6; do
-          sleep 5
-          curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1 && break
-          echo "Waiting for Vault to respond (attempt $i)..."
-        done
+        # Store the fixed dev-mode root token so other steps and VaultCertSkill
+        # can reference it without manual intervention.
+        kubectl create secret generic vault-unseal-keys -n vault \
+          --from-literal=unseal-key="dev-mode-no-unseal-needed" \
+          --from-literal=root-token="root" \
+          --dry-run=client -o yaml | kubectl apply -f -
 
-        # Check initialisation status.
-        INIT_STATUS=$(curl -sf http://127.0.0.1:8200/v1/sys/health || echo '{}')
-        INITIALIZED=$(echo "$INIT_STATUS" | python3 -c \
-          "import sys,json; d=json.load(sys.stdin); print('true' if d.get('initialized') else 'false')" 2>/dev/null || echo "false")
+        kubectl create secret generic agentify-vault-secret -n agentify \
+          --from-literal=token="root" \
+          --dry-run=client -o yaml | kubectl apply -f -
 
-        if [ "$INITIALIZED" = "false" ]; then
-          echo "First-time Vault initialisation..."
-          INIT=$(curl -sf -X POST http://127.0.0.1:8200/v1/sys/init \
-            -H "Content-Type: application/json" \
-            -d '{"secret_shares":1,"secret_threshold":1}')
-
-          UNSEAL_KEY=$(echo "$INIT" | python3 -c \
-            "import sys,json; print(json.load(sys.stdin)['keys_base64'][0])")
-          ROOT_TOKEN=$(echo "$INIT" | python3 -c \
-            "import sys,json; print(json.load(sys.stdin)['root_token'])")
-
-          # Persist keys in a K8s secret so future deploys can unseal.
-          kubectl create secret generic vault-unseal-keys -n vault \
-            --from-literal=unseal-key="$UNSEAL_KEY" \
-            --from-literal=root-token="$ROOT_TOKEN" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          # Also expose the token to the agentify-agent pod (used by VaultCertSkill).
-          kubectl create secret generic agentify-vault-secret -n agentify \
-            --from-literal=token="$ROOT_TOKEN" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          echo "Vault initialised. Unseal key + root token stored in vault/vault-unseal-keys."
-        else
-          echo "Vault already initialised. Fetching unseal key from K8s secret..."
-          UNSEAL_KEY=$(kubectl get secret vault-unseal-keys -n vault \
-            -o jsonpath='{.data.unseal-key}' 2>/dev/null | base64 -d || echo "")
-          if [ -z "$UNSEAL_KEY" ]; then
-            echo "Warning: vault-unseal-keys secret not found — skipping unseal. Run vault-setup.sh manually."
-            kill $PF_PID 2>/dev/null || true
-            exit 0
-          fi
-        fi
-
-        # Unseal if sealed (pod restart clears in-memory keys).
-        SEALED=$(curl -sf http://127.0.0.1:8200/v1/sys/health | python3 -c \
-          "import sys,json; d=json.load(sys.stdin); print(str(d.get('sealed','true')).lower())" 2>/dev/null || echo "true")
-        if [ "$SEALED" = "true" ]; then
-          echo "Unsealing Vault..."
-          curl -sf -X POST http://127.0.0.1:8200/v1/sys/unseal \
-            -H "Content-Type: application/json" \
-            -d "{\"key\":\"$UNSEAL_KEY\"}" > /dev/null
-          echo "Vault unsealed."
-        else
-          echo "Vault already unsealed."
-        fi
-
-        kill $PF_PID 2>/dev/null || true
+        echo "Dev-mode token stored in vault-unseal-keys + agentify-vault-secret."
 
     - name: Configure Vault (first deploy only — skipped when already configured)
       run: |
@@ -331,8 +281,8 @@ jobs:
         PF_PID=$!
         sleep 5
 
-        ROOT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault \
-          -o jsonpath='{.data.root-token}' | base64 -d)
+        # Dev mode: root token is always "root".
+        ROOT_TOKEN="root"
         export VAULT_ADDR=http://127.0.0.1:8200
         export VAULT_TOKEN="$ROOT_TOKEN"
 
