@@ -197,20 +197,22 @@ jobs:
         echo "Vault Helm release status: $HELM_STATUS"
 
         # ── Handle StatefulSet immutable-field conflicts ───────────────────────
-        # volumeClaimTemplates.storageClass cannot be patched after creation.
-        # If the current StatefulSet has a different storageClass than the desired
-        # value in vault-values.yaml, delete the StatefulSet (and its PVC) so
-        # Helm can recreate it — Helm upgrades CREATE when the object is absent.
-        DESIRED_SC="gp2"
-        CURRENT_SC=$(kubectl get statefulset vault -n vault \
-          -o jsonpath='{.spec.volumeClaimTemplates[0].spec.storageClassName}' \
-          2>/dev/null || echo "not-found")
-        echo "StatefulSet storageClass: current='$CURRENT_SC', desired='$DESIRED_SC'"
+        # volumeClaimTemplates is immutable after StatefulSet creation. Any change
+        # to storageClass OR switching between dev mode (no PVC) and standalone
+        # mode (with PVC) requires deleting the StatefulSet so Helm can recreate it.
+        #
+        # Dev mode target: StatefulSet should have zero volumeClaimTemplates.
+        # Check the count and delete if non-zero (means it was created in standalone mode).
+        VCT_COUNT=$(kubectl get statefulset vault -n vault \
+          -o jsonpath='{.spec.volumeClaimTemplates}' 2>/dev/null \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)" \
+          2>/dev/null || echo "0")
+        echo "StatefulSet volumeClaimTemplates count: $VCT_COUNT (dev mode wants: 0)"
 
-        if [ "$CURRENT_SC" != "not-found" ] && [ "$CURRENT_SC" != "$DESIRED_SC" ]; then
-          echo "StorageClass mismatch — deleting StatefulSet + PVC so Helm can recreate them..."
+        if [ "$VCT_COUNT" != "0" ] && [ "$VCT_COUNT" != "" ]; then
+          echo "StatefulSet has PVC templates but dev mode needs none — deleting StatefulSet + PVCs..."
           kubectl delete statefulset vault -n vault --ignore-not-found=true
-          kubectl delete pvc data-vault-0 -n vault --ignore-not-found=true
+          kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
           sleep 5
         elif [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
           echo "Cleaning up failed Vault release before reinstalling..."
