@@ -26,7 +26,7 @@ metadata:
 
     # ── Join the existing agentify ALB (no new ALB created) ──────────────────
     alb.ingress.kubernetes.io/group.name:  agentify
-    alb.ingress.kubernetes.io/group.order: "20"   # lower priority than agentify (order 10)
+    alb.ingress.kubernetes.io/group.order: "5"    # lower = higher priority; must be < agentify's order (10) so /ui and /v1 are evaluated before the catch-all /   # lower priority than agentify (order 10)
 
     # Must match the main ingress — controller validates group members are consistent.
     alb.ingress.kubernetes.io/scheme:      internet-facing
