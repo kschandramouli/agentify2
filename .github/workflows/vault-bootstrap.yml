@@ -1,0 +1,175 @@
+# Vault Bootstrap — standalone pipeline
+#
+# Creates namespace-segregated PKI engines, CAs, PKI roles, KV paths,
+# Vault policies, Kubernetes ServiceAccounts, and K8s auth roles.
+# Issues initial TLS certs per service and stores them in Vault KV.
+#
+# Run order:
+#   1. Deploy workflow (installs Vault + configures K8s auth basics)
+#   2. This workflow (creates per-namespace PKI + per-service config)
+#   3. Apply payment-test manifests (pods pick up Vault-injected certs)
+#
+# Triggers:
+#   - workflow_dispatch: run manually from GitHub Actions UI
+#   - After a successful Deploy run (workflow_run)
+
+name: Vault Bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print plan only, no changes)"
+        required: false
+        default: "false"
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Bootstrap Vault PKI + Policies
+    runs-on: ubuntu-latest
+    # Only run after successful Deploy; always run on manual dispatch
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws-region:     ${{ secrets.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        for i in 1 2 3 4 5; do
+          aws eks update-kubeconfig \
+            --name    ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region  ${{ secrets.AWS_REGION }} && break
+          echo "Attempt $i failed — retrying in 15s..."
+          sleep 15
+        done
+
+    - name: Check Vault pod is Running
+      run: |
+        echo "Waiting for vault-0 to be Running..."
+        for i in $(seq 1 18); do
+          STATUS=$(kubectl get pod vault-0 -n vault \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+          echo "  vault-0: $STATUS ($i/18)"
+          [ "$STATUS" = "Running" ] && break
+          sleep 10
+        done
+        STATUS=$(kubectl get pod vault-0 -n vault \
+          -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+        [ "$STATUS" = "Running" ] || { echo "ERROR: vault-0 not Running"; exit 1; }
+
+    - name: Install Vault CLI
+      run: |
+        curl -fsSL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip \
+          -o /tmp/vault.zip
+        unzip -q /tmp/vault.zip -d /tmp
+        chmod +x /tmp/vault
+        sudo mv /tmp/vault /usr/local/bin/vault
+        vault version
+
+    - name: Port-forward Vault
+      run: |
+        kubectl port-forward -n vault svc/vault 8200:8200 &
+        echo "PF_PID=$!" >> $GITHUB_ENV
+        # Wait until Vault responds
+        for i in 1 2 3 4 5 6; do
+          sleep 5
+          curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1 && break
+          echo "Waiting for Vault ($i/6)..."
+        done
+        curl -sf http://127.0.0.1:8200/v1/sys/health | python3 -m json.tool
+
+    - name: Fetch Vault root token
+      run: |
+        # Token is stored in vault-unseal-keys secret (set by deploy workflow)
+        ROOT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault \
+          -o jsonpath='{.data.root-token}' 2>/dev/null | base64 -d || echo "root")
+        echo "VAULT_TOKEN=${ROOT_TOKEN}" >> $GITHUB_ENV
+        echo "VAULT_ADDR=http://127.0.0.1:8200" >> $GITHUB_ENV
+
+    - name: Run Vault Bootstrap (dry run)
+      if: github.event.inputs.dry_run == 'true'
+      run: |
+        echo "=== DRY RUN — listing resources that would be created ==="
+        echo ""
+        echo "PKI engines: pki-payments, pki-agentify"
+        echo "PKI roles:   payment-api, payment-worker (payments)"
+        echo "             backend, agent (agentify)"
+        echo "KV paths:    secret/payments/tls/*, secret/agentify/tls/*"
+        echo "Policies:    payments-payment-api-policy, payments-payment-worker-policy"
+        echo "             agentify-backend-policy, agentify-agent-policy"
+        echo "K8s roles:   payments-payment-api, payments-payment-worker"
+        echo "             agentify-backend, agentify-agent"
+        echo ""
+        echo "No changes made (dry_run=true)."
+
+    - name: Run Vault Bootstrap
+      if: github.event.inputs.dry_run != 'true'
+      run: bash scripts/vault-bootstrap.sh
+
+    - name: Apply Kubernetes manifests (ServiceAccounts + deployments)
+      if: github.event.inputs.dry_run != 'true'
+      run: |
+        # Namespace
+        kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
+
+        # ServiceAccounts (also created by bootstrap script, idempotent)
+        kubectl apply -f infra/kubernetes/payments-test/serviceaccounts.yaml
+
+        # Deployments with Vault Agent Injector annotations
+        kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
+        kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
+        kubectl apply -f infra/kubernetes/payments-test/payment-api.yaml
+
+        # Cert rotator
+        kubectl apply -f infra/kubernetes/vault/cert-rotator-cronjob.yaml
+
+    - name: Verify Vault injection is working
+      if: github.event.inputs.dry_run != 'true'
+      run: |
+        echo "Waiting 60s for pods to initialise and Vault Agent to inject certs..."
+        sleep 60
+
+        # Check payment-api pods have the vault-agent sidecar
+        kubectl get pods -n payments -o wide
+
+        # Verify cert was injected
+        POD=$(kubectl get pod -n payments -l app=payment-api \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ -n "$POD" ]; then
+          echo "=== Checking injected cert in $POD ==="
+          kubectl exec -n payments "$POD" -c payment-api -- \
+            ls -la /vault/secrets/ 2>/dev/null || echo "(pod still initialising)"
+        fi
+
+    - name: Cleanup port-forward
+      if: always()
+      run: kill $PF_PID 2>/dev/null || true
+
+    - name: Job Summary
+      if: always()
+      run: |
+        echo "## Vault Bootstrap" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        for mount in pki-payments pki-agentify; do
+          STATUS=$(vault secrets list -format=json 2>/dev/null \
+            | python3 -c "import sys,json; print('✅' if '${mount}/' in json.load(sys.stdin) else '❌')" 2>/dev/null || echo "?")
+          echo "| PKI engine \`${mount}/\` | $STATUS |" >> $GITHUB_STEP_SUMMARY
+        done
+        echo "| KV v2 \`secret/\` | $(vault secrets list -format=json 2>/dev/null | python3 -c \"import sys,json; print('✅' if 'secret/' in json.load(sys.stdin) else '❌')\" 2>/dev/null || echo '?') |" >> $GITHUB_STEP_SUMMARY

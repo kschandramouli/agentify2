@@ -1,0 +1,154 @@
+# payment-api — HTTPS nginx serving a TLS cert injected by Vault Agent.
+#
+# The Vault Agent sidecar:
+#   1. Authenticates to Vault using the pod's ServiceAccount JWT
+#   2. Fetches TLS cert from pki-payments/issue/payment-api
+#   3. Writes cert + key to /vault/secrets/tls.crt and tls.key
+#   4. Fetches app config from secret/data/payments/config
+#   5. Sends nginx SIGHUP when cert renews (zero-downtime rotation)
+#
+# Vault role: payments-payment-api (bound to SA payment-api in payments ns)
+# PKI mount:  pki-payments/
+# KV path:    secret/payments/config
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  namespace: payments
+  labels:
+    app: payment-api
+    vault-managed-certs: "true"
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-api
+  template:
+    metadata:
+      labels:
+        app: payment-api
+      annotations:
+        # ── Vault Agent Injector ─────────────────────────────────────────────
+        vault.hashicorp.com/agent-inject:      "true"
+        vault.hashicorp.com/role:              "payments-payment-api"
+        vault.hashicorp.com/auth-path:         "auth/kubernetes"
+
+        # TLS certificate — issued fresh from Vault PKI on pod start
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-payments/issue/payment-api"
+        vault.hashicorp.com/agent-inject-template-tls.crt: |
+          {{- with secret "pki-payments/issue/payment-api"
+              "common_name=payment-api.payments.svc.cluster.local"
+              "alt_names=payment-api,localhost"
+              "ttl=720h" -}}
+          {{ .Data.certificate }}
+          {{ .Data.issuing_ca }}
+          {{- end }}
+
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-payments/issue/payment-api"
+        vault.hashicorp.com/agent-inject-template-tls.key: |
+          {{- with secret "pki-payments/issue/payment-api"
+              "common_name=payment-api.payments.svc.cluster.local"
+              "alt_names=payment-api,localhost"
+              "ttl=720h" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+
+        # Reload nginx without downtime when cert renews
+        vault.hashicorp.com/agent-inject-command-tls.crt: "nginx -s reload || true"
+
+        # App config/secrets from KV
+        vault.hashicorp.com/agent-inject-secret-app.env: "secret/data/payments/config"
+        vault.hashicorp.com/agent-inject-template-app.env: |
+          {{- with secret "secret/data/payments/config" -}}
+          export DB_HOST="{{ .Data.data.db_host }}"
+          export API_VERSION="{{ .Data.data.api_version }}"
+          {{- end }}
+
+        # Keep sidecar running so it can renew the cert when TTL < 30d
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+
+    spec:
+      serviceAccountName: payment-api
+      containers:
+      - name: payment-api
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 443
+          name: https
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        readinessProbe:
+          httpGet:
+            path:   /health
+            port:   443
+            scheme: HTTPS
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path:   /health
+            port:   443
+            scheme: HTTPS
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu:    "10m"
+          limits:
+            memory: "64Mi"
+            cpu:    "100m"
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-tls-config
+---
+# nginx config — reads Vault-injected cert from /vault/secrets/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-tls-config
+  namespace: payments
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 443 ssl;
+        server_name payment-api.payments.svc.cluster.local;
+
+        # Vault Agent Injector writes these files at pod start
+        ssl_certificate     /vault/secrets/tls.crt;
+        ssl_certificate_key /vault/secrets/tls.key;
+
+        location /health {
+          return 200 '{"status":"healthy","service":"payment-api"}';
+          add_header Content-Type application/json;
+        }
+
+        location / {
+          return 200 '{"status":"ok","service":"payment-api","tls":"vault-managed"}';
+          add_header Content-Type application/json;
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-api
+  namespace: payments
+spec:
+  selector:
+    app: payment-api
+  ports:
+  - name: https
+    port:       443
+    targetPort: 443
+  type: ClusterIP

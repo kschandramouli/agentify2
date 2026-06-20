@@ -1,11 +1,20 @@
-# Crashing payment worker — exits with error after 5s to generate CrashLoopBackOff.
-# This builds the restart-count time-series (k8fy.metrics) that the temporal spine
-# uses for trend reasoning. The log line tests the RedactText scrubber.
+# payment-worker — background worker that reads secrets from Vault at startup.
+#
+# Vault Agent injects:
+#   /vault/secrets/tls.crt   — TLS cert from pki-payments PKI
+#   /vault/secrets/tls.key   — private key
+#   /vault/secrets/db-creds  — database credentials from KV
+#
+# Vault role: payments-payment-worker (bound to SA payment-worker in payments)
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: payment-worker
   namespace: payments
+  labels:
+    app: payment-worker
+    vault-managed-certs: "true"
 spec:
   replicas: 1
   selector:
@@ -15,7 +24,43 @@ spec:
     metadata:
       labels:
         app: payment-worker
+      annotations:
+        # ── Vault Agent Injector ─────────────────────────────────────────────
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role:         "payments-payment-worker"
+        vault.hashicorp.com/auth-path:    "auth/kubernetes"
+
+        # TLS cert from pki-payments PKI
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-payments/issue/payment-worker"
+        vault.hashicorp.com/agent-inject-template-tls.crt: |
+          {{- with secret "pki-payments/issue/payment-worker"
+              "common_name=payment-worker.payments.svc.cluster.local"
+              "ttl=720h" -}}
+          {{ .Data.certificate }}
+          {{ .Data.issuing_ca }}
+          {{- end }}
+
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-payments/issue/payment-worker"
+        vault.hashicorp.com/agent-inject-template-tls.key: |
+          {{- with secret "pki-payments/issue/payment-worker"
+              "common_name=payment-worker.payments.svc.cluster.local"
+              "ttl=720h" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+
+        # Database credentials from KV
+        vault.hashicorp.com/agent-inject-secret-db-creds: "secret/data/payments/config"
+        vault.hashicorp.com/agent-inject-template-db-creds: |
+          {{- with secret "secret/data/payments/config" -}}
+          export DB_HOST="{{ .Data.data.db_host }}"
+          export DB_PORT="{{ .Data.data.db_port }}"
+          export DB_PASSWORD="{{ .Data.data.db_password }}"
+          {{- end }}
+
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+
     spec:
+      serviceAccountName: payment-worker
       containers:
       - name: worker
         image: alpine:3.19
@@ -24,15 +69,19 @@ spec:
         - -c
         - |
           echo "payment-worker starting..."
-          sleep 5
-          echo "ERROR: dial tcp db.payments:5432: connect: connection refused"
-          echo "payment-worker exiting with code 1"
-          exit 1
+          echo "Vault-injected files:"
+          ls -la /vault/secrets/ 2>/dev/null && echo "Certs present ✅" || echo "Certs missing ❌"
+          [ -f /vault/secrets/db-creds ] && source /vault/secrets/db-creds || true
+          echo "DB_HOST: ${DB_HOST:-not set}"
+          while true; do
+            echo "payment-worker running — certs from Vault PKI"
+            sleep 30
+          done
         resources:
           requests:
             memory: "16Mi"
-            cpu: "5m"
+            cpu:    "5m"
           limits:
             memory: "32Mi"
-            cpu: "50m"
+            cpu:    "50m"
       restartPolicy: Always

@@ -89,3 +89,9 @@ variable "github_owner" {
   default     = "kschandramouli"
   description = "GitHub account/org that owns the repository."
 }
+
+variable "ci_role_name" {
+  type        = string
+  default     = ""
+  description = "Name of the CI IAM role to attach Vault secrets read policy to. Leave empty to skip attachment."
+}
