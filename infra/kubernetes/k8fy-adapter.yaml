@@ -73,7 +73,7 @@ metadata:
   namespace: agentify
   annotations:
     # IRSA: replaced by the actual role ARN from Terraform output adapter_irsa_role_arn
-    eks.amazonaws.com/role-arn: "REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::175920682311:role/agentify-dev-adapter"
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
