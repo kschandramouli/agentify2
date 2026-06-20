@@ -63,28 +63,30 @@ spec:
       labels:
         app: payment
       annotations:
-        # ── Vault Agent Injector annotations ─────────────────────────────────
+        # ── Vault Agent Injector (pki-payments namespace PKI) ────────────────
         vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role:         "payment-service"
+        vault.hashicorp.com/role:         "payments-payment-api"
+        vault.hashicorp.com/auth-path:    "auth/kubernetes"
         vault.hashicorp.com/agent-pre-populate-only: "false"
 
-        # TLS certificate from the PKI engine.
-        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki/issue/payment-service"
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-payments/issue/payment-api"
         vault.hashicorp.com/agent-inject-template-tls.crt: |
-          {{- with secret "pki/issue/payment-service" "common_name=payment.payments.svc.cluster.local" "ttl=720h" -}}
+          {{- with secret "pki-payments/issue/payment-api"
+              "common_name=payment.payments.svc.cluster.local"
+              "alt_names=localhost" "ttl=720h" -}}
           {{ .Data.certificate }}
           {{ .Data.issuing_ca }}
           {{- end }}
-        vault.hashicorp.com/agent-inject-secret-tls.key: "pki/issue/payment-service"
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-payments/issue/payment-api"
         vault.hashicorp.com/agent-inject-template-tls.key: |
-          {{- with secret "pki/issue/payment-service" "common_name=payment.payments.svc.cluster.local" "ttl=720h" -}}
+          {{- with secret "pki-payments/issue/payment-api"
+              "common_name=payment.payments.svc.cluster.local"
+              "alt_names=localhost" "ttl=720h" -}}
           {{ .Data.private_key }}
           {{- end }}
-        # Reload nginx without downtime when the cert changes.
         vault.hashicorp.com/agent-inject-command-tls.crt: "nginx -s reload || true"
-        vault.hashicorp.com/auth-path: "auth/kubernetes"
     spec:
-      serviceAccountName: payment-service
+      serviceAccountName: payment-api
       containers:
       - name: payment
         image: nginx:1.25-alpine

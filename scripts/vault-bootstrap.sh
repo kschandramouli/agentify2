@@ -26,7 +26,7 @@ export VAULT_ADDR VAULT_TOKEN
 # Each service gets its own PKI role, KV path, policy, and K8s auth role.
 declare -a SERVICE_CATALOGUE=(
   "payments:payment-api,payment-worker"
-  "agentify:backend,agent"
+  "agentify:agentify-backend,agentify-agent,k8fy-adapter,agentify-frontend"
 )
 
 CERT_TTL="720h"   # 30 days per cert — rotator renews at <30 days

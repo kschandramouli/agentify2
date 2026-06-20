@@ -12,6 +12,26 @@ spec:
     metadata:
       labels:
         app: agentify-backend
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role:         "agentify-agentify-backend"
+        vault.hashicorp.com/auth-path:    "auth/kubernetes"
+        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-agentify/issue/agentify-backend"
+        vault.hashicorp.com/agent-inject-template-tls.crt: |
+          {{- with secret "pki-agentify/issue/agentify-backend"
+              "common_name=agentify-backend.agentify.svc.cluster.local"
+              "alt_names=localhost" "ttl=720h" -}}
+          {{ .Data.certificate }}
+          {{ .Data.issuing_ca }}
+          {{- end }}
+        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-agentify/issue/agentify-backend"
+        vault.hashicorp.com/agent-inject-template-tls.key: |
+          {{- with secret "pki-agentify/issue/agentify-backend"
+              "common_name=agentify-backend.agentify.svc.cluster.local"
+              "alt_names=localhost" "ttl=720h" -}}
+          {{ .Data.private_key }}
+          {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "false"
     spec:
       serviceAccountName: agentify-backend
       containers:
