@@ -9,9 +9,11 @@ metadata:
   namespace: agentify
   annotations:
     kubernetes.io/ingress.class: alb
-    # Dedicated ALB for agentify — Vault uses its own separate ALB (vault-ingress.yaml).
-    # IngressGroup cross-namespace routing did not work: Vault Ingress in the vault
-    # namespace never contributed rules to this group's ALB listener.
+    # IngressGroup — share this ALB with vault-ui (vault namespace, group.order: 5).
+    # The vault ingress failed previously due to invalid success-codes (501, 503 are
+    # outside ALB's 200-499 range). Fixed in vault-ingress.yaml.
+    alb.ingress.kubernetes.io/group.name:  agentify
+    alb.ingress.kubernetes.io/group.order: "10"   # catch-all / evaluated after vault's /ui and /v1
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /health

@@ -1,16 +1,16 @@
-# HashiCorp Vault — dedicated ALB Ingress
+# HashiCorp Vault — ALB Ingress (shares the agentify ALB via IngressGroup)
 #
-# Creates its own internet-facing ALB in the vault namespace.
-# Vault UI: http://<VAULT-ALB>/ui/     (login token: "root" in dev mode)
-# Vault API: http://<VAULT-ALB>/v1/
+# Vault UI:  http://<agentify-alb>/ui/    token: root (dev mode)
+# Vault API: http://<agentify-alb>/v1/
 #
-# Note: IngressGroup was attempted to share the agentify ALB but the AWS
-# ALB controller does not reconcile cross-namespace Ingresses into the same
-# group — /ui and /v1 never appeared in the ALB rule table.  A dedicated
-# ALB is simpler and guaranteed to work.
+# IngressGroup lets both Ingresses share one ALB — no extra cost.
+# group.order: 5 (vault) < 10 (agentify) so /ui and /v1 rules are
+# evaluated before agentify's catch-all /.
 #
-# Apply:  kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
-# Check:  kubectl get ingress vault-ui -n vault
+# IMPORTANT: AWS ALB only accepts success-codes in 200-499.
+#   200 = active/healthy   429 = standby   473 = performance standby
+#   501 (not init) and 503 (sealed) are INVALID for ALB — omit them.
+#   In Vault dev mode the pod always returns 200.
 
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -18,26 +18,33 @@ metadata:
   name: vault-ui
   namespace: vault
   annotations:
-    kubernetes.io/ingress.class:                             alb
-    alb.ingress.kubernetes.io/scheme:                        internet-facing
-    alb.ingress.kubernetes.io/target-type:                   ip
+    kubernetes.io/ingress.class: alb
 
-    alb.ingress.kubernetes.io/listen-ports:                  '[{"HTTP":80}]'
+    # ── Share the agentify ALB (IngressGroup) ────────────────────────────────
+    alb.ingress.kubernetes.io/group.name:  agentify
+    alb.ingress.kubernetes.io/group.order: "5"   # evaluated before agentify catch-all (order 10)
 
-    # Vault health returns different codes depending on state — accept all
-    # so the ALB target stays healthy during init and unseal.
+    alb.ingress.kubernetes.io/scheme:      internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+
     alb.ingress.kubernetes.io/healthcheck-path:              /v1/sys/health
-    alb.ingress.kubernetes.io/success-codes:                 "200,429,473,501,503"
+    # 200-499 only — 501/503 are outside ALB's allowed range and cause ValidationError
+    alb.ingress.kubernetes.io/success-codes:                 "200,429,473"
     alb.ingress.kubernetes.io/healthcheck-interval-seconds:  "30"
     alb.ingress.kubernetes.io/healthcheck-timeout-seconds:   "5"
-
-    alb.ingress.kubernetes.io/load-balancer-attributes:      idle_timeout.timeout_seconds=60
 
 spec:
   rules:
   - http:
       paths:
-      - path: /
+      - path: /ui
+        pathType: Prefix
+        backend:
+          service:
+            name: vault
+            port:
+              number: 8200
+      - path: /v1
         pathType: Prefix
         backend:
           service:
