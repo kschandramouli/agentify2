@@ -163,13 +163,23 @@ jobs:
     - name: Job Summary
       if: always()
       run: |
-        echo "## Vault Bootstrap" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Resource | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-        for mount in pki-payments pki-agentify; do
-          STATUS=$(vault secrets list -format=json 2>/dev/null \
-            | python3 -c "import sys,json; print('✅' if '${mount}/' in json.load(sys.stdin) else '❌')" 2>/dev/null || echo "?")
-          echo "| PKI engine \`${mount}/\` | $STATUS |" >> $GITHUB_STEP_SUMMARY
-        done
-        echo "| KV v2 \`secret/\` | $(vault secrets list -format=json 2>/dev/null | python3 -c \"import sys,json; print('✅' if 'secret/' in json.load(sys.stdin) else '❌')\" 2>/dev/null || echo '?') |" >> $GITHUB_STEP_SUMMARY
+        {
+          echo "## Vault Bootstrap"
+          echo ""
+          echo "| Resource | Status |"
+          echo "|---|---|"
+          for mount in pki-payments pki-agentify; do
+            if vault secrets list -format=json 2>/dev/null \
+               | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if '${mount}/' in d else 1)" 2>/dev/null; then
+              echo "| PKI engine \`${mount}/\` | OK |"
+            else
+              echo "| PKI engine \`${mount}/\` | missing |"
+            fi
+          done
+          if vault secrets list -format=json 2>/dev/null \
+             | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if 'secret/' in d else 1)" 2>/dev/null; then
+            echo "| KV v2 \`secret/\` | OK |"
+          else
+            echo "| KV v2 \`secret/\` | missing |"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

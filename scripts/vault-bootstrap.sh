@@ -158,8 +158,9 @@ for entry in "${SERVICE_CATALOGUE[@]}"; do
       skip "PKI role ${PKI_MOUNT}/roles/${SVC}"
     else
       vault write "${PKI_MOUNT}/roles/${SVC}" \
-        allowed_domains="${NS}.svc.cluster.local,${SVC}.${NS}.svc.cluster.local,localhost" \
+        allowed_domains="${NS}.svc.cluster.local,${SVC}.${NS}.svc.cluster.local,${SVC},localhost" \
         allow_subdomains=true \
+        allow_bare_domains=true \
         allow_localhost=true \
         max_ttl="${CERT_TTL}" \
         generate_lease=true \
@@ -176,7 +177,7 @@ for entry in "${SERVICE_CATALOGUE[@]}"; do
       info "Issuing initial TLS cert for ${SVC}..."
       CERT_DATA=$(vault write -format=json "${PKI_MOUNT}/issue/${SVC}" \
         common_name="${SERVICE_DNS}" \
-        alt_names="${SVC},localhost" \
+        alt_names="localhost" \
         ttl="${CERT_TTL}")
 
       CERT=$(echo "$CERT_DATA" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['certificate'])")
