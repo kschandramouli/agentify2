@@ -9,10 +9,9 @@ metadata:
   namespace: agentify
   annotations:
     kubernetes.io/ingress.class: alb
-    # IngressGroup — share this ALB with other Ingresses (e.g. vault-ui in the vault namespace).
-    # Any Ingress that sets the same group.name joins the same ALB; no extra ALB is created.
-    alb.ingress.kubernetes.io/group.name:  agentify
-    alb.ingress.kubernetes.io/group.order: "10"   # lower number = higher rule priority
+    # Dedicated ALB for agentify — Vault uses its own separate ALB (vault-ingress.yaml).
+    # IngressGroup cross-namespace routing did not work: Vault Ingress in the vault
+    # namespace never contributed rules to this group's ALB listener.
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /health

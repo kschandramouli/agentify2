@@ -1,20 +1,16 @@
-# HashiCorp Vault — ALB Ingress (shares the agentify ALB via IngressGroup)
+# HashiCorp Vault — dedicated ALB Ingress
 #
-# The AWS Load Balancer Controller merges all Ingresses in the same
-# alb.ingress.kubernetes.io/group.name into a single ALB.  This means no
-# extra ALB is provisioned — Vault UI reuses the existing agentify ALB.
+# Creates its own internet-facing ALB in the vault namespace.
+# Vault UI: http://<VAULT-ALB>/ui/     (login token: "root" in dev mode)
+# Vault API: http://<VAULT-ALB>/v1/
 #
-# Vault is accessible at the SAME hostname as the agentify frontend:
-#   http://<agentify-alb>/ui/        ← Vault web UI  (login here)
-#   http://<agentify-alb>/v1/        ← Vault HTTP API
+# Note: IngressGroup was attempted to share the agentify ALB but the AWS
+# ALB controller does not reconcile cross-namespace Ingresses into the same
+# group — /ui and /v1 never appeared in the ALB rule table.  A dedicated
+# ALB is simpler and guaranteed to work.
 #
-# These paths do not conflict with the agentify routes (/api, /admin, /health,
-# /metrics, /) because the ALB matches longest prefix first, so /ui/ and /v1/
-# are evaluated before the catch-all /.
-#
-# Apply after running scripts/vault-setup.sh:
-#   kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
-#   kubectl get ingress vault-ui -n vault   # shows the SAME hostname as agentify
+# Apply:  kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
+# Check:  kubectl get ingress vault-ui -n vault
 
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -22,35 +18,26 @@ metadata:
   name: vault-ui
   namespace: vault
   annotations:
-    kubernetes.io/ingress.class: alb
+    kubernetes.io/ingress.class:                             alb
+    alb.ingress.kubernetes.io/scheme:                        internet-facing
+    alb.ingress.kubernetes.io/target-type:                   ip
 
-    # ── Join the existing agentify ALB (no new ALB created) ──────────────────
-    alb.ingress.kubernetes.io/group.name:  agentify
-    alb.ingress.kubernetes.io/group.order: "5"    # lower = higher priority; must be < agentify's order (10) so /ui and /v1 are evaluated before the catch-all /   # lower priority than agentify (order 10)
+    alb.ingress.kubernetes.io/listen-ports:                  '[{"HTTP":80}]'
 
-    # Must match the main ingress — controller validates group members are consistent.
-    alb.ingress.kubernetes.io/scheme:      internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
+    # Vault health returns different codes depending on state — accept all
+    # so the ALB target stays healthy during init and unseal.
+    alb.ingress.kubernetes.io/healthcheck-path:              /v1/sys/health
+    alb.ingress.kubernetes.io/success-codes:                 "200,429,473,501,503"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds:  "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds:   "5"
 
-    # Vault returns 200/429/473/501/503 depending on seal/init state — accept all.
-    alb.ingress.kubernetes.io/healthcheck-path:             /v1/sys/health
-    alb.ingress.kubernetes.io/success-codes:                "200,429,473,501,503"
-    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/load-balancer-attributes:      idle_timeout.timeout_seconds=60
 
 spec:
   rules:
   - http:
       paths:
-        # Vault web UI — assets and redirects all work under /ui/ natively.
-      - path: /ui
-        pathType: Prefix
-        backend:
-          service:
-            name: vault
-            port:
-              number: 8200
-        # Vault HTTP API — used by the VaultCertSkill and the cert rotator.
-      - path: /v1
+      - path: /
         pathType: Prefix
         backend:
           service:
