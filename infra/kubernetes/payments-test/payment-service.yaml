@@ -1,22 +1,9 @@
-# payment-service — nginx serving HTTPS using a TLS cert injected by Vault Agent.
-#
-# The Vault Agent sidecar reads the cert from the PKI secrets engine on startup
-# and writes it to /vault/secrets/tls.crt + tls.key.  nginx uses those files.
-# When the cert is renewed by the rotator CronJob, the Vault Agent sidecar
-# detects the change and sends nginx a SIGHUP for zero-downtime reload.
-#
-# Prerequisites: scripts/vault-setup.sh must have run to create:
-#   - Kubernetes auth role "payment-service"
-#   - PKI role "payment-service"
-
-# ── ServiceAccount bound to the Vault Kubernetes auth role ───────────────────
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: payment-service
   namespace: payments
 ---
-# ── nginx TLS config (served via ConfigMap) ───────────────────────────────────
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -42,7 +29,6 @@ data:
       }
     }
 ---
-# ── Deployment ────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,8 +37,6 @@ metadata:
   labels:
     app: payment
     vault-managed-certs: "true"
-  annotations:
-    deployment.kubernetes.io/revision: "1"
 spec:
   replicas: 2
   selector:
@@ -62,31 +46,43 @@ spec:
     metadata:
       labels:
         app: payment
-      annotations:
-        # ── Vault Agent Injector (pki-payments namespace PKI) ────────────────
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role:         "payments-payment-api"
-        vault.hashicorp.com/auth-path:    "auth/kubernetes"
-        vault.hashicorp.com/agent-pre-populate-only: "false"
-
-        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-payments/issue/payment-api"
-        vault.hashicorp.com/agent-inject-template-tls.crt: |
-          {{- with secret "pki-payments/issue/payment-api"
-              "common_name=payment.payments.svc.cluster.local"
-              "alt_names=localhost" "ttl=720h" -}}
-          {{ .Data.certificate }}
-          {{ .Data.issuing_ca }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-payments/issue/payment-api"
-        vault.hashicorp.com/agent-inject-template-tls.key: |
-          {{- with secret "pki-payments/issue/payment-api"
-              "common_name=payment.payments.svc.cluster.local"
-              "alt_names=localhost" "ttl=720h" -}}
-          {{ .Data.private_key }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-command-tls.crt: "nginx -s reload || true"
     spec:
       serviceAccountName: payment-api
+      initContainers:
+      - name: vault-cert-init
+        image: alpine:3.18
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          apk add --no-cache curl jq >/dev/null 2>&1
+          VAULT="http://vault.vault.svc.cluster.local:8200"
+          JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          curl -sf -XPOST "$VAULT/v1/auth/kubernetes/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"jwt\":\"$JWT\",\"role\":\"payments-payment-api\"}" \
+            -o /tmp/login.json
+          TOKEN=$(jq -r '.auth.client_token' /tmp/login.json)
+          [ "$TOKEN" = "null" ] && { cat /tmp/login.json; exit 1; }
+          curl -sf -XPOST "$VAULT/v1/pki-payments/issue/payment-api" \
+            -H "X-Vault-Token: $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"common_name":"payment.payments.svc.cluster.local","alt_names":"localhost","ttl":"720h"}' \
+            -o /tmp/cert.json
+          jq -r '.data.certificate + "\n" + .data.issuing_ca' /tmp/cert.json > /vault/secrets/tls.crt
+          jq -r '.data.private_key' /tmp/cert.json > /vault/secrets/tls.key
+          echo "Vault cert written"
+        volumeMounts:
+        - name: vault-secrets
+          mountPath: /vault/secrets
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
       containers:
       - name: payment
         image: nginx:1.25-alpine
@@ -97,6 +93,9 @@ spec:
         - name: nginx-config
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
+        - name: vault-secrets
+          mountPath: /vault/secrets
+          readOnly: true
         readinessProbe:
           httpGet:
             path: /health
@@ -114,16 +113,17 @@ spec:
         resources:
           requests:
             memory: "32Mi"
-            cpu:    "10m"
+            cpu: "10m"
           limits:
             memory: "64Mi"
-            cpu:    "100m"
+            cpu: "100m"
       volumes:
+      - name: vault-secrets
+        emptyDir: {}
       - name: nginx-config
         configMap:
           name: nginx-tls-config
 ---
-# ── Service ───────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:

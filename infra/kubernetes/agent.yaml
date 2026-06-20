@@ -17,26 +17,7 @@ spec:
     metadata:
       labels:
         app: agentify-agent
-      annotations:
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role:         "agentify-agentify-agent"
-        vault.hashicorp.com/auth-path:    "auth/kubernetes"
-        vault.hashicorp.com/agent-inject-secret-tls.crt: "pki-agentify/issue/agentify-agent"
-        vault.hashicorp.com/agent-inject-template-tls.crt: |
-          {{- with secret "pki-agentify/issue/agentify-agent"
-              "common_name=agentify-agent.agentify.svc.cluster.local"
-              "alt_names=localhost" "ttl=720h" -}}
-          {{ .Data.certificate }}
-          {{ .Data.issuing_ca }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-secret-tls.key: "pki-agentify/issue/agentify-agent"
-        vault.hashicorp.com/agent-inject-template-tls.key: |
-          {{- with secret "pki-agentify/issue/agentify-agent"
-              "common_name=agentify-agent.agentify.svc.cluster.local"
-              "alt_names=localhost" "ttl=720h" -}}
-          {{ .Data.private_key }}
-          {{- end }}
-        vault.hashicorp.com/agent-pre-populate-only: "false"
+      annotations: {}
     spec:
       serviceAccountName: agentify-agent
       # 200s = 190s uvicorn graceful shutdown + 10s buffer.
