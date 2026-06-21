@@ -351,7 +351,11 @@ jobs:
         kubectl apply -f infra/kubernetes/ingress.yaml
         kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
         kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
+        kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
         kubectl apply -f infra/kubernetes/payments-test/serviceaccounts.yaml
+        kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
+        kubectl apply -f infra/kubernetes/payments-test/payment-api.yaml
+        kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
 
     - name: Wait for rollouts
       run: |
