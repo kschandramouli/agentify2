@@ -270,38 +270,37 @@ func (c *Client) Query(ctx context.Context, podID string, queryParams map[string
 // returns the number of rows removed (ADR 0015). Only the append-only events table
 // is purged; current_state (latest-wins) is never touched.
 //
-// Per-pod-type TTLs: high-frequency relational pods (metrics, certificates) use
-// a shorter window (cutoff) than sparse event pods, controlled by the caller.
+// Per-pod TTLs: high-frequency pods (metrics, certificates) use a shorter window
+// than sparse event pods, keeping storage bounded at ~20k rows steady-state.
 func (c *Client) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	var total int64
 
-	// Per-namespace cutoffs: high-frequency pods purged more aggressively.
-	// k8fy.metrics and k8fy.certificates accumulate ~2,880 rows/day at 30s scrape
-	// intervals — 7 days is enough for trend analysis and keeps storage bounded.
-	type nsWindow struct {
-		namespace string
-		cutoff    time.Time
+	// High-frequency pods accumulate ~2,880 rows/day at 30s scrape intervals.
+	// 7 days is enough for trend analysis; live-state is a latest-wins snapshot
+	// so 2 days of history is more than sufficient.
+	type podWindow struct {
+		podID  string
+		cutoff time.Time
 	}
-	windows := []nsWindow{
-		{"k8fy.metrics",       time.Now().Add(-7 * 24 * time.Hour)},
-		{"k8fy.certificates",  time.Now().Add(-7 * 24 * time.Hour)},
-		{"k8fy.live-state",    time.Now().Add(-2 * 24 * time.Hour)},
+	windows := []podWindow{
+		{"k8fy.metrics",      time.Now().Add(-7 * 24 * time.Hour)},
+		{"k8fy.certificates", time.Now().Add(-7 * 24 * time.Hour)},
 	}
 	for _, w := range windows {
 		res, err := c.db.ExecContext(ctx,
-			`DELETE FROM events WHERE namespace = $1 AND timestamp < $2`,
-			w.namespace, w.cutoff.UTC().Format(time.RFC3339))
+			`DELETE FROM events WHERE pod_id = $1 AND timestamp < $2`,
+			w.podID, w.cutoff.UTC().Format(time.RFC3339))
 		if err != nil {
-			c.logger.Error("failed to purge events", "namespace", w.namespace, "error", err)
+			c.logger.Error("failed to purge events", "pod_id", w.podID, "error", err)
 			continue
 		}
 		n, _ := res.RowsAffected()
 		total += n
 	}
 
-	// Remaining namespaces use the caller-supplied cutoff (default 7 days from env).
+	// All other pods use the caller-supplied cutoff (EVENTS_RETENTION_DAYS env var).
 	res, err := c.db.ExecContext(ctx,
-		`DELETE FROM events WHERE namespace NOT IN ('k8fy.metrics','k8fy.certificates','k8fy.live-state')
+		`DELETE FROM events WHERE pod_id NOT IN ('k8fy.metrics','k8fy.certificates')
 		 AND timestamp < $1`, cutoff.UTC().Format(time.RFC3339))
 	if err != nil {
 		c.logger.Error("failed to purge old events", "error", err)
