@@ -16,6 +16,7 @@ pulling an ASGI framework into the adapter image.
 import hmac
 import json
 import logging
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -55,6 +56,9 @@ class NamespaceDiscovery:
         return self._watcher.list_namespaces()
 
 
+_POD_HASH_RE = re.compile(r'-[a-z0-9]{6,12}-[a-z0-9]{5}$')
+
+
 class LogReader:
     """Reads a bounded tail of a pod's logs via the Kubernetes API."""
 
@@ -62,6 +66,33 @@ class LogReader:
         self._core = core_v1
         self._default_namespace = default_namespace
         self._max_tail_lines = max_tail_lines
+
+    def _resolve_current_pod(self, pod_id: str, namespace: str) -> Optional[str]:
+        """When a pod ID is stale (404), find the current running pod for the workload.
+
+        Strips the K8s ReplicaSet + pod hash suffix to get the deployment/workload
+        name, then lists pods in the namespace and returns the name of a Running pod
+        whose name starts with that workload prefix.
+
+        Returns None if no suitable pod is found.
+        """
+        workload = _POD_HASH_RE.sub('', pod_id)
+        if workload == pod_id:
+            return None  # no hash suffix — not a managed pod, nothing to resolve
+        try:
+            pods = self._core.list_namespaced_pod(namespace).items
+        except ApiException:
+            return None
+        for p in pods:
+            name = p.metadata.name
+            phase = (p.status.phase or "").lower()
+            if name.startswith(workload + '-') and phase == 'running':
+                logger.info(
+                    "resolved stale pod id to current pod",
+                    extra={"stale": pod_id, "current": name, "namespace": namespace},
+                )
+                return name
+        return None
 
     def read(
         self,
@@ -73,21 +104,44 @@ class LogReader:
     ) -> dict[str, Any]:
         """Return a bounded log tail, or an error payload the agent can reason about.
 
-        tail_lines is clamped to [1, max_tail_lines] regardless of the request, so a
-        caller can never pull an unbounded volume.
+        tail_lines is clamped to [1, max_tail_lines] regardless of the request.
+
+        If the pod no longer exists (404 — replaced by a rollout), automatically
+        resolves the current pod for that workload and retries once so that stale
+        registry snapshots don't silence diagnosis log fetches.
         """
         ns = namespace or self._default_namespace
         tail = max(1, min(int(tail_lines or 100), self._max_tail_lines))
-        try:
-            text = self._core.read_namespaced_pod_log(
-                name=pod_id,
+
+        def _fetch(name: str) -> str:
+            return self._core.read_namespaced_pod_log(
+                name=name,
                 namespace=ns,
                 container=container or None,
                 previous=bool(previous),
                 tail_lines=tail,
                 timestamps=True,
             )
+
+        try:
+            text = _fetch(pod_id)
         except ApiException as exc:
+            if exc.status == 404:
+                # Pod was likely replaced by a rollout. Try resolving the current pod.
+                current = self._resolve_current_pod(pod_id, ns)
+                if current:
+                    try:
+                        text = _fetch(current)
+                        return {
+                            "pod_id": current,
+                            "namespace": ns,
+                            "container": container,
+                            "previous": bool(previous),
+                            "logs": text or "",
+                            "note": f"stale pod id {pod_id!r} resolved to current pod",
+                        }
+                    except ApiException as retry_exc:
+                        exc = retry_exc  # fall through with the retry error
             logger.warning(
                 "log read failed",
                 extra={"pod_id": pod_id, "namespace": ns, "status": exc.status},

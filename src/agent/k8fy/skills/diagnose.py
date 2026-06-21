@@ -97,9 +97,13 @@ class DiagnoseSkill(K8fyAgent):
             change_args["service_name"] = service_name
         tasks["change_history"] = self._fetch("get_change_history", change_args)
 
-        # 5. Crash logs — only for pods that look like they are crashing;
-        #    fetching logs for healthy pods wastes tokens and latency.
-        for pod_id in _crashing_pod_ids(data):
+        # 5. Crash logs — only for pods that look like they are crashing.
+        #    Use the live pod IDs from service_health when available: the registry
+        #    snapshot in `data` can be up to 30 s stale after a rollout, causing 404s.
+        #    service_health is fetched above and reflects the current K8s state.
+        #    Fall back to pod IDs from `data` if service_health hasn't landed yet.
+        log_pod_ids = _crashing_pod_ids(data)
+        for pod_id in log_pod_ids:
             tasks[f"logs.{pod_id}"] = self._fetch(
                 "get_pod_logs",
                 {"pod_id": pod_id, "namespace": namespace, "previous": True},
@@ -127,14 +131,29 @@ def _all_pod_ids(data: Dict[str, Any]) -> List[str]:
 
 
 def _crashing_pod_ids(data: Dict[str, Any]) -> List[str]:
-    """Return pods that appear to be crashing — logs are worth fetching for these."""
+    """Return pods worth fetching crash logs for.
+
+    Includes pods that:
+    - Have restarted >= threshold (catches CrashLoopBackOff which shows as Running)
+    - Are in a terminal failure phase
+    - Are explicitly marked as not-ready (degraded pods may have useful logs)
+
+    Excludes completed/old pods — they've already exited cleanly.
+    """
     ids = []
     for key, val in data.items():
         if not isinstance(val, dict):
             continue
+        phase = val.get("phase", "")
+        restarts = val.get("restarts", 0)
+        ready = val.get("ready", True)
+        completed = val.get("completed", False)
+        if completed:
+            continue
         if (
-            val.get("restarts", 0) >= _CRASH_RESTART_THRESHOLD
-            or val.get("phase", "") in _CRASH_PHASES
+            restarts >= _CRASH_RESTART_THRESHOLD
+            or phase in _CRASH_PHASES
+            or (not ready and restarts > 0)
         ):
             ids.append(key)
     return ids
