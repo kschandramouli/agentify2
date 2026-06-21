@@ -165,3 +165,19 @@ type QueryResponse struct {
 	ToolCalls  []ToolCallInfo         `json:"tool_calls,omitempty"` // tools Claude called during reasoning
 	Details    map[string]interface{} `json:"details,omitempty"`    // structured data for UI rendering
 }
+
+// CertRenewRequest is the payload for POST /admin/certs/renew.
+type CertRenewRequest struct {
+	Namespace string `json:"namespace"` // K8s namespace (e.g. "payments")
+	Service   string `json:"service"`   // service name (e.g. "payment")
+}
+
+// CertRenewResponse is returned by POST /admin/certs/renew.
+type CertRenewResponse struct {
+	Status           string `json:"status"`                      // "ok" | "error"
+	Message          string `json:"message"`
+	Serial           string `json:"serial,omitempty"`
+	TTL              string `json:"ttl,omitempty"`
+	K8sSecretUpdated bool   `json:"k8s_secret_updated,omitempty"`
+	K8sSecret        string `json:"k8s_secret,omitempty"`
+}

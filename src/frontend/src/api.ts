@@ -193,6 +193,23 @@ async function getJSON<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface CertRenewResponse {
+  status: "ok" | "error";
+  message: string;
+  serial?: string;
+  ttl?: string;
+  k8s_secret_updated?: boolean;
+  k8s_secret?: string;
+}
+
+// On-demand cert renewal — calls Vault PKI + updates K8s TLS Secret
+export function renewCert(ctx: ServiceContext): Promise<CertRenewResponse> {
+  return postJSON<CertRenewResponse>("/admin/certs/renew", {
+    namespace: ctx.namespace,
+    service:   ctx.service,
+  });
+}
+
 // Tier-1: deterministic health check — no LLM, <10ms
 export function checkHealth(ctx: ServiceContext): Promise<QueryResponse> {
   return postJSON<QueryResponse>("/api/query", {

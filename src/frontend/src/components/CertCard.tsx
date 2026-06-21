@@ -1,4 +1,6 @@
-import type { QueryResponse, CertDetail } from "../api";
+import { useState } from "react";
+import type { QueryResponse, CertDetail, ServiceContext } from "../api";
+import { renewCert } from "../api";
 
 function formatExpiry(iso: string): string {
   if (!iso) return "—";
@@ -22,9 +24,40 @@ function DaysBar({ days, threshold }: { days: number; threshold: number }) {
   );
 }
 
-function CertRow({ cert, threshold }: { cert: CertDetail; threshold: number }) {
+function CertRow({
+  cert, threshold, ctx, onRenewed,
+}: {
+  cert: CertDetail;
+  threshold: number;
+  ctx?: ServiceContext;
+  onRenewed?: () => void;
+}) {
+  const [renewing, setRenewing] = useState(false);
+  const [renewMsg, setRenewMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const sev = cert.urgency;
   const icon = sev === "ok" ? "✓" : sev === "warn" ? "⚠" : "✗";
+
+  async function handleRenew() {
+    if (!ctx) return;
+    setRenewing(true);
+    setRenewMsg(null);
+    try {
+      const res = await renewCert(ctx);
+      if (res.status === "ok") {
+        setRenewMsg({ ok: true, text: `Renewed — serial ${res.serial ?? "?"}, TTL ${res.ttl ?? "24h"}` });
+        onRenewed?.();
+      } else {
+        setRenewMsg({ ok: false, text: res.message });
+      }
+    } catch (err) {
+      setRenewMsg({ ok: false, text: err instanceof Error ? err.message : "Renewal failed" });
+    } finally {
+      setRenewing(false);
+    }
+  }
+
+  const canRenew = !!ctx && cert.should_renew;
+
   return (
     <div className={`cert-row cert-row--${sev}`}>
       <div className="cert-row__header">
@@ -33,8 +66,21 @@ function CertRow({ cert, threshold }: { cert: CertDetail; threshold: number }) {
           {cert.namespace && <span className="cert-row__ns muted">{cert.namespace}/</span>}
           <code>{cert.name}</code>
         </span>
-        {cert.should_renew && (
+        {cert.should_renew && !renewMsg?.ok && (
           <span className={`badge badge--${sev}`}>renew now</span>
+        )}
+        {renewMsg?.ok && (
+          <span className="badge badge--ok">renewed ✓</span>
+        )}
+        {canRenew && !renewMsg?.ok && (
+          <button
+            className="renew-btn"
+            disabled={renewing}
+            onClick={handleRenew}
+            title="Issue a new cert from Vault PKI and update the K8s Secret"
+          >
+            {renewing ? "Renewing…" : "↻ Renew"}
+          </button>
         )}
       </div>
 
@@ -52,6 +98,12 @@ function CertRow({ cert, threshold }: { cert: CertDetail; threshold: number }) {
           Expires {formatExpiry(cert.expires_at)}
         </div>
       </div>
+
+      {renewMsg && (
+        <p className={`cert-row__renew-msg cert-row__renew-msg--${renewMsg.ok ? "ok" : "err"}`}>
+          {renewMsg.text}
+        </p>
+      )}
     </div>
   );
 }
@@ -59,12 +111,13 @@ function CertRow({ cert, threshold }: { cert: CertDetail; threshold: number }) {
 interface Props {
   resp: QueryResponse;
   durationMs?: number;
+  ctx?: ServiceContext;
+  onRenewed?: () => void;
 }
 
-export function CertCard({ resp, durationMs }: Props) {
+export function CertCard({ resp, durationMs, ctx, onRenewed }: Props) {
   const d = resp.details;
 
-  // Empty inventory or no structured details — show a clean one-liner, not a wall of text.
   const isEmpty = d?.certs_checked === 0 || (d?.certificates && d.certificates.length === 0);
   if (!d?.certificates || isEmpty) {
     return (
@@ -83,10 +136,10 @@ export function CertCard({ resp, durationMs }: Props) {
     );
   }
 
-  const threshold = d.renewal_threshold_days ?? 30;
+  const threshold  = d.renewal_threshold_days ?? 30;
   const needRenewal = d.certs_needing_renewal ?? 0;
-  const total = d.certs_checked ?? 0;
-  const overallSev = needRenewal > 0
+  const total       = d.certs_checked ?? 0;
+  const overallSev  = needRenewal > 0
     ? (d.certificates.some(c => c.urgency === "crit") ? "crit" : "warn")
     : "ok";
 
@@ -110,9 +163,15 @@ export function CertCard({ resp, durationMs }: Props) {
 
       <div className="cert-list">
         {[...d.certificates]
-          .sort((a, b) => a.days - b.days)   // most urgent first
+          .sort((a, b) => a.days - b.days)
           .map(cert => (
-            <CertRow key={cert.name} cert={cert} threshold={threshold} />
+            <CertRow
+              key={cert.name}
+              cert={cert}
+              threshold={threshold}
+              ctx={ctx}
+              onRenewed={onRenewed}
+            />
           ))}
       </div>
 

@@ -1269,6 +1269,69 @@ func (h *Handler) HandleDeleteChatSession(w http.ResponseWriter, r *http.Request
 
 // HandleUpsertPricing inserts or updates a single model pricing row.
 // Body: { model_id, display_name, input_per_mtok, output_per_mtok, cache_write_per_mtok, cache_read_per_mtok }
+// HandleCertRenew handles POST /admin/certs/renew.
+// It calls the agent with intent "renew_cert" and action "renew" in the context,
+// which triggers VaultCertSkill._renew() — a deterministic path that issues a
+// new cert from Vault PKI and updates the K8s TLS Secret without an LLM call.
+func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req CertRenewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Namespace == "" || req.Service == "" {
+		http.Error(w, "namespace and service are required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := map[string]interface{}{
+		"namespace": req.Namespace,
+		"service":   req.Service,
+		"action":    "renew",
+		"ttl":       "24h",
+	}
+	agentResp, err := h.agentClient.Reason(
+		fmt.Sprintf("renew TLS cert for %s/%s", req.Namespace, req.Service),
+		"renew_cert",
+		map[string]interface{}{},
+		ctx,
+		"cert-renew-"+req.Namespace+"-"+req.Service,
+	)
+	if err != nil {
+		h.logger.Warn("cert renewal agent call failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, CertRenewResponse{
+			Status:  "error",
+			Message: "Agent call failed: " + err.Error(),
+		})
+		return
+	}
+
+	details := agentResp.Details
+	resp := CertRenewResponse{
+		Status:  agentResp.Status,
+		Message: agentResp.Answer,
+	}
+	if details != nil {
+		if v, ok := details["serial"].(string); ok {
+			resp.Serial = v
+		}
+		if v, ok := details["ttl"].(string); ok {
+			resp.TTL = v
+		}
+		if v, ok := details["k8s_secret_updated"].(bool); ok {
+			resp.K8sSecretUpdated = v
+		}
+		if v, ok := details["k8s_secret"].(string); ok {
+			resp.K8sSecret = v
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (h *Handler) HandleUpsertPricing(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -608,7 +608,7 @@ export function ServiceEvaluator() {
                   c.label === "Service health" && c.resp
                     ? <HealthCard key={i} resp={c.resp} durationMs={c.durationMs} />
                     : c.label === "TLS certificates" && c.resp
-                    ? <CertCard key={i} resp={c.resp} durationMs={c.durationMs} />
+                    ? <CertCard key={i} resp={c.resp} durationMs={c.durationMs} ctx={s.ctx} onRenewed={() => onDiagnose({ preventDefault: () => {} } as React.FormEvent)} />
                     : <CheckCard key={i} result={c} />
                 )}
               </div>

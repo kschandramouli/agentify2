@@ -839,6 +839,17 @@ code {
 .cert-row__days-label { font-size: 13px; }
 .cert-row__expiry { font-size: 12px; }
 
+.renew-btn {
+  margin-left: auto; padding: 2px 10px; font-size: 12px; font-weight: 600;
+  background: transparent; border: 1px solid #e3c267; color: #e3c267;
+  border-radius: 4px; cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.renew-btn:hover:not(:disabled) { background: #e3c267; color: #0f1115; }
+.renew-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.cert-row__renew-msg { font-size: 12px; padding: 4px 0 0 26px; }
+.cert-row__renew-msg--ok  { color: #79d88a; }
+.cert-row__renew-msg--err { color: #e98080; }
+
 /* Days bar (like ratio bar but horizontal countdown) */
 .days-bar {
   flex: 1; max-width: 120px; height: 4px;

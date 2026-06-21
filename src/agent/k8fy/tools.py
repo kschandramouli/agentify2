@@ -153,16 +153,21 @@ TOOLS = [
     {
         "name": "rotate_vault_cert",
         "description": (
-            "Request a new TLS certificate from HashiCorp Vault PKI and store the renewed cert in Vault KV. "
-            "The Vault Agent Injector sidecar in the target pods will automatically pick up the new cert. "
+            "Request a new TLS certificate from HashiCorp Vault PKI, store in Vault KV, "
+            "and update the Kubernetes TLS Secret so it takes effect immediately. "
             "Only call this when expiry is imminent or when explicitly requested by the operator."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "pki_mount": {
+                    "type": "string",
+                    "description": "Vault PKI mount (e.g. 'pki-payments'). Defaults to 'pki-payments'.",
+                    "default": "pki-payments",
+                },
                 "pki_role": {
                     "type": "string",
-                    "description": "Vault PKI role name to issue from (e.g. 'payment-service').",
+                    "description": "Vault PKI role name to issue from (e.g. 'payment-api').",
                 },
                 "common_name": {
                     "type": "string",
@@ -170,12 +175,16 @@ TOOLS = [
                 },
                 "ttl": {
                     "type": "string",
-                    "description": "Desired cert TTL (e.g. '720h' for 30 days). Defaults to role max.",
-                    "default": "720h",
+                    "description": "Desired cert TTL (e.g. '24h'). Defaults to 24h.",
+                    "default": "24h",
                 },
-                "kv_path": {
+                "k8s_secret_name": {
                     "type": "string",
-                    "description": "Vault KV path to store the renewed cert (e.g. 'secret/data/payments/tls').",
+                    "description": "K8s TLS Secret to update with the new cert (e.g. 'payment-tls').",
+                },
+                "k8s_namespace": {
+                    "type": "string",
+                    "description": "Namespace of the K8s Secret (e.g. 'payments').",
                 },
             },
             "required": ["pki_role", "common_name"],
@@ -238,52 +247,80 @@ async def _vault_get_cert_status(pki_role: str, kv_path: str = "") -> Dict[str, 
 
 
 async def _vault_rotate_cert(
-    pki_role: str, common_name: str, ttl: str = "720h", kv_path: str = ""
+    pki_role: str,
+    common_name: str,
+    ttl: str = "24h",
+    pki_mount: str = "pki-payments",
+    k8s_secret_name: str = "",
+    k8s_namespace: str = "",
 ) -> Dict[str, Any]:
-    """Issue a new cert from Vault PKI and optionally store in KV."""
+    """Issue a new cert from Vault PKI and update the K8s TLS Secret in-place."""
     if not _VAULT_ADDR:
         return {"error": "VAULT_ADDR not configured — Vault tools are unavailable."}
 
     headers = {"X-Vault-Token": _VAULT_TOKEN, "Content-Type": "application/json"} if _VAULT_TOKEN else {}
+    import base64, datetime
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            # 1. Issue cert from Vault PKI.
             resp = await client.post(
-                f"{_VAULT_ADDR}/v1/pki/issue/{pki_role}",
+                f"{_VAULT_ADDR}/v1/{pki_mount}/issue/{pki_role}",
                 headers=headers,
                 json={"common_name": common_name, "ttl": ttl},
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                return {"error": f"Vault PKI issue failed ({resp.status_code}): {resp.text}"}
             data = resp.json().get("data", {})
             serial = data.get("serial_number", "")
-            result = {
+            cert_pem = data.get("certificate", "") + "\n" + data.get("issuing_ca", "")
+            key_pem  = data.get("private_key", "")
+
+            result: Dict[str, Any] = {
                 "status": "rotated",
+                "pki_mount": pki_mount,
                 "pki_role": pki_role,
                 "common_name": common_name,
                 "serial": serial,
                 "ttl": ttl,
-                "message": (
-                    f"New cert issued (serial {serial}). "
-                    "Vault Agent Injector will propagate the new cert to pods automatically."
-                ),
             }
-            # Store in KV if path provided.
-            if kv_path and _VAULT_TOKEN:
-                import datetime
-                kv_resp = await client.post(
-                    f"{_VAULT_ADDR}/v1/{kv_path}",
-                    headers=headers,
-                    json={
-                        "data": {
-                            "certificate": data.get("certificate", "") + "\n" + data.get("issuing_ca", ""),
-                            "private_key": data.get("private_key", ""),
-                            "serial": serial,
-                            "renewed_at": datetime.datetime.utcnow().isoformat(),
-                        }
-                    },
-                )
-                result["kv_stored"] = kv_resp.status_code == 200
-                result["kv_path"] = kv_path
+
+            # 2. Update K8s TLS Secret via in-cluster API.
+            if k8s_secret_name and k8s_namespace:
+                try:
+                    sa_token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+                    k8s_headers = {
+                        "Authorization": f"Bearer {sa_token}",
+                        "Content-Type": "application/strategic-merge-patch+json",
+                    }
+                    patch = {"data": {
+                        "tls.crt": base64.b64encode(cert_pem.encode()).decode(),
+                        "tls.key": base64.b64encode(key_pem.encode()).decode(),
+                    }}
+                    k8s_resp = await client.patch(
+                        f"https://kubernetes.default.svc/api/v1/namespaces/{k8s_namespace}/secrets/{k8s_secret_name}",
+                        headers=k8s_headers,
+                        json=patch,
+                    )
+                    result["k8s_secret_updated"] = k8s_resp.status_code in (200, 201)
+                    result["k8s_secret"] = f"{k8s_namespace}/{k8s_secret_name}"
+                    if k8s_resp.status_code not in (200, 201):
+                        result["k8s_error"] = f"K8s PATCH returned {k8s_resp.status_code}: {k8s_resp.text[:200]}"
+                except Exception as ke:
+                    result["k8s_error"] = str(ke)
+
+            # 3. Store audit record in Vault KV.
+            await client.post(
+                f"{_VAULT_ADDR}/v1/secret/data/payments/tls",
+                headers=headers,
+                json={"data": {"serial": serial, "common_name": common_name,
+                               "renewed_at": datetime.datetime.utcnow().isoformat()}},
+            )
+
+            result["message"] = (
+                f"Cert renewed from Vault (serial {serial}, TTL {ttl}). "
+                + (f"K8s Secret {k8s_namespace}/{k8s_secret_name} updated." if k8s_secret_name else "")
+            )
             return result
 
     except httpx.HTTPError as e:
@@ -313,8 +350,10 @@ async def process_tool_call(
         return await _vault_rotate_cert(
             pki_role=arguments.get("pki_role", ""),
             common_name=arguments.get("common_name", ""),
-            ttl=arguments.get("ttl", "720h"),
-            kv_path=arguments.get("kv_path", ""),
+            ttl=arguments.get("ttl", "24h"),
+            pki_mount=arguments.get("pki_mount", "pki-payments"),
+            k8s_secret_name=arguments.get("k8s_secret_name", ""),
+            k8s_namespace=arguments.get("k8s_namespace", ""),
         )
 
     url = f"{backend_url.rstrip('/')}/api/agent/fetch"

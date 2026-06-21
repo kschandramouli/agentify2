@@ -30,6 +30,7 @@ class SkillRouter:
             "change_history": ChangeHistorySkill(),
             "metrics_history":RestartTrendSkill(),
             "vault_cert":     VaultCertSkill(),
+            "renew_cert":     VaultCertSkill(),  # same skill, intent triggers _renew()
         }
         # Fallback: full K8fyAgent for general_query or anything new.
         self._fallback: Optional[K8fyAgent] = None

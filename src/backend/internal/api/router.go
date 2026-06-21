@@ -58,6 +58,9 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("PUT /admin/pricing", h.HandleUpsertPricing)
 	mux.HandleFunc("POST /admin/pricing", h.HandleUpsertPricing)
 
+	// Admin: on-demand cert renewal — issues from Vault PKI + updates K8s Secret
+	mux.HandleFunc("POST /admin/certs/renew", h.HandleCertRenew)
+
 	// TODO: add WebSocket handler for chat
 	// mux.HandleFunc("/ws/chat", h.HandleChatWebSocket)
 
