@@ -69,7 +69,9 @@ spec:
         - name: REDACTION_ENABLED
           value: "true"
         - name: EVENTS_RETENTION_DAYS
-          value: "30"
+          value: "7"
+        - name: EVENTS_RETENTION_INTERVAL_MINUTES
+          value: "60"
         - name: INVESTIGATION_ENABLED
           value: "false"   # opt-in; set to "true" and add INVESTIGATION_WEBHOOK_URL to enable
         livenessProbe:

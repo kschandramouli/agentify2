@@ -269,15 +269,47 @@ func (c *Client) Query(ctx context.Context, podID string, queryParams map[string
 // PurgeOlderThan deletes events whose event timestamp is older than cutoff and
 // returns the number of rows removed (ADR 0015). Only the append-only events table
 // is purged; current_state (latest-wins) is never touched.
+//
+// Per-pod-type TTLs: high-frequency relational pods (metrics, certificates) use
+// a shorter window (cutoff) than sparse event pods, controlled by the caller.
 func (c *Client) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	var total int64
+
+	// Per-namespace cutoffs: high-frequency pods purged more aggressively.
+	// k8fy.metrics and k8fy.certificates accumulate ~2,880 rows/day at 30s scrape
+	// intervals — 7 days is enough for trend analysis and keeps storage bounded.
+	type nsWindow struct {
+		namespace string
+		cutoff    time.Time
+	}
+	windows := []nsWindow{
+		{"k8fy.metrics",       time.Now().Add(-7 * 24 * time.Hour)},
+		{"k8fy.certificates",  time.Now().Add(-7 * 24 * time.Hour)},
+		{"k8fy.live-state",    time.Now().Add(-2 * 24 * time.Hour)},
+	}
+	for _, w := range windows {
+		res, err := c.db.ExecContext(ctx,
+			`DELETE FROM events WHERE namespace = $1 AND timestamp < $2`,
+			w.namespace, w.cutoff.UTC().Format(time.RFC3339))
+		if err != nil {
+			c.logger.Error("failed to purge events", "namespace", w.namespace, "error", err)
+			continue
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+
+	// Remaining namespaces use the caller-supplied cutoff (default 7 days from env).
 	res, err := c.db.ExecContext(ctx,
-		`DELETE FROM events WHERE timestamp < $1`, cutoff.UTC().Format(time.RFC3339))
+		`DELETE FROM events WHERE namespace NOT IN ('k8fy.metrics','k8fy.certificates','k8fy.live-state')
+		 AND timestamp < $1`, cutoff.UTC().Format(time.RFC3339))
 	if err != nil {
 		c.logger.Error("failed to purge old events", "error", err)
-		return 0, err
+		return total, err
 	}
 	n, _ := res.RowsAffected()
-	return n, nil
+	total += n
+	return total, nil
 }
 
 // HealthCheck verifies the connection.
