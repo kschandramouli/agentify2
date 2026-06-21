@@ -1,24 +1,15 @@
-# cert-rotator — daily CronJob that checks TLS cert expiry in Vault PKI
-# and renews any cert with fewer than 30 days remaining.
+# cert-rotator — daily CronJob that renews the payment-tls K8s Secret from Vault PKI.
 #
-# The rotator authenticates to Vault using its Kubernetes ServiceAccount
-# (bound to the "cert-rotator" Vault role via vault-setup.sh).
-# It uses Vault's PKI API to:
-#   1. Read the current cert expiry from the KV store
-#   2. If < 30 days remaining: issue a new cert from pki/issue/payment-service
-#   3. Store the renewed cert back in secret/payments/tls
-#
-# The Vault Agent Injector sidecar in the payment-service pods watches the
-# PKI lease and automatically picks up renewed certs, then signals nginx.
+# Authenticates to Vault via Kubernetes SA JWT, checks expiry of the current cert
+# in the payment-tls secret, and renews if fewer than 30 days remain.
+# Uses pki-payments/issue/payment-api (the correct mount for the payments namespace).
 
-# ── ServiceAccount ────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: cert-rotator
   namespace: payments
 ---
-# ── CronJob ───────────────────────────────────────────────────────────────────
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -38,118 +29,103 @@ spec:
           restartPolicy: OnFailure
           containers:
           - name: rotator
-            image: python:3.11-slim
+            image: alpine:3.18
             env:
             - name: VAULT_ADDR
               value: "http://vault.vault.svc.cluster.local:8200"
             - name: VAULT_ROLE
               value: "cert-rotator"
+            - name: PKI_MOUNT
+              value: "pki-payments"
             - name: PKI_ROLE
-              value: "payment-service"
+              value: "payment-api"
             - name: CERT_COMMON_NAME
               value: "payment.payments.svc.cluster.local"
+            - name: CERT_ALT_NAMES
+              value: "payment-api.payments.svc.cluster.local,localhost"
             - name: CERT_TTL
               value: "720h"
             - name: RENEW_THRESHOLD_DAYS
               value: "30"
-            - name: KV_PATH
-              value: "secret/data/payments/tls"
+            - name: SECRET_NAME
+              value: "payment-tls"
+            - name: SECRET_NAMESPACE
+              value: "payments"
             command:
-            - python3
+            - sh
             - -c
             - |
-              """Vault cert rotation script — checks expiry and renews if < threshold."""
-              import os, sys, json, datetime
-              import urllib.request, urllib.error
+              set -e
+              apk add --no-cache curl jq openssl >/dev/null 2>&1
 
-              VAULT_ADDR = os.environ["VAULT_ADDR"]
-              VAULT_ROLE = os.environ["VAULT_ROLE"]
-              PKI_ROLE   = os.environ["PKI_ROLE"]
-              CN         = os.environ["CERT_COMMON_NAME"]
-              TTL        = os.environ["CERT_TTL"]
-              THRESHOLD  = int(os.environ["RENEW_THRESHOLD_DAYS"])
-              KV_PATH    = os.environ["KV_PATH"]
+              echo "=== Vault cert rotator starting ==="
 
-              def vault_get(path, token):
-                  req = urllib.request.Request(
-                      f"{VAULT_ADDR}/v1/{path}",
-                      headers={"X-Vault-Token": token},
-                  )
-                  with urllib.request.urlopen(req) as r:
-                      return json.load(r)
+              # 1. Authenticate to Vault via K8s SA JWT
+              JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              curl -sf -XPOST "$VAULT_ADDR/v1/auth/kubernetes/login" \
+                -H "Content-Type: application/json" \
+                -d "{\"jwt\":\"$JWT\",\"role\":\"$VAULT_ROLE\"}" \
+                -o /tmp/login.json
+              TOKEN=$(jq -r '.auth.client_token' /tmp/login.json)
+              [ "$TOKEN" = "null" ] && { echo "Vault login failed:"; cat /tmp/login.json; exit 1; }
+              echo "Authenticated to Vault."
 
-              def vault_post(path, token, data):
-                  body = json.dumps(data).encode()
-                  req = urllib.request.Request(
-                      f"{VAULT_ADDR}/v1/{path}",
-                      data=body,
-                      headers={"X-Vault-Token": token, "Content-Type": "application/json"},
-                      method="POST",
-                  )
-                  with urllib.request.urlopen(req) as r:
-                      return json.load(r)
+              # 2. Check current cert expiry in the K8s Secret via Vault agent fetch
+              #    (rotator reads the existing secret to decide whether rotation is needed)
+              DAYS_REMAINING=0
+              CURRENT_CERT=$(curl -sf \
+                "https://kubernetes.default.svc/api/v1/namespaces/$SECRET_NAMESPACE/secrets/$SECRET_NAME" \
+                --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                2>/dev/null | jq -r '.data["tls.crt"] // empty' | base64 -d 2>/dev/null)
 
-              # 1. Authenticate via Kubernetes ServiceAccount JWT.
-              print("Authenticating with Vault via Kubernetes auth...")
-              sa_token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
-              auth = vault_post("auth/kubernetes/login", "", {
-                  "role": VAULT_ROLE,
-                  "jwt":  sa_token,
-              })
-              token = auth["auth"]["client_token"]
-              print("Authenticated successfully.")
+              if [ -n "$CURRENT_CERT" ]; then
+                echo "$CURRENT_CERT" > /tmp/current.crt
+                EXPIRY=$(openssl x509 -enddate -noout -in /tmp/current.crt | cut -d= -f2)
+                EXPIRY_TS=$(date -d "$EXPIRY" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$EXPIRY" +%s 2>/dev/null)
+                NOW_TS=$(date +%s)
+                DAYS_REMAINING=$(( (EXPIRY_TS - NOW_TS) / 86400 ))
+                echo "Current cert expires: $EXPIRY ($DAYS_REMAINING days remaining)"
+              else
+                echo "No existing cert found — will issue fresh cert."
+              fi
 
-              # 2. Read existing cert from KV and check expiry.
-              try:
-                  kv = vault_get(KV_PATH, token)
-                  import ssl, io
-                  cert_pem = kv["data"]["data"]["certificate"]
-                  # Parse expiry using ssl module.
-                  import subprocess, tempfile
-                  with tempfile.NamedTemporaryFile(suffix=".pem", delete=False, mode="w") as f:
-                      f.write(cert_pem)
-                      tmpf = f.name
-                  result = subprocess.run(
-                      ["openssl", "x509", "-enddate", "-noout", "-in", tmpf],
-                      capture_output=True, text=True,
-                  )
-                  # notAfter=Jun 17 00:00:00 2026 GMT
-                  date_str = result.stdout.strip().split("=", 1)[1]
-                  expiry = datetime.datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
-                  days_remaining = (expiry - datetime.datetime.utcnow()).days
-                  print(f"Current cert expires: {expiry.date()} ({days_remaining} days remaining)")
-              except Exception as e:
-                  print(f"Could not read existing cert ({e}) — will issue fresh cert.")
-                  days_remaining = 0
+              # 3. Skip rotation if cert is healthy
+              if [ "$DAYS_REMAINING" -ge "$RENEW_THRESHOLD_DAYS" ]; then
+                echo "Cert healthy ($DAYS_REMAINING days remaining, threshold ${RENEW_THRESHOLD_DAYS}d). No rotation needed."
+                exit 0
+              fi
 
-              # 3. Rotate if below threshold.
-              if days_remaining >= THRESHOLD:
-                  print(f"Cert healthy ({days_remaining}d remaining, threshold {THRESHOLD}d). No rotation needed.")
-                  sys.exit(0)
+              # 4. Issue new cert from Vault PKI
+              echo "Issuing new cert from $PKI_MOUNT/issue/$PKI_ROLE ..."
+              curl -sf -XPOST "$VAULT_ADDR/v1/$PKI_MOUNT/issue/$PKI_ROLE" \
+                -H "X-Vault-Token: $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"common_name\":\"$CERT_COMMON_NAME\",\"alt_names\":\"$CERT_ALT_NAMES\",\"ttl\":\"$CERT_TTL\"}" \
+                -o /tmp/new-cert.json
+              jq -r '.data.certificate + "\n" + .data.issuing_ca' /tmp/new-cert.json > /tmp/tls.crt
+              jq -r '.data.private_key' /tmp/new-cert.json > /tmp/tls.key
+              SERIAL=$(jq -r '.data.serial_number' /tmp/new-cert.json)
+              echo "New cert issued. Serial: $SERIAL"
 
-              print(f"Rotating cert (only {days_remaining} days remaining, threshold {THRESHOLD}d)...")
-              new_cert = vault_post(f"pki/issue/{PKI_ROLE}", token, {
-                  "common_name": CN,
-                  "ttl":         TTL,
-              })
-              cert    = new_cert["data"]["certificate"]
-              key     = new_cert["data"]["private_key"]
-              issuing = new_cert["data"]["issuing_ca"]
-              serial  = new_cert["data"]["serial_number"]
-              print(f"New cert issued. Serial: {serial}")
+              # 5. Update the K8s Secret payment-tls in-place
+              CRT_B64=$(base64 -w0 /tmp/tls.crt)
+              KEY_B64=$(base64 -w0 /tmp/tls.key)
+              curl -sf -X PATCH \
+                "https://kubernetes.default.svc/api/v1/namespaces/$SECRET_NAMESPACE/secrets/$SECRET_NAME" \
+                --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
+                -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+                -H "Content-Type: application/strategic-merge-patch+json" \
+                -d "{\"data\":{\"tls.crt\":\"$CRT_B64\",\"tls.key\":\"$KEY_B64\"}}"
+              echo "K8s Secret $SECRET_NAMESPACE/$SECRET_NAME updated."
 
-              # 4. Store renewed cert in Vault KV so other consumers can read it.
-              vault_post("secret/data/payments/tls", token, {
-                  "data": {
-                      "certificate": cert + "\n" + issuing,
-                      "private_key": key,
-                      "serial":      serial,
-                      "renewed_at":  datetime.datetime.utcnow().isoformat(),
-                  }
-              })
-              print("Renewed cert stored in Vault KV at secret/payments/tls")
-              print("Vault Agent Injector will propagate the new cert to running pods.")
-              print("Rotation complete.")
+              # 6. Store copy in Vault KV for audit trail
+              curl -sf -XPOST "$VAULT_ADDR/v1/secret/data/payments/tls" \
+                -H "X-Vault-Token: $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d "{\"data\":{\"serial\":\"$SERIAL\",\"common_name\":\"$CERT_COMMON_NAME\"}}" \
+                >/dev/null 2>&1 || true
+              echo "=== Rotation complete ==="
             resources:
               requests:
                 memory: "64Mi"
@@ -157,3 +133,29 @@ spec:
               limits:
                 memory: "128Mi"
                 cpu:    "200m"
+---
+# RBAC: cert-rotator needs to patch the payment-tls Secret
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-rotator
+  namespace: payments
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["payment-tls"]
+  verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-rotator
+  namespace: payments
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cert-rotator
+subjects:
+- kind: ServiceAccount
+  name: cert-rotator
+  namespace: payments
