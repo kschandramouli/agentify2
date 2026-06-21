@@ -135,8 +135,7 @@ jobs:
         kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
         kubectl apply -f infra/kubernetes/payments-test/payment-api.yaml
 
-        # Cert rotator
-        kubectl apply -f infra/kubernetes/vault/cert-rotator-cronjob.yaml
+        # Cert rotator removed — renewal is now on-demand via UI button / chat
 
     - name: Verify Vault injection is working
       if: github.event.inputs.dry_run != 'true'
