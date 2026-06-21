@@ -20,7 +20,7 @@ const MAIN_NAV: NavItem[] = [
   {
     id: "observability",
     label: "K8s Observability",
-    icon: "⬡",
+    icon: "◎",
     description: "Diagnose services & pods",
   },
   {
@@ -32,11 +32,11 @@ const MAIN_NAV: NavItem[] = [
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { id: "registry",  label: "Pod Registry",    icon: "▤", description: "Browse live pods"          },
-  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"     },
-  { id: "sync",      label: "Namespace Sync",  icon: "↻", description: "Sync cluster namespaces"   },
-  { id: "metrics",   label: "Metrics",         icon: "≈", description: "Token usage & cost"        },
-  { id: "pricing",   label: "Model Pricing",   icon: "◈", description: "$/MTok rates for all models" },
+  { id: "registry",  label: "Pod Registry",    icon: "⬡", description: "Browse live pods"            },
+  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"       },
+  { id: "sync",      label: "Namespace Sync",  icon: "⟳", description: "Sync cluster namespaces"    },
+  { id: "metrics",   label: "Metrics",         icon: "◈", description: "Token usage & cost"          },
+  { id: "pricing",   label: "Model Pricing",   icon: "⊙", description: "$/MTok rates for all models" },
 ];
 
 const ALL_NAV = [...MAIN_NAV, ...ADMIN_NAV];
@@ -105,7 +105,7 @@ export function App() {
     <div className="app">
       <header className="app__header">
         <div className="app__brand">
-          <span className="app__brand-icon">⎈</span>
+          <span className="app__brand-icon">⬡</span>
           <span className="app__brand-name">agentify</span>
         </div>
         <span className="app__header-divider" />
@@ -113,7 +113,7 @@ export function App() {
         <div className="app__header-spacer" />
         <span className="app__status-badge">
           <span className="app__status-dot" />
-          Connected
+          Live
         </span>
       </header>
       <div className="app__body">
