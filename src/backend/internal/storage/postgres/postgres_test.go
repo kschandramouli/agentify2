@@ -170,6 +170,14 @@ func TestPurgeOlderThan(t *testing.T) {
 	ctx := context.Background()
 	pod := "k8fy.metrics"
 
+	// Use time.Now()-based timestamps so the test stays valid regardless of
+	// when it runs. The per-pod retention window for k8fy.metrics is 7 days,
+	// so "recent" must be within the last 7 days.
+	old1   := time.Now().Add(-60 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	old2   := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	recent := time.Now().Add(-1 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	cutoff := time.Now().Add(-8 * 24 * time.Hour) // 8 days ago — between old and recent
+
 	store := func(ts string) {
 		if _, err := client.Store(ctx, pod, map[string]interface{}{
 			"id":              uuid.New().String(),
@@ -181,11 +189,11 @@ func TestPurgeOlderThan(t *testing.T) {
 			t.Fatalf("store: %v", err)
 		}
 	}
-	store("2026-01-01T00:00:00Z") // old
-	store("2026-01-02T00:00:00Z") // old
-	store("2026-06-05T00:00:00Z") // recent
+	store(old1)   // 60 days ago — deleted by per-pod 7-day window
+	store(old2)   // 30 days ago — deleted by per-pod 7-day window
+	store(recent) // yesterday  — kept (within 7-day window)
 
-	n, err := client.PurgeOlderThan(ctx, mustTime(t, "2026-02-01T00:00:00Z"))
+	n, err := client.PurgeOlderThan(ctx, cutoff)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
