@@ -63,9 +63,12 @@ func tier1Health(podData map[string]interface{}, serviceFilter string) (QueryRes
 			restarts = v
 		}
 
-		// Succeeded = completed pod from a finished rollout or Job.
-		// It's not a running service instance — exclude from health calculation.
-		if phase == "Succeeded" || phase == "Completed" {
+		// Terminated pods (Succeeded, Completed, Failed) are historical — they
+		// belong to old ReplicaSets or finished Jobs and are no longer serving
+		// traffic. Exclude from the active health score; show in "old pods" count.
+		// Failed pods from active ReplicaSets show as Running (CrashLoopBackOff),
+		// not Failed — so filtering Failed here is safe for Deployments.
+		if phase == "Succeeded" || phase == "Completed" || phase == "Failed" {
 			allPods = append(allPods, podEntry{
 				name: entity, status: "completed", reason: "phase " + phase,
 				phase: phase, completed: true,

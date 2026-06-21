@@ -131,7 +131,7 @@ export function HealthCard({ resp, durationMs }: Props) {
             type="button"
             onClick={() => setShowCompleted(s => !s)}
           >
-            {showCompleted ? "▾" : "▸"} {completedPods.length} completed pod{completedPods.length !== 1 ? "s" : ""} from old rollouts (not counted)
+            {showCompleted ? "▾" : "▸"} {completedPods.length} historical pod{completedPods.length !== 1 ? "s" : ""} from old ReplicaSets — excluded from score
           </button>
           {showCompleted && (
             <table className="pod-table pod-table--dim">
