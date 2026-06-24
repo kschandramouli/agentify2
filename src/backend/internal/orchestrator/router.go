@@ -65,7 +65,11 @@ func buildBackendFactory(cfg *Config, logger *slog.Logger) *storage.BackendFacto
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, sslMode,
 	)
-	if pgClient, err := postgres.NewClient(connStr, logger); err != nil {
+	// Give Postgres up to 3 minutes to become reachable — this covers the 30–60 s
+	// window where AWS RDS is "available" per API but not yet accepting connections.
+	pgCtx, pgCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer pgCancel()
+	if pgClient, err := postgres.NewClient(pgCtx, connStr, logger); err != nil {
 		logger.Warn("postgres unavailable; relational + kv queries will fail", "error", err)
 	} else {
 		relational = pgClient

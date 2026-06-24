@@ -22,7 +22,14 @@ import (
 func connectTestBackends(t *testing.T, logger *slog.Logger) *storage.BackendFactory {
 	t.Helper()
 
+	// Use a short context so the test skips quickly when Postgres isn't running
+	// (e.g. in CI without the docker-compose.test.yml stack). A generous timeout
+	// would block the test suite for minutes before the skip fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	pgClient, err := postgres.NewClient(
+		ctx,
 		"postgres://postgres:postgres@localhost:5433/agentify_test?sslmode=disable",
 		logger,
 	)
