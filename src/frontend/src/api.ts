@@ -201,6 +201,9 @@ export interface CertRenewResponse {
   ttl?: string;
   k8s_secret_updated?: boolean;
   k8s_secret?: string;
+  expires_at?: string;
+  days_until_expiry?: number;
+  dns_names?: string[];
 }
 
 // On-demand cert renewal — calls Vault PKI + updates K8s TLS Secret

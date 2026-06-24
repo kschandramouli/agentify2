@@ -106,6 +106,14 @@ class VaultCertSkill(K8fyAgent):
                 "pki_role":            result.get("pki_role"),
                 "k8s_secret_updated":  result.get("k8s_secret_updated"),
                 "k8s_secret":          result.get("k8s_secret"),
+                # New cert metadata — lets the backend update current data
+                # immediately without waiting for the next adapter scrape cycle.
+                "expires_at":          result.get("expires_at", ""),
+                "days_until_expiry":   result.get("days_until_expiry", 0),
+                "dns_names":           result.get("dns_names", []),
+                "common_name":         result.get("common_name", ""),
+                "namespace":           cfg.get("k8s_ns", ""),
+                "secret_name":         cfg.get("k8s_secret", ""),
             },
         )
 

@@ -1350,7 +1350,64 @@ func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
 		if v, ok := details["k8s_secret"].(string); ok {
 			resp.K8sSecret = v
 		}
+		if v, ok := details["expires_at"].(string); ok {
+			resp.ExpiresAt = v
+		}
+		if v, ok := details["days_until_expiry"].(float64); ok {
+			resp.DaysUntilExpiry = int(v)
+		}
+		if raw, ok := details["dns_names"].([]interface{}); ok {
+			for _, item := range raw {
+				if s, ok := item.(string); ok {
+					resp.DnsNames = append(resp.DnsNames, s)
+				}
+			}
+		}
 	}
+
+	// Write the new cert event directly to the events table so the next
+	// /api/query (triggered by onRenewed()) reads fresh expiry data immediately
+	// without waiting for the next adapter scrape cycle (default 5 minutes).
+	if resp.Status == "ok" && resp.ExpiresAt != "" {
+		secretName, _ := details["secret_name"].(string)
+		namespace, _ := details["namespace"].(string)
+		if secretName == "" {
+			secretName = req.Service + "-tls" // best-effort fallback
+		}
+		if namespace == "" {
+			namespace = req.Namespace
+		}
+		if relational, rerr := h.orch.GetBackendFactory().GetBackend("relational"); rerr == nil {
+			type certStorer interface {
+				Store(ctx context.Context, podID string, data map[string]interface{}) (string, error)
+			}
+			if cs, ok := relational.(certStorer); ok {
+				dnsNames := make([]interface{}, len(resp.DnsNames))
+				for i, d := range resp.DnsNames {
+					dnsNames[i] = d
+				}
+				certCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_, _ = cs.Store(certCtx, "k8fy.certificates", map[string]interface{}{
+					"entity_key":      secretName,
+					"event_namespace": "k8fy.certificates",
+					"type":            "cert_check",
+					"source":          "renew",
+					"payload": map[string]interface{}{
+						"secret":            secretName,
+						"namespace":         namespace,
+						"expires_at":        resp.ExpiresAt,
+						"days_until_expiry": resp.DaysUntilExpiry,
+						"should_renew":      false,
+						"dns_names":         dnsNames,
+					},
+				})
+				h.logger.Info("cert event seeded after renewal",
+					"secret", secretName, "expires_at", resp.ExpiresAt)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

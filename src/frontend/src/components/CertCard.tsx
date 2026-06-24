@@ -32,9 +32,16 @@ function CertRow({
   ctx?: ServiceContext;
   onRenewed?: () => void;
 }) {
-  const [renewing, setRenewing] = useState(false);
-  const [renewMsg, setRenewMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const sev = cert.urgency;
+  const [renewing, setRenewing]   = useState(false);
+  const [renewMsg, setRenewMsg]   = useState<{ ok: boolean; text: string } | null>(null);
+  // Optimistic update: store renewed cert data locally so the row shows the
+  // new expiry immediately rather than waiting for the full re-query.
+  const [renewed, setRenewed]     = useState<{ days: number; expiresAt: string } | null>(null);
+
+  // Use renewed data when available, otherwise show original cert data.
+  const displayDays      = renewed?.days      ?? cert.days;
+  const displayExpiresAt = renewed?.expiresAt ?? cert.expires_at;
+  const sev  = renewed ? "ok" : cert.urgency;
   const icon = sev === "ok" ? "✓" : sev === "warn" ? "⚠" : "✗";
 
   async function handleRenew() {
@@ -45,6 +52,11 @@ function CertRow({
       const res = await renewCert(ctx);
       if (res.status === "ok") {
         setRenewMsg({ ok: true, text: `Renewed — serial ${res.serial ?? "?"}, TTL ${res.ttl ?? "24h"}` });
+        // Optimistically update the displayed expiry from the renewal response
+        // so the user sees the new date immediately without waiting for re-query.
+        if (res.expires_at && res.days_until_expiry !== undefined) {
+          setRenewed({ days: res.days_until_expiry, expiresAt: res.expires_at });
+        }
         onRenewed?.();
       } else {
         setRenewMsg({ ok: false, text: res.message });
@@ -56,7 +68,7 @@ function CertRow({
     }
   }
 
-  const canRenew = !!ctx && cert.should_renew;
+  const canRenew = !!ctx && cert.should_renew && !renewed;
 
   return (
     <div className={`cert-row cert-row--${sev}`}>
@@ -94,15 +106,15 @@ function CertRow({
       <div className="cert-row__body">
         <div className="cert-row__days">
           <span className={`cert-row__days-num cert-row__days-num--${sev}`}>
-            {cert.days < 0 ? "expired" : `${cert.days}d`}
+            {displayDays < 0 ? "expired" : `${displayDays}d`}
           </span>
           <span className="muted cert-row__days-label">
-            {cert.days < 0 ? " ago" : " until expiry"}
+            {displayDays < 0 ? " ago" : " until expiry"}
           </span>
-          <DaysBar days={Math.max(0, cert.days)} threshold={threshold} />
+          <DaysBar days={Math.max(0, displayDays)} threshold={threshold} />
         </div>
         <div className="cert-row__expiry muted">
-          Expires {formatExpiry(cert.expires_at)}
+          Expires {formatExpiry(displayExpiresAt)}
         </div>
       </div>
 

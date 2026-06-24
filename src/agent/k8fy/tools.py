@@ -276,6 +276,29 @@ async def _vault_rotate_cert(
             cert_pem = data.get("certificate", "") + "\n" + data.get("issuing_ca", "")
             key_pem  = data.get("private_key", "")
 
+            # Parse expiry and DNS names from the newly issued cert so callers
+            # can update their data stores immediately without waiting for the
+            # next adapter scrape cycle (default 5 minutes).
+            expires_at_iso: str = ""
+            days_until_expiry: int = 0
+            dns_names: list = []
+            try:
+                from cryptography import x509 as _x509
+                from cryptography.x509.oid import ExtensionOID as _EXT
+                _cert_obj = _x509.load_pem_x509_certificate(cert_pem.encode())
+                _exp = getattr(_cert_obj, "not_valid_after_utc", None) or \
+                       _cert_obj.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+                expires_at_iso = _exp.isoformat()
+                days_until_expiry = (_exp - datetime.datetime.now(datetime.timezone.utc)).days
+                try:
+                    _san = _cert_obj.extensions.get_extension_for_oid(_EXT.SUBJECT_ALTERNATIVE_NAME)
+                    dns_names = [v.value for v in _san.value if isinstance(v, _x509.DNSName)]
+                except _x509.ExtensionNotFound:
+                    _cn = _cert_obj.subject.get_attributes_for_oid(_x509.NameOID.COMMON_NAME)
+                    dns_names = [_cn[0].value] if _cn else []
+            except Exception:
+                pass
+
             result: Dict[str, Any] = {
                 "status": "rotated",
                 "pki_mount": pki_mount,
@@ -283,6 +306,9 @@ async def _vault_rotate_cert(
                 "common_name": common_name,
                 "serial": serial,
                 "ttl": ttl,
+                "expires_at": expires_at_iso,
+                "days_until_expiry": days_until_expiry,
+                "dns_names": dns_names,
             }
 
             # 2. Update K8s TLS Secret via in-cluster API.

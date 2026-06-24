@@ -174,10 +174,15 @@ type CertRenewRequest struct {
 
 // CertRenewResponse is returned by POST /admin/certs/renew.
 type CertRenewResponse struct {
-	Status           string `json:"status"`                      // "ok" | "error"
-	Message          string `json:"message"`
-	Serial           string `json:"serial,omitempty"`
-	TTL              string `json:"ttl,omitempty"`
-	K8sSecretUpdated bool   `json:"k8s_secret_updated,omitempty"`
-	K8sSecret        string `json:"k8s_secret,omitempty"`
+	Status           string   `json:"status"`                      // "ok" | "error"
+	Message          string   `json:"message"`
+	Serial           string   `json:"serial,omitempty"`
+	TTL              string   `json:"ttl,omitempty"`
+	K8sSecretUpdated bool     `json:"k8s_secret_updated,omitempty"`
+	K8sSecret        string   `json:"k8s_secret,omitempty"`
+	// New cert metadata so the UI can update immediately without waiting for
+	// the next adapter scrape cycle (default 5 minutes).
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	DaysUntilExpiry  int      `json:"days_until_expiry,omitempty"`
+	DnsNames         []string `json:"dns_names,omitempty"`
 }
