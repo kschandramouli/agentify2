@@ -1388,7 +1388,10 @@ func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
 				}
 				certCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				_, _ = cs.Store(certCtx, "k8fy.certificates", map[string]interface{}{
+				eventData := map[string]interface{}{
+					// id and timestamp are required by Client.Store (events table PK/column).
+					"id":              uuid.New().String(),
+					"timestamp":       time.Now().UTC().Format(time.RFC3339),
 					"entity_key":      secretName,
 					"event_namespace": "k8fy.certificates",
 					"type":            "cert_check",
@@ -1401,9 +1404,13 @@ func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
 						"should_renew":      false,
 						"dns_names":         dnsNames,
 					},
-				})
-				h.logger.Info("cert event seeded after renewal",
-					"secret", secretName, "expires_at", resp.ExpiresAt)
+				}
+				if _, err := cs.Store(certCtx, "k8fy.certificates", eventData); err != nil {
+					h.logger.Warn("cert event seed after renewal failed", "error", err)
+				} else {
+					h.logger.Info("cert event seeded after renewal",
+						"secret", secretName, "expires_at", resp.ExpiresAt)
+				}
 			}
 		}
 	}
