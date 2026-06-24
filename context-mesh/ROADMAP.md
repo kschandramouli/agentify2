@@ -32,7 +32,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P5** | Pattern A standardisation across all skill classes (deterministic pre-fetch + single Claude call per intent) | **✅ Done (2026-06-11: all 5 skills on Pattern A; DiagnoseSkill advisor/executor removed; [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md))** | [spec 010](specs/010-skill-router.md), [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md) |
 | **P5+** | Supporting tooling: AI gateway (semantic cache/budgets), eval harness + tool-call budgets, agent tracing | Later | ops/spec |
 | **P6** | HashiCorp Vault integration — cert management + autonomous rotation | **✅ Scaffold done (2026-06-17)** — open items: Vault HA, Terraform provider, dynamic secrets |
-| **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **⚡ Immediate next** after Vault testing | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
+| **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **✅ Done (2026-06-25)** — `scripts/seed_eval_dataset.py` + `scripts/run_evals.py` + deploy.yml gate; `intent`+`tier` added to QueryResponse | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
 | **P8** | RAG + pgvector + semantic memory (third memory layer) | After P7 | [ADR 0018](decisions/0018-three-layer-memory-architecture.md) |
 | **P9** | PR review agent — second domain use case proving two-tier generalises | After P8 | — |
 | **P10** | Context management at scale — budget-aware truncation, summarisation | Alongside P9 | — |

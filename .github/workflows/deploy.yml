@@ -438,6 +438,44 @@ jobs:
         kill $PF_PID 2>/dev/null || true
         $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until the adapter re-emits events"
 
+    - name: Run eval regression suite
+      # Runs the k8fy-regression Langfuse dataset against the freshly deployed
+      # backend. Scores each item (intent routing, tier, status, required fields,
+      # latency) and fails the deploy if the mean score drops below 0.85.
+      # Skip when Langfuse credentials are not configured (opt-in per environment).
+      run: |
+        if [ -z "$LANGFUSE_PUBLIC_KEY" ] || [ -z "$LANGFUSE_SECRET_KEY" ]; then
+          echo "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set — skipping evals"
+          exit 0
+        fi
+
+        # Port-forward the backend so the script can reach it from the runner
+        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+        PF_PID=$!
+        # Wait up to 20s for the port-forward to be ready
+        for i in $(seq 1 4); do
+          sleep 5
+          curl -sf http://localhost:18080/health > /dev/null 2>&1 && break
+          echo "Waiting for port-forward... ($i/4)"
+        done
+
+        python scripts/run_evals.py \
+          --backend-url http://localhost:18080 \
+          --run-name "ci-${{ env.IMAGE_TAG }}" \
+          --pass-threshold 0.85
+        EVAL_EXIT=$?
+
+        kill $PF_PID 2>/dev/null || true
+
+        if [ $EVAL_EXIT -ne 0 ]; then
+          echo "Eval gate FAILED — see Langfuse UI for per-item breakdown"
+          exit 1
+        fi
+      env:
+        LANGFUSE_PUBLIC_KEY:  ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+        LANGFUSE_SECRET_KEY:  ${{ secrets.LANGFUSE_SECRET_KEY }}
+        LANGFUSE_BASE_URL:    ${{ secrets.LANGFUSE_BASE_URL }}
+
     - name: Debug pod state (always runs — helps diagnose failures)
       if: always()
       run: |

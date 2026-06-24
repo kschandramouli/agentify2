@@ -161,9 +161,13 @@ type QueryResponse struct {
 	Status     string                 `json:"status"`
 	Confidence float64                `json:"confidence"`
 	Sources    []string               `json:"sources"`
-	TraceID    string                 `json:"trace_id,omitempty"` // provenance correlation id (spec 004)
-	ToolCalls  []ToolCallInfo         `json:"tool_calls,omitempty"` // tools Claude called during reasoning
-	Details    map[string]interface{} `json:"details,omitempty"`    // structured data for UI rendering
+	TraceID    string                 `json:"trace_id,omitempty"`
+	ToolCalls  []ToolCallInfo         `json:"tool_calls,omitempty"`
+	Details    map[string]interface{} `json:"details,omitempty"`
+	// Eval-visible metadata: intent classification and tier used to answer.
+	// Included so eval harness can score routing decisions without a DB lookup.
+	Intent string `json:"intent,omitempty"`
+	Tier   string `json:"tier,omitempty"`
 }
 
 // CertRenewRequest is the payload for POST /admin/certs/renew.

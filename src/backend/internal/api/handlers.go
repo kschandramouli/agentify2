@@ -189,6 +189,8 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// agent when the intent needs synthesis or there's no data to evaluate.
 	if resp, handled := tryDeterministic(intent, podData, req.Context); handled {
 		resp.TraceID = traceID
+		resp.Intent  = intent
+		resp.Tier    = "tier1"
 		h.logger.Info("answered via deterministic fast-path", "intent", intent, "pods", len(pods))
 		telemetry.QueriesTotal.WithLabelValues(intent, "tier1", "ok").Inc()
 		telemetry.QueryDuration.WithLabelValues("tier1").Observe(time.Since(start).Seconds())
@@ -250,6 +252,8 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		TraceID:    traceID,
 		ToolCalls:  toolCalls,
 		Details:    agentResp.Details,
+		Intent:     intent,
+		Tier:       "tier2",
 	}
 	h.logTrace(traceID, req.Question, intent, namespace, "tier2", agentStatus, agentResp.Sources, agentResp.Confidence, toolCallNames(agentResp.ToolCalls), start, agentResp)
 
