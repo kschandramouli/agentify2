@@ -411,6 +411,29 @@ export function ServiceEvaluator() {
   const isBusy = state.phase !== "idle" && state.phase !== "done";
   const parsed = parseInput(raw);
 
+  // Targeted cert refresh — re-runs only the cert check and updates that
+  // single card, leaving the health card and Tier-2 diagnosis untouched.
+  // Used by CertCard after a renewal so the page doesn't fully reload.
+  async function refreshCerts() {
+    const ctx = state.ctx;
+    if (!ctx) return;
+    try {
+      const start = Date.now();
+      const resp = await checkCerts(ctx);
+      setState(prev => ({
+        ...prev,
+        checks: prev.checks.map(c =>
+          c.label === "TLS certificates"
+            ? { ...c, resp, durationMs: Date.now() - start }
+            : c
+        ),
+      }));
+    } catch {
+      // Fail silently — the optimistic update in CertRow already shows the
+      // new expiry; this is just a background confirmation from the backend.
+    }
+  }
+
   async function onDiagnose(e: FormEvent) {
     e.preventDefault();
     const ctx = parseInput(raw);
@@ -608,7 +631,7 @@ export function ServiceEvaluator() {
                   c.label === "Service health" && c.resp
                     ? <HealthCard key={i} resp={c.resp} durationMs={c.durationMs} />
                     : c.label === "TLS certificates" && c.resp
-                    ? <CertCard key={i} resp={c.resp} durationMs={c.durationMs} ctx={s.ctx} onRenewed={() => onDiagnose({ preventDefault: () => {} } as React.FormEvent)} />
+                    ? <CertCard key={i} resp={c.resp} durationMs={c.durationMs} ctx={s.ctx} onRenewed={refreshCerts} />
                     : <CheckCard key={i} result={c} />
                 )}
               </div>

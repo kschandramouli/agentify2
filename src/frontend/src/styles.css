@@ -1067,6 +1067,16 @@ code {
 .cert-row__days-label { font-size: 13px; color: var(--muted); }
 .cert-row__expiry     { font-size: 12px; color: var(--muted); }
 
+/* Flash animation when a cert is renewed — brief green highlight that fades */
+@keyframes cert-renewed-pulse {
+  0%   { color: #2db878; text-shadow: 0 0 8px rgba(45,184,120,0.6); }
+  60%  { color: #2db878; text-shadow: 0 0 4px rgba(45,184,120,0.3); }
+  100% { color: inherit;  text-shadow: none; }
+}
+.cert-renewed-flash {
+  animation: cert-renewed-pulse 2.4s ease-out forwards;
+}
+
 /* Days bar */
 .days-bar {
   flex: 1;

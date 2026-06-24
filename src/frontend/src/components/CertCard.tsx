@@ -105,7 +105,7 @@ function CertRow({
 
       <div className="cert-row__body">
         <div className="cert-row__days">
-          <span className={`cert-row__days-num cert-row__days-num--${sev}`}>
+          <span className={`cert-row__days-num cert-row__days-num--${sev}${renewed ? " cert-renewed-flash" : ""}`}>
             {displayDays < 0 ? "expired" : `${displayDays}d`}
           </span>
           <span className="muted cert-row__days-label">
@@ -113,7 +113,7 @@ function CertRow({
           </span>
           <DaysBar days={Math.max(0, displayDays)} threshold={threshold} />
         </div>
-        <div className="cert-row__expiry muted">
+        <div className={`cert-row__expiry muted${renewed ? " cert-renewed-flash" : ""}`}>
           Expires {formatExpiry(displayExpiresAt)}
         </div>
       </div>
