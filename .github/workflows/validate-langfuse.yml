@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install langfuse SDK
-        run: pip install -q "langfuse>=2.0.0"
+        run: pip install -q "langfuse>=2.0.0,<3.0.0"
 
       - name: Validate credentials and dataset
         env:

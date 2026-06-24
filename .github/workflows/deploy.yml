@@ -459,7 +459,7 @@ jobs:
           echo "Waiting for port-forward... ($i/4)"
         done
 
-        pip install -q "langfuse>=2.0.0" requests
+        pip install -q "langfuse>=2.0.0,<3.0.0" requests
 
         # Seed the dataset (idempotent — safe to run on every deploy;
         # uses stable item IDs so existing items are updated, not duplicated).

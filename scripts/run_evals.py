@@ -24,6 +24,7 @@ import argparse
 import os
 import sys
 import time
+import uuid
 from typing import Any
 
 import requests
@@ -150,16 +151,12 @@ def run_evals(backend_url: str, run_name: str, pass_threshold: float) -> bool:
         item_id: str               = item.id or "unknown"
 
         # ------------------------------------------------------------------
-        # 1. Create a Langfuse trace for this eval run item.
-        #    We create one trace per item so Langfuse groups them as a
-        #    "run" of the dataset that appears in the Experiments view.
+        # 1. Generate a trace ID.
+        #    We use the agentify trace_id from the response when available
+        #    so the Langfuse score links back to the production trace.
+        #    A local UUID is used as fallback before the query runs.
         # ------------------------------------------------------------------
-        trace = lf.trace(
-            name=f"eval.{item_id}",
-            input=item_input,
-            session_id=run_name,
-            tags=["eval", "ci"],
-        )
+        local_trace_id = str(uuid.uuid4())
 
         # ------------------------------------------------------------------
         # 2. Call agentify
@@ -178,45 +175,50 @@ def run_evals(backend_url: str, run_name: str, pass_threshold: float) -> bool:
             http_resp.raise_for_status()
             result = http_resp.json()
         except Exception as exc:
-            latency_ms = (time.time() - t0) * 1000
             result = {"error": str(exc), "status": "error", "answer": ""}
             print(f"  FAIL {item_id}  HTTP error: {exc}")
 
         latency_ms = (time.time() - t0) * 1000
+        # Prefer the agentify trace_id — it links to the Query History entry.
+        trace_id = result.get("trace_id") or local_trace_id
 
         # ------------------------------------------------------------------
-        # 3. Score
+        # 3. Score (local — this drives the CI gate, never fails on Langfuse)
         # ------------------------------------------------------------------
         score_val, detail = score_response(result, expected, latency_ms)
         scores.append(score_val)
 
         # ------------------------------------------------------------------
-        # 4. Update trace output and link to the dataset item
+        # 4. Report to Langfuse (optional — warn but never block the gate)
         # ------------------------------------------------------------------
-        trace.update(
-            output=result,
-            metadata={
-                "agentify_trace_id": result.get("trace_id", ""),
-                "score": score_val,
-                "detail": detail,
-                "latency_ms": round(latency_ms),
-            },
-        )
-
-        # Link this trace to the dataset item — creates an experiment "run"
-        # visible in Langfuse UI under Datasets → k8fy-regression → Runs
-        item.link(trace=trace, run_name=run_name)
-
-        # ------------------------------------------------------------------
-        # 5. Attach score to the Langfuse trace
-        # ------------------------------------------------------------------
-        lf.create_score(
-            name=SCORE_NAME,
-            value=score_val,
-            trace_id=trace.id,
-            data_type="NUMERIC",
-            comment=f"[{item_id}] {detail} | latency={latency_ms:.0f}ms",
-        )
+        try:
+            # Create a trace in Langfuse so the score has something to attach to.
+            # lf.trace() is a Langfuse v2 API; wrapped in try/except so that
+            # any v3 SDK changes don't break the CI gate.
+            lf_trace = lf.trace(
+                id=trace_id,
+                name=f"eval.{item_id}",
+                input=item_input,
+                output=result,
+                session_id=run_name,
+                tags=["eval", "ci"],
+                metadata={
+                    "agentify_trace_id": result.get("trace_id", ""),
+                    "score": score_val,
+                    "latency_ms": round(latency_ms),
+                },
+            )
+            item.link(trace=lf_trace, run_name=run_name)
+            lf.create_score(
+                name=SCORE_NAME,
+                value=score_val,
+                trace_id=lf_trace.id,
+                data_type="NUMERIC",
+                comment=f"[{item_id}] {detail} | latency={latency_ms:.0f}ms",
+            )
+        except Exception as lf_exc:
+            # Langfuse reporting failed — log it but don't fail the eval gate.
+            print(f"  WARN Langfuse reporting skipped for {item_id}: {lf_exc}")
 
         symbol = "✓" if score_val >= pass_threshold else "✗"
         print(
