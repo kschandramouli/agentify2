@@ -1,0 +1,77 @@
+# Validate Langfuse credentials stored in GitHub secrets.
+# Run manually from Actions → validate-langfuse → Run workflow.
+# Reports whether the connection succeeds and whether the eval dataset exists.
+
+name: Validate Langfuse secrets
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Check Langfuse connectivity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install langfuse SDK
+        run: pip install -q "langfuse>=2.0.0"
+
+      - name: Validate credentials and dataset
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL:   ${{ secrets.LANGFUSE_BASE_URL }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          from langfuse import Langfuse
+
+          pk  = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+          sk  = os.environ.get("LANGFUSE_SECRET_KEY", "")
+          url = os.environ.get("LANGFUSE_BASE_URL", "")
+
+          if not pk or pk == "":
+              print("FAIL: LANGFUSE_PUBLIC_KEY secret is not set or is empty")
+              sys.exit(1)
+          if not sk or sk == "":
+              print("FAIL: LANGFUSE_SECRET_KEY secret is not set or is empty")
+              sys.exit(1)
+          if not url:
+              print("WARN: LANGFUSE_BASE_URL not set — defaulting to https://us.cloud.langfuse.com")
+              url = "https://us.cloud.langfuse.com"
+
+          print(f"Connecting to Langfuse at {url} ...")
+          try:
+              lf = Langfuse(public_key=pk, secret_key=sk, base_url=url)
+              # auth() raises if credentials are invalid
+              lf.auth_check()
+              print("OK  credentials are valid")
+          except Exception as e:
+              print(f"FAIL: authentication error — {e}")
+              print("     Check the key values in Settings → Secrets → Actions")
+              sys.exit(1)
+
+          # Check whether the eval dataset has been seeded
+          print("\nChecking for eval dataset 'k8fy-regression' ...")
+          try:
+              ds = lf.get_dataset("k8fy-regression")
+              items = list(ds.items)
+              print(f"OK  dataset found — {len(items)} item(s)")
+              if len(items) < 10:
+                  print(f"WARN: expected 10 items, got {len(items)}")
+                  print("     Run:  python scripts/seed_eval_dataset.py")
+              else:
+                  print("     All 10 items present — eval harness is ready")
+          except Exception as e:
+              print(f"WARN: dataset not found — {e}")
+              print("     Seed it first:  python scripts/seed_eval_dataset.py")
+              print("     (This is not a credentials error — keys are valid)")
+
+          lf.flush()
+          print("\nValidation complete.")
+          EOF
