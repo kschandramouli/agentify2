@@ -31,6 +31,13 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P4c** | Investigation-on-anomaly loop (human-in-loop, **no** auto-remediation) | **✅ v1 done (2026-06-06: opt-in periodic deterministic sweep → diagnose → Slack-compatible webhook; namespace incident dedup + cooldown + per-sweep cap; redacted egress; read-only)** | [spec 009](specs/009-investigation-on-anomaly.md), [ADR 0016](decisions/0016-proactive-investigation-loop.md); respects [ADR 0003](decisions/0003-read-only-to-actions-boundary.md) |
 | **P5** | Pattern A standardisation across all skill classes (deterministic pre-fetch + single Claude call per intent) | **✅ Done (2026-06-11: all 5 skills on Pattern A; DiagnoseSkill advisor/executor removed; [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md))** | [spec 010](specs/010-skill-router.md), [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md) |
 | **P5+** | Supporting tooling: AI gateway (semantic cache/budgets), eval harness + tool-call budgets, agent tracing | Later | ops/spec |
+| **P6** | HashiCorp Vault integration — cert management + autonomous rotation | **✅ Scaffold done (2026-06-17)** — open items: Vault HA, Terraform provider, dynamic secrets |
+| **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **⚡ Immediate next** after Vault testing | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
+| **P8** | RAG + pgvector + semantic memory (third memory layer) | After P7 | [ADR 0018](decisions/0018-three-layer-memory-architecture.md) |
+| **P9** | PR review agent — second domain use case proving two-tier generalises | After P8 | — |
+| **P10** | Context management at scale — budget-aware truncation, summarisation | Alongside P9 | — |
+| **P11** | Multi-provider routing: Bedrock stub | After P9 | [ADR 0008](decisions/0008-multi-provider-model-routing.md) |
+| **P12** | Multi-turn conversational chat — dedicated Chat nav page | After P11 | Architecture decided 2026-06-17 |
 
 ---
 
@@ -358,6 +365,241 @@ agentify Investigate / K8s Observability
 - **Vault Enterprise** — namespace isolation per tenant (aligns with P3a)
 - **Dynamic secrets** — extend VaultCertSkill to manage DB credentials, not just TLS
 - **Audit log integration** — stream Vault audit logs into agentify event store for anomaly detection
+
+---
+
+## Post-Vault Gap Analysis (2026-06-17)
+
+> Items P7–P12 were identified through a structured technical review against
+> senior LLM-engineer evaluation criteria. They are ordered by impact on demonstrable
+> architectural depth, not by implementation complexity. P7 (eval harness) must ship
+> first — it gates credibility of everything else.
+
+---
+
+## P7 — Eval Harness as CI Gate ⚡ Immediate priority
+
+**Hard truth:** The eval harness has been listed as P5+ since day one and is the
+most damaging gap in the portfolio. The feedback explicitly praised evaluation pipeline
+work. Agentify has no eval code — only a roadmap line. This must be fixed first.
+
+**Prerequisite met:** All five skills are on Pattern A (ADR 0017). The infrastructure
+is in place (Langfuse wired, `trace_id` returned, `query.trace` logged). The missing
+piece is the test dataset and CI step.
+
+**Acceptance criteria:**
+- Langfuse dataset `k8fy-regression` with ≥ 10 (query, ground-truth) pairs covering
+  all intent classes
+- `scripts/run_evals.py` — POSTs each query to `/api/query`, scores against ground
+  truth (intent, tier, status, required fields, latency), records score against
+  `trace_id` in Langfuse
+- CI step in `deploy.yml` that runs the eval post-rollout and blocks on score < 0.85
+- Scores visible in Langfuse UI alongside production traces
+
+**Architecture:** See [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md).
+
+---
+
+## P8 — RAG + Semantic Memory (pgvector)
+
+**Hard truth:** RAG is explicitly listed as a required production LLM pattern in
+evaluation criteria. Agentify deferred pgvector as YAGNI (ADR 0010). That decision
+was correct at the time; it is no longer correct.
+
+**What it does:** Embeds diagnostic outputs at trace-persist time. When a `diagnose`
+query fires, the pre-fetch sequence retrieves the top-3 semantically similar past
+incidents and injects their summaries into the Claude call context. The system learns
+from its own history — a second incident with the same root cause gets a higher-
+confidence diagnosis faster.
+
+**Architecture:**
+```
+Trace persisted (Tier-2 answer stored)
+  → async embed(headline + findings + likely_cause) via Haiku
+  → INSERT INTO incident_embeddings (trace_id, embedding, summary, ...)
+
+DiagnoseSkill._prefetch() [Pattern A, new signal]
+  get_similar_incidents(service, namespace, description)
+    → SELECT ... ORDER BY embedding <-> $query_vec LIMIT 3
+
+Claude sees: "Similar past incidents: [date, likely_cause, what resolved it]"
+```
+
+**Implementation steps:**
+1. Enable `pgvector` extension on RDS (`CREATE EXTENSION IF NOT EXISTS vector`)
+2. Add `incident_embeddings` table (migration in `initSchema`)
+3. Async embed goroutine in `logTrace` — calls a new `/embed` endpoint on the agent
+4. New `get_similar_incidents` tool in `tools.py`
+5. Add tool to `DiagnoseSkill._prefetch()` pre-fetch sequence
+6. Add `DIAGNOSE_REASONING_SCHEMA` field for `similar_incidents` context
+
+**See also:** [ADR 0018](decisions/0018-three-layer-memory-architecture.md) — formal
+definition of the three-layer memory model this completes.
+
+---
+
+## P8b — Memory Architecture: Reframe and Document
+
+**The reframe:** agentify already has two of the three memory layers. The third
+(semantic) is what P8 adds. Once P8 ships, the full architecture is:
+
+| Layer | What it is | Where in agentify |
+|-------|-----------|-------------------|
+| **Working memory** | In-request context; K8s signals pre-fetched by Pattern A | Pattern A skill pre-fetch; multi-turn session cache (P12) |
+| **Episodic memory** | Time-ordered append-only event history | `events` table: `k8fy.metrics`, `k8fy.events`, `k8fy.certs` |
+| **Semantic memory** | Vector retrieval over past incident knowledge | `incident_embeddings` + pgvector (P8) |
+
+**Action:** After P8 ships, update the architecture documentation and any public-
+facing descriptions to lead with this three-layer framing. It is a defensible and
+demonstrable architectural pattern — not just a feature list.
+
+---
+
+## P9 — PR Review Agent (second domain use case)
+
+**Hard truth:** The JD lists PR review as the primary use case. Agentify is K8s
+observability only. Without at least one demonstrable artifact outside K8s, the
+portfolio reads as narrow.
+
+**Architectural conviction:** The same two-tier pattern generalises. PR review is
+not a different architecture — it is the same architecture on a different domain:
+
+```
+Tier-1 (deterministic):
+  - File count delta
+  - Test coverage delta (from CI metadata)
+  - Dependency changes (package-lock.json / go.sum diff)
+  - Binary/generated file changes
+  → Returns structured flags: [{severity, file, reason}]
+
+Tier-2 (LLM, only if Tier-1 finds issues or query requests deep review):
+  - CodeReviewSkill (Pattern A)
+  - Pre-fetch: diff, related test files, historical PR patterns
+  - One Claude call → structured findings [{file, line, severity, explanation, suggestion}]
+```
+
+**Why it matters beyond the interview:** This proves the architectural thesis of agentify
+is generalisable infrastructure, not a single-purpose K8s tool. It is the foundation
+for positioning agentify as a "developer intelligence platform" vs a K8s monitoring tool.
+
+**MVP scope:**
+- GitHub webhook receiver (or on-demand `POST /api/review { repo, pr_number }`)
+- `inferIntent` extended to recognise `pr_review` intent
+- `PRReviewSkill` following Pattern A (fetch diff + test delta → one Claude call)
+- `PRReviewCard` component in the frontend (same structure as `DiagnosisCard`)
+
+---
+
+## P10 — Context Management at Scale
+
+**Hard truth:** Pattern A is a cost optimisation (deterministic pre-fetch → one call).
+It is not a context management strategy. At scale, the signals it injects (full logs,
+full event history, full restart metrics) can easily fill a 50k-token context. The
+system has no budget-aware truncation, no hierarchical summarisation, no selective
+retrieval. This was identified as a specific gap in the technical review.
+
+**What needs to be added:**
+
+1. **Context budget per skill** — each Pattern A skill has a `MAX_CONTEXT_TOKENS`
+   constant. If pre-fetched data exceeds the budget, truncate deterministically
+   (most-recent events first; truncate logs to last N lines; drop metrics beyond
+   a configurable window). Log the truncation so it is visible in traces.
+
+2. **Hierarchical summarisation trigger** — for multi-turn chat sessions (P12):
+   after 20 turns, automatically summarise the early history into a compact block
+   that replaces it. This is the same pattern as `compact_20260112` in the Anthropic
+   API — implement at the application level as a fallback.
+
+3. **Budget-aware tool selection** — in the `_reason_single` agentic path (general
+   queries), track remaining context budget after each tool call. Stop calling tools
+   when `budget_remaining < MIN_SYNTHESIS_TOKENS`. This converts Pattern A's static
+   pre-fetch into a dynamic version.
+
+**Framing for technical interviews:** "Pattern A enforces a deterministic context
+budget — we pre-fetch exactly the signals we need and nothing more. The agentic path
+adds budget tracking to prevent runaway context growth. Summarisation is triggered at
+session boundaries, not per-call."
+
+---
+
+## P11 — Multi-Provider Routing: Bedrock Stub
+
+**Hard truth:** ADR 0008 deferred Bedrock/Vertex until a client requires it. That is
+the correct production decision. For demonstrability, the implementation is missing.
+Evaluators ask "have you actually implemented provider switching?" — "yes, the
+architecture supports it" is a weaker answer than "yes, here's the Bedrock client."
+
+**Minimum viable implementation:**
+- Add `AnthropicBedrock` client path in `config/claude_client.py`
+  (uses `anthropic.AnthropicBedrock(region_name=...)`)
+- Wire via `CLAUDE_PROVIDER=bedrock` env var
+- Test that one skill (HealthSkill) works end-to-end on Bedrock
+- Document the model ID change: `claude-opus-4-8` → `anthropic.claude-opus-4-8`
+
+This is a single file change + one integration test. The architecture is already
+designed (ADR 0008). Execution is all that is missing.
+
+**See also:** [ADR 0008](decisions/0008-multi-provider-model-routing.md) — full
+provider routing design. The stub activates the `BEDROCK` branch of that ADR.
+
+---
+
+## P12 — Multi-Turn Conversational Chat (Dedicated Chat Page)
+
+**Decision:** Implement as a **dedicated admin nav item** ("Chat"), not integrated
+into the existing K8s Observability ServiceEvaluator flow. Rationale: clean separation
+of interaction paradigms; supports open-ended questions not tied to a specific service;
+simpler to build and test independently.
+
+**Architecture decisions confirmed (2026-06-17):**
+
+| Concern | Decision | Rationale |
+|---------|----------|-----------|
+| Transport | HTTP POST (send turn) + SSE (receive stream) | Simpler than WebSocket; works through ALB; browser auto-reconnects SSE |
+| Session state | Postgres `chat_sessions` + Go `sync.Map` write-through cache | Survives pod restarts; any pod can serve a session |
+| K8s context | Cache K8s signals in session (5-min TTL), explicit refresh on demand | Avoids re-fetching on every turn; "show me the latest data" triggers refresh |
+| Tier routing | Multi-turn always Tier-2; Tier-1 data seeded as opening context | Tier-1 is single-shot by design; conversation is inherently Tier-2 |
+| Context window | Full history + prompt caching; summarise at 20 turns | Cache makes marginal per-turn cost small; summarisation prevents runaway cost |
+| Frontend | New `ChatPanel` component + `ChatNavItem` in admin sidebar | Dedicated page with message thread, streaming tokens, typing indicator |
+
+**New endpoints:**
+```
+POST /api/chat/sessions          → create session { session_id }
+POST /api/chat/{id}/messages     → send user turn { message_id }
+GET  /api/chat/{id}/stream       → SSE: token stream for current turn
+GET  /api/chat/{id}/history      → full conversation history
+DELETE /api/chat/{id}            → close session
+```
+
+**New Postgres table:**
+```sql
+CREATE TABLE chat_sessions (
+    id                 TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL DEFAULT '',
+    service            TEXT NOT NULL DEFAULT '',
+    summary            TEXT NOT NULL DEFAULT '',  -- summarised old history
+    messages           JSONB NOT NULL DEFAULT '[]',
+    context_cache      JSONB NOT NULL DEFAULT '{}',
+    context_fetched_at TIMESTAMP,
+    created_at         TIMESTAMP DEFAULT NOW(),
+    last_active        TIMESTAMP DEFAULT NOW(),
+    expires_at         TIMESTAMP
+);
+```
+
+**Implementation stages (do not skip stages):**
+
+| Stage | What | Validation |
+|-------|------|-----------|
+| 1 | Session CRUD (Postgres table + Go endpoints) | `POST /sessions` returns 200, `GET /history` returns empty array |
+| 2 | Non-streaming multi-turn (full response, no SSE) | Conversation works end-to-end; history grows correctly |
+| 3 | Streaming (SSE from Python agent → Go → frontend) | Tokens appear progressively in ChatPanel |
+| 4 | K8s context cache + Tier-1 seed on session start | Session opens with pod health pre-loaded |
+| 5 | Summarisation at 20 turns | Long sessions compress without losing context |
+
+**See also:** Architecture discussion in project conversation history (2026-06-17).
+
+---
 
 ## Frontend — ops console (not a reviewer P-item; foundational gap)
 
