@@ -658,6 +658,18 @@ func inferIntent(question string) string {
 	if strings.Contains(lower, "metric") || strings.Contains(lower, "cpu") || strings.Contains(lower, "memory") {
 		return "metrics_query"
 	}
+	// Change / deploy history: captures "what changed", "recent deploy", "rollout history"
+	for _, kw := range []string{"what changed", "what deploy", "recent deploy", "deploy history", "rollout history", "change history", "recently deployed", "recently changed"} {
+		if strings.Contains(lower, kw) {
+			return "change_history"
+		}
+	}
+	// Restart / metrics history: captures "restart trend", "restart history", "restart count"
+	for _, kw := range []string{"restart trend", "restart history", "restart count", "restart metric", "restart spike"} {
+		if strings.Contains(lower, kw) {
+			return "metrics_history"
+		}
+	}
 	return "general_query"
 }
 

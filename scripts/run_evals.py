@@ -170,7 +170,7 @@ def run_evals(backend_url: str, run_name: str, pass_threshold: float) -> bool:
             http_resp = session.post(
                 f"{backend_url}/api/query",
                 json=query_body,
-                timeout=30,
+                timeout=90,   # Tier-2 Opus calls can take 30-90s
             )
             http_resp.raise_for_status()
             result = http_resp.json()
@@ -208,7 +208,7 @@ def run_evals(backend_url: str, run_name: str, pass_threshold: float) -> bool:
                     "latency_ms": round(latency_ms),
                 },
             )
-            item.link(trace=lf_trace, run_name=run_name)
+            item.link(lf_trace, run_name)  # positional — v2 doesn't accept trace= kwarg
             lf.create_score(
                 name=SCORE_NAME,
                 value=score_val,
