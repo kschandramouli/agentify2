@@ -459,6 +459,8 @@ jobs:
           echo "Waiting for port-forward... ($i/4)"
         done
 
+        pip install -q "langfuse>=2.0.0" requests
+
         python scripts/run_evals.py \
           --backend-url http://localhost:18080 \
           --run-name "ci-${{ env.IMAGE_TAG }}" \
