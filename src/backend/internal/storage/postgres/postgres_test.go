@@ -24,7 +24,12 @@ func startEmbedded(t *testing.T) *Client {
 	}
 	t.Cleanup(func() { _ = pg.Stop() })
 
+	// Embedded-postgres is already running on port 54329 at this point, so a
+	// short context is fine — no retry delay expected.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	client, err := NewClient(
+		ctx,
 		"host=localhost port=54329 user=postgres password=postgres dbname=agentify_test sslmode=disable",
 		slog.New(slog.NewTextHandler(nopWriter{}, nil)),
 	)
