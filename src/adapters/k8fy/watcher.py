@@ -162,9 +162,10 @@ class K8sWatcher:
                     cert_b64 = (secret.data or {}).get("tls.crt")
                     if not cert_b64:
                         continue
-                    expires_at = _parse_cert_expiry(cert_b64)
+                    expires_at, dns_names = _parse_cert_info(cert_b64)
                     canonical = normalizer.normalize_certificate_event(
-                        secret.metadata.name, secret.metadata.namespace, expires_at
+                        secret.metadata.name, secret.metadata.namespace,
+                        expires_at, dns_names
                     )
                     self._emitter.emit(canonical)
             except Exception as exc:  # noqa: BLE001
@@ -211,15 +212,45 @@ class K8sWatcher:
         return ns in _SYSTEM_NAMESPACES
 
 
-def _parse_cert_expiry(cert_b64: str) -> Optional[datetime]:
-    """Decode a base64 PEM certificate and return its NotAfter (UTC), or None."""
+def _parse_cert_info(cert_b64: str) -> tuple[Optional[datetime], list[str]]:
+    """Decode a base64 PEM certificate and return (NotAfter UTC, DNS names).
+
+    DNS names are taken from the Subject Alternative Name extension (preferred)
+    and fall back to the Subject CN when no SAN extension is present.
+    Returns (None, []) on any parse error.
+    """
     try:
         pem_bytes = base64.b64decode(cert_b64)
         cert = x509.load_pem_x509_certificate(pem_bytes)
+
+        # Expiry
         expires = getattr(cert, "not_valid_after_utc", None)
         if expires is None:
             expires = cert.not_valid_after.replace(tzinfo=timezone.utc)
-        return expires
+
+        # DNS names: SANs first, Subject CN as fallback
+        dns_names: list[str] = []
+        try:
+            from cryptography.x509.oid import ExtensionOID
+            san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+            dns_names = [
+                v.value for v in san.value
+                if isinstance(v, x509.DNSName)
+            ]
+        except x509.ExtensionNotFound:
+            pass
+        if not dns_names:
+            cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+            if cn_attrs:
+                dns_names = [cn_attrs[0].value]
+
+        return expires, dns_names
     except Exception as exc:  # noqa: BLE001
         logger.warning("failed to parse certificate", extra={"error": str(exc)})
-        return None
+        return None, []
+
+
+def _parse_cert_expiry(cert_b64: str) -> Optional[datetime]:
+    """Kept for backward compatibility — prefer _parse_cert_info."""
+    expires, _ = _parse_cert_info(cert_b64)
+    return expires

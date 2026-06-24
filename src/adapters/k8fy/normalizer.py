@@ -167,7 +167,10 @@ def normalize_deploy_event(deployment: Any, revision: str) -> dict[str, Any]:
 
 
 def normalize_certificate_event(
-    secret_name: str, namespace: str, expires_at: Optional[datetime]
+    secret_name: str,
+    namespace: str,
+    expires_at: Optional[datetime],
+    dns_names: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Convert a TLS secret's expiry into a canonical event."""
     days_until_expiry: Optional[int] = None
@@ -182,6 +185,7 @@ def normalize_certificate_event(
         "expires_at": expires_iso,
         "days_until_expiry": days_until_expiry,
         "should_renew": days_until_expiry is not None and days_until_expiry < 30,
+        "dns_names": dns_names or [],
     }
     return _canonical_event(
         event_namespace="k8fy.certificates",

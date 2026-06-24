@@ -63,8 +63,15 @@ function CertRow({
       <div className="cert-row__header">
         <span className={`cert-row__icon cert-row__icon--${sev}`}>{icon}</span>
         <span className="cert-row__name">
-          {cert.namespace && <span className="cert-row__ns muted">{cert.namespace}/</span>}
-          <code>{cert.name}</code>
+          <span className="cert-row__secret">
+            {cert.namespace && <span className="cert-row__ns muted">{cert.namespace}/</span>}
+            <code>{cert.name}</code>
+          </span>
+          {cert.dns_names && cert.dns_names.length > 0 && (
+            <span className="cert-row__dns muted" title={cert.dns_names.join(", ")}>
+              {cert.dns_names[0]}
+            </span>
+          )}
         </span>
         {cert.should_renew && !renewMsg?.ok && (
           <span className={`badge badge--${sev}`}>renew now</span>

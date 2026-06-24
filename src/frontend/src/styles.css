@@ -1047,8 +1047,10 @@ code {
 .cert-row__icon--ok   { color: var(--ok); }
 .cert-row__icon--warn { color: var(--warn); }
 .cert-row__icon--crit { color: var(--crit); }
-.cert-row__ns   { font-size: 12px; color: var(--muted); }
-.cert-row__name { font-size: 13px; font-weight: 500; }
+.cert-row__ns     { font-size: 12px; color: var(--muted); }
+.cert-row__name   { font-size: 13px; font-weight: 500; display: flex; flex-direction: column; gap: 2px; }
+.cert-row__secret { display: flex; align-items: center; gap: 2px; }
+.cert-row__dns    { font-size: 11.5px; font-family: ui-monospace, monospace; color: var(--muted); padding-left: 2px; }
 
 .cert-row__body {
   padding-left: 26px;

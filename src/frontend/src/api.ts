@@ -9,6 +9,7 @@ export interface CertDetail {
   expires_at: string;
   reason: string;
   urgency: "ok" | "warn" | "crit";
+  dns_names?: string[];
 }
 
 export interface PodDetail {

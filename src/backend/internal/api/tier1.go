@@ -158,6 +158,7 @@ func tier1Cert(podData map[string]interface{}, serviceHint string) (QueryRespons
 		expiresAt   string
 		reason      string
 		namespace   string
+		dnsNames    []string
 	}
 
 	// Collect all certs (deduped — first entry per name is most recent).
@@ -171,9 +172,19 @@ func tier1Cert(podData map[string]interface{}, serviceHint string) (QueryRespons
 		renew, days, reason := evaluator.CertRenewal(payload)
 		expiresAt, _ := payload["expires_at"].(string)
 		ns, _ := payload["namespace"].(string)
+		// dns_names is stored as []interface{} by the JSON round-trip.
+		var dnsNames []string
+		if raw, ok := payload["dns_names"].([]interface{}); ok {
+			for _, v := range raw {
+				if s, ok := v.(string); ok && s != "" {
+					dnsNames = append(dnsNames, s)
+				}
+			}
+		}
 		allCerts = append(allCerts, certResult{
 			entity: entity, shouldRenew: renew, days: days,
 			expiresAt: expiresAt, reason: reason, namespace: ns,
+			dnsNames: dnsNames,
 		})
 	})
 
@@ -238,6 +249,9 @@ func tier1Cert(podData map[string]interface{}, serviceHint string) (QueryRespons
 			"name": c.entity, "namespace": c.namespace,
 			"should_renew": c.shouldRenew, "days": c.days,
 			"expires_at": c.expiresAt, "reason": c.reason, "urgency": urgency,
+			// dns_names: SANs / CN extracted from the cert at scrape time so the
+			// UI can show the cluster DNS identity alongside the K8s secret name.
+			"dns_names": c.dnsNames,
 		})
 	}
 
