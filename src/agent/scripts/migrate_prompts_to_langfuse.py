@@ -57,7 +57,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    lf = Langfuse(public_key=public_key, secret_key=secret_key, base_url=base_url)
+    lf = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url)
     print(f"Connected to Langfuse at {base_url}\n")
 
     for name, content in PROMPTS:

@@ -192,7 +192,7 @@ def _lf_client() -> Langfuse:
             file=sys.stderr,
         )
         sys.exit(1)
-    return Langfuse(public_key=public_key, secret_key=secret_key, base_url=base_url)
+    return Langfuse(public_key=public_key, secret_key=secret_key, host=base_url)
 
 
 def main() -> None:

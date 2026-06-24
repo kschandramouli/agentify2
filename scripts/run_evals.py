@@ -123,7 +123,7 @@ def run_evals(backend_url: str, run_name: str, pass_threshold: float) -> bool:
         )
         return False
 
-    lf = Langfuse(public_key=public_key, secret_key=secret_key, base_url=base_url)
+    lf = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url)
 
     try:
         dataset = lf.get_dataset(DATASET_NAME)
