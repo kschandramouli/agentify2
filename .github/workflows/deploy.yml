@@ -461,6 +461,10 @@ jobs:
 
         pip install -q "langfuse>=2.0.0" requests
 
+        # Seed the dataset (idempotent — safe to run on every deploy;
+        # uses stable item IDs so existing items are updated, not duplicated).
+        python scripts/seed_eval_dataset.py
+
         python scripts/run_evals.py \
           --backend-url http://localhost:18080 \
           --run-name "ci-${{ env.IMAGE_TAG }}" \
