@@ -55,7 +55,29 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 }
 
 // HandleHealth responds with service health status.
+// Returns 503 when the Postgres backend is configured but not yet reachable so
+// that the K8s readiness probe holds traffic until the DB connection is healthy.
+// This prevents the "empty namespace autocomplete + empty Query History" symptom
+// caused by the pod receiving traffic before the RDS connection succeeds after a
+// scale-up resume cycle.
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	// If a trace store is wired, verify the DB connection is live.
+	if checker, ok := h.traceStore.(interface {
+		HealthCheck(ctx context.Context) error
+	}); ok {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := checker.HealthCheck(ctx); err != nil {
+			h.logger.Warn("health check: postgres not reachable", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status": "degraded",
+				"reason": "postgres unavailable",
+			})
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

@@ -28,13 +28,37 @@ type Client struct {
 }
 
 // NewClient opens the connection and initializes both schemas.
+// NewClient opens the connection and initializes both schemas.
+// It retries the initial ping with exponential back-off for up to 2 minutes so
+// that the backend survives the 30–60 s window where AWS RDS is marked "available"
+// but not yet accepting TCP connections — the common cause of both the namespace
+// autocomplete and Query History being empty after a scale-up / resume cycle.
 func NewClient(connStr string, logger *slog.Logger) (*Client, error) {
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open postgres: %w", err)
 	}
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping postgres: %w", err)
+
+	// Retry the initial ping: 8 attempts with 15 s intervals = 2 minutes ceiling.
+	// Each failure is logged at WARN so the cause is visible in CloudWatch.
+	const (
+		maxAttempts   = 8
+		retryInterval = 15 * time.Second
+	)
+	var pingErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if pingErr = db.Ping(); pingErr == nil {
+			break
+		}
+		logger.Warn("postgres not ready, will retry",
+			"attempt", attempt, "max", maxAttempts, "error", pingErr)
+		if attempt < maxAttempts {
+			time.Sleep(retryInterval)
+		}
+	}
+	if pingErr != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("postgres unavailable after %d attempts: %w", maxAttempts, pingErr)
 	}
 
 	c := &Client{db: db, logger: logger}
@@ -167,6 +191,7 @@ func (c *Client) initSchema(ctx context.Context) error {
 func (c *Client) CurrentStateStore() *CurrentState {
 	return &CurrentState{db: c.db, logger: c.logger}
 }
+
 
 // --- Relational (append-only) store: Client itself ---
 
