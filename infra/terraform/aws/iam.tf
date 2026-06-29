@@ -59,7 +59,7 @@ resource "aws_iam_policy" "backend_dynamodb" {
   })
 }
 
-# Agent: only needs Secrets Manager (ANTHROPIC_API_KEY)
+# Agent: Secrets Manager — ANTHROPIC_API_KEY + Langfuse prompt-management keys
 module "agent_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
@@ -86,7 +86,10 @@ resource "aws_iam_policy" "agent_secrets" {
       {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-        Resource = [aws_secretsmanager_secret.anthropic.arn]
+        Resource = [
+          aws_secretsmanager_secret.anthropic.arn,
+          aws_secretsmanager_secret.langfuse.arn,
+        ]
       }
     ]
   })

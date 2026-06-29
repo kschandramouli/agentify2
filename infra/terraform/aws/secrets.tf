@@ -7,6 +7,7 @@
 #   agentify/dev/db          — Postgres connection details (auto-populated)
 #   agentify/dev/anthropic   — ANTHROPIC_API_KEY (fill manually)
 #   agentify/dev/adapter     — ADAPTER_AUTH_TOKEN (fill manually or generate)
+#   agentify/dev/langfuse    — LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY (fill manually)
 
 resource "aws_secretsmanager_secret" "db" {
   name                    = "${var.project}/${var.env}/db"
@@ -49,4 +50,14 @@ resource "aws_secretsmanager_secret" "adapter" {
 resource "aws_secretsmanager_secret_version" "adapter" {
   secret_id     = aws_secretsmanager_secret.adapter.id
   secret_string = jsonencode({ token = random_password.adapter_token.result })
+}
+
+# Langfuse API keys — used by the agent for prompt management (k8fy/* prompts).
+# Fill the secret value manually after terraform apply:
+#   aws secretsmanager put-secret-value \
+#     --secret-id agentify/dev/langfuse \
+#     --secret-string '{"LANGFUSE_PUBLIC_KEY":"pk-lf-...","LANGFUSE_SECRET_KEY":"sk-lf-..."}'
+resource "aws_secretsmanager_secret" "langfuse" {
+  name                    = "${var.project}/${var.env}/langfuse"
+  recovery_window_in_days = var.env == "prod" ? 7 : 0
 }
