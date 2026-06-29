@@ -182,6 +182,28 @@ jobs:
         echo "Manifests updated — sample backend image:"
         grep "image:" infra/kubernetes/backend.yaml | head -1
 
+    - name: Wait for AWS Load Balancer Controller webhook
+      # The AWS LBC registers a mutating webhook for Services. After a scale-up
+      # the LBC pod can take 60-120s to reschedule. If it has no endpoints the
+      # webhook call fails and any Helm chart that creates Services (including Vault)
+      # errors out. Wait up to 3 minutes, then delete the stale webhook config so
+      # the install can proceed (LBC will re-register it once its pod is ready).
+      run: |
+        echo "Checking AWS Load Balancer Controller webhook health..."
+        for i in $(seq 1 18); do
+          READY=$(kubectl get deployment aws-load-balancer-controller -n kube-system \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+          if [ "${READY:-0}" -ge 1 ]; then
+            echo "AWS LBC ready ($READY replicas) — proceeding"
+            exit 0
+          fi
+          echo "  LBC not ready yet (attempt $i/18, readyReplicas=${READY:-0})"
+          sleep 10
+        done
+        echo "AWS LBC did not become ready in 3 minutes — deleting stale webhook so Helm can proceed"
+        echo "WARNING: Services will be created without LBC mutation; LBC will reconcile once it restarts"
+        kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+
     - name: Install/upgrade HashiCorp Vault
       run: |
         helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
