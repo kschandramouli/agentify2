@@ -38,6 +38,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P10** | Context management at scale — budget-aware truncation, summarisation | Alongside P9 | — |
 | **P11** | Multi-provider routing: Bedrock stub | After P9 | [ADR 0008](decisions/0008-multi-provider-model-routing.md) |
 | **P12** | Multi-turn conversational chat — dedicated Chat nav page | After P11 | Architecture decided 2026-06-17 |
+| **P13** | Agentic use cases expansion | After P12 | [spec 011](specs/011-agentic-use-cases.md) |
 
 ---
 
