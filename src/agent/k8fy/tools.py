@@ -190,6 +190,38 @@ TOOLS = [
             "required": ["pki_role", "common_name"],
         },
     },
+    # ── Semantic memory tool (P8) ─────────────────────────────────────────────
+    {
+        "name": "get_similar_incidents",
+        "description": (
+            "Retrieve past incidents that are semantically similar to the current one. "
+            "Returns a list of prior diagnoses with their headlines, likely causes, and "
+            "resolution notes. Use at the start of a diagnose task to surface patterns "
+            "from historical incidents and provide higher-confidence root-cause analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {
+                    "type": "string",
+                    "description": "Kubernetes namespace to scope the search (e.g. 'payments').",
+                },
+                "service": {
+                    "type": "string",
+                    "description": "Service name to scope the search (e.g. 'payment-worker').",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short description of the current incident used as the similarity query.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of similar incidents to return (default 3).",
+                },
+            },
+            "required": ["namespace", "service", "description"],
+        },
+    },
 ]
 
 # ── Vault tool implementations ────────────────────────────────────────────────
@@ -353,6 +385,51 @@ async def _vault_rotate_cert(
         return {"error": f"Vault rotation failed: {e}"}
 
 
+async def _get_similar_incidents(
+    backend_url: str,
+    namespace: str,
+    service: str,
+    description: str,
+    limit: int = 3,
+) -> Dict[str, Any]:
+    """Query the backend for past incidents similar to the current description.
+
+    If Voyage AI is configured the backend will have populated vector embeddings
+    and returns cosine-similarity results. Otherwise falls back to recent incidents
+    in the same namespace/service.
+    """
+    from config.settings import get_settings
+    import urllib.parse
+
+    settings = get_settings()
+    params: Dict[str, Any] = {"namespace": namespace, "service": service, "limit": limit}
+
+    # Optionally embed the description to enable vector search.
+    if settings.voyage_api_key and description:
+        try:
+            import voyageai
+            client = voyageai.Client(api_key=settings.voyage_api_key)
+            result = client.embed([description], model=settings.voyage_model)
+            vec = result.embeddings[0]
+            params["vec"] = ",".join(f"{v:.6f}" for v in vec)
+        except Exception as exc:
+            logger.debug("embed for similarity query failed: %s", exc)
+
+    qs = urllib.parse.urlencode(params)
+    url = f"{backend_url.rstrip('/')}/api/incidents/similar?{qs}"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                incidents = resp.json()
+                if not incidents:
+                    return {"similar_incidents": [], "note": "No past incidents found for this service."}
+                return {"similar_incidents": incidents}
+            return {"similar_incidents": [], "note": f"Backend returned {resp.status_code}"}
+    except Exception as exc:
+        return {"similar_incidents": [], "error": str(exc)}
+
+
 async def process_tool_call(
     tool_name: str, arguments: Dict[str, Any], backend_url: str, timeout: float = 10.0
 ) -> Dict[str, Any]:
@@ -380,6 +457,16 @@ async def process_tool_call(
             pki_mount=arguments.get("pki_mount", "pki-payments"),
             k8s_secret_name=arguments.get("k8s_secret_name", ""),
             k8s_namespace=arguments.get("k8s_namespace", ""),
+        )
+
+    # Semantic memory: similar past incidents (P8).
+    if tool_name == "get_similar_incidents":
+        return await _get_similar_incidents(
+            backend_url=backend_url,
+            namespace=arguments.get("namespace", ""),
+            service=arguments.get("service", ""),
+            description=arguments.get("description", ""),
+            limit=int(arguments.get("limit", 3)),
         )
 
     url = f"{backend_url.rstrip('/')}/api/agent/fetch"

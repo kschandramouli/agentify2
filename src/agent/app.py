@@ -102,6 +102,41 @@ async def reason_chat(request: ChatRequest) -> AgentResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class EmbedRequest(BaseModel):
+    """Request body for the /embed endpoint."""
+    text: str
+    model: Optional[str] = None   # override settings.voyage_model if supplied
+
+
+class EmbedResponse(BaseModel):
+    embedding: Optional[List[float]] = None   # None when Voyage API key not set
+    dim: int = 0
+    model: str = ""
+    available: bool = False
+
+
+@app.post("/embed", response_model=EmbedResponse)
+async def embed(request: EmbedRequest) -> EmbedResponse:
+    """Return a vector embedding for the given text using Voyage AI.
+
+    Used by the Go backend's async embed goroutine (P8 — semantic memory).
+    Returns available=False when VOYAGE_API_KEY is not configured so the
+    caller can skip vector storage without crashing.
+    """
+    if not settings.voyage_api_key:
+        return EmbedResponse(available=False, model="", dim=0)
+    try:
+        import voyageai
+        model = request.model or settings.voyage_model
+        client = voyageai.Client(api_key=settings.voyage_api_key)
+        result = client.embed([request.text], model=model)
+        vec = result.embeddings[0]
+        return EmbedResponse(embedding=vec, dim=len(vec), model=model, available=True)
+    except Exception as exc:
+        logger.warning("embed failed: %s", exc)
+        return EmbedResponse(available=False, model="", dim=0)
+
+
 @app.get("/")
 async def root():
     """API root."""

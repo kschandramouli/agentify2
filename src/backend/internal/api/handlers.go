@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -726,8 +727,9 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
+			rowID := uuid.New().String()
 			if err := h.traceStore.InsertTrace(ctx, pgstore.TraceRecord{
-				ID:                       uuid.New().String(),
+				ID:                       rowID,
 				TraceID:                  traceID,
 				Question:                 question,
 				Intent:                   intent,
@@ -746,8 +748,94 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 				EstimatedCostUSD:         cost,
 			}); err != nil {
 				h.logger.Warn("trace persist failed", "error", err)
+				return
+			}
+
+			// P8 — Semantic memory: embed Tier-2 diagnose traces so DiagnoseSkill
+			// can retrieve similar past incidents as few-shot context.
+			if tier == "tier2" && intent == "diagnose" && agentResp != nil {
+				go h.embedAndStoreIncident(rowID, traceID, namespace, intent, agentResp)
 			}
 		}()
+	}
+}
+
+// embedAndStoreIncident calls the agent's /embed endpoint and stores the
+// resulting vector in incident_embeddings. Never blocks the query response —
+// called from a goroutine. Silently skips if the embed service is unavailable.
+func (h *Handler) embedAndStoreIncident(rowID, traceID, namespace, intent string, agentResp *AgentResponse) {
+	// Build a compact summary from the structured diagnosis fields.
+	details := agentResp.Details
+	headline, _ := details["headline"].(string)
+	cause, _    := details["likely_cause"].(string)
+	if headline == "" {
+		headline = agentResp.Answer
+	}
+	summary := headline
+	if cause != "" {
+		summary += " | " + cause
+	}
+	if summary == "" {
+		return
+	}
+
+	// Derive the service name from the sources list (e.g. "k8fy.live-state.payments" → "payments").
+	service := ""
+	for _, src := range agentResp.Sources {
+		if strings.HasPrefix(src, "k8fy.live-state.") {
+			service = strings.TrimPrefix(src, "k8fy.live-state.")
+			break
+		}
+	}
+
+	// Call the agent's /embed endpoint with a 10 s deadline.
+	type embedResp struct {
+		Embedding []float32 `json:"embedding"`
+		Available bool      `json:"available"`
+	}
+	body, _ := json.Marshal(map[string]string{"text": summary})
+	req, err := http.NewRequest("POST", h.agentClient.baseURL+"/embed",
+		bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	embedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(embedCtx)
+
+	resp, err := h.agentClient.client.Do(req)
+	if err != nil {
+		h.logger.Info("embed unavailable, storing summary only", "error", err)
+	}
+	var vec []float32
+	if err == nil {
+		defer resp.Body.Close()
+		var er embedResp
+		if json.NewDecoder(resp.Body).Decode(&er) == nil && er.Available {
+			vec = er.Embedding
+		}
+	}
+
+	// Persist the embedding (or just the summary when vec is nil).
+	if relational, rerr := h.orch.GetBackendFactory().GetBackend("relational"); rerr == nil {
+		type embStorer interface {
+			InsertIncidentEmbedding(ctx context.Context, e pgstore.IncidentEmbedding) error
+		}
+		if es, ok := relational.(embStorer); ok {
+			storeCtx, storeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer storeCancel()
+			if serr := es.InsertIncidentEmbedding(storeCtx, pgstore.IncidentEmbedding{
+				ID:        rowID,
+				TraceID:   traceID,
+				Namespace: namespace,
+				Service:   service,
+				Summary:   summary,
+				Embedding: vec,
+			}); serr != nil {
+				h.logger.Warn("incident embedding store failed", "error", serr)
+			}
+		}
 	}
 }
 
@@ -1110,6 +1198,63 @@ func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) 
 		entities = []string{}
 	}
 	writeJSON(w, http.StatusOK, entities)
+}
+
+// HandleSimilarIncidents returns past Tier-2 diagnose incidents whose embedding
+// is most similar to the query vector provided by the Python agent (P8).
+// Query params: namespace, service, limit (default 3), and optionally
+// vec=<comma-separated floats> for vector search (falls back to recency).
+func (h *Handler) HandleSimilarIncidents(w http.ResponseWriter, r *http.Request) {
+	namespace := r.URL.Query().Get("namespace")
+	service   := r.URL.Query().Get("service")
+	limit     := 3
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	// Parse optional query vector from the vec= param.
+	var queryVec []float32
+	if vecStr := r.URL.Query().Get("vec"); vecStr != "" {
+		for _, part := range strings.Split(vecStr, ",") {
+			var f float32
+			if _, err := fmt.Sscanf(strings.TrimSpace(part), "%f", &f); err == nil {
+				queryVec = append(queryVec, f)
+			}
+		}
+	}
+
+	relational, err := h.orch.GetBackendFactory().GetBackend("relational")
+	if err != nil {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+	type similarFinder interface {
+		FindSimilarIncidents(ctx context.Context, namespace, service string, queryVec []float32, limit int) ([]pgstore.IncidentEmbedding, error)
+	}
+	finder, ok := relational.(similarFinder)
+	if !ok {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	incidents, err := finder.FindSimilarIncidents(r.Context(), namespace, service, queryVec, limit)
+	if err != nil {
+		h.logger.Warn("find similar incidents failed", "error", err)
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	type result struct {
+		TraceID   string `json:"trace_id"`
+		Namespace string `json:"namespace"`
+		Service   string `json:"service"`
+		Summary   string `json:"summary"`
+	}
+	out := make([]result, len(incidents))
+	for i, inc := range incidents {
+		out[i] = result{TraceID: inc.TraceID, Namespace: inc.Namespace, Service: inc.Service, Summary: inc.Summary}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // HandleListPricing returns all model pricing rows from the database.

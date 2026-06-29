@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 _CRASH_RESTART_THRESHOLD = 3
 _CRASH_PHASES = {"Failed", "Unknown", "CrashLoopBackOff"}
 
+# P10 — Context budget: cap each signal source so the pre-fetched context
+# never blows past the Claude context window. Values are approximate token
+# limits for each source type. Truncation is most-recent-first.
+_MAX_LOG_LINES      = 60    # ~1 500 tokens per pod log
+_MAX_EVENT_ROWS     = 20    # ~600 tokens per pod events list
+_MAX_METRICS_ROWS   = 50    # ~1 500 tokens for restart time-series
+_MAX_CHANGE_ROWS    = 10    # ~800 tokens for deploy/rollout history
+_MAX_SIMILAR        = 3     # how many past incidents to surface (each ~200 tokens)
+
 
 class DiagnoseSkill(K8fyAgent):
     """Failure-mode + causal correlation expert — Pattern A: parallel pre-fetch + one Opus call."""
@@ -107,6 +116,21 @@ class DiagnoseSkill(K8fyAgent):
             tasks[f"logs.{pod_id}"] = self._fetch(
                 "get_pod_logs",
                 {"pod_id": pod_id, "namespace": namespace, "previous": True},
+            )
+
+        # 6. Semantic memory: similar past incidents (P8).
+        #    Retrieves the top-3 most relevant prior diagnoses so Claude can
+        #    pattern-match against historical root causes. Non-blocking — fails
+        #    silently when no embeddings exist yet (fresh deployment).
+        if service_name:
+            tasks["similar_incidents"] = self._fetch(
+                "get_similar_incidents",
+                {
+                    "namespace":   namespace,
+                    "service":     service_name,
+                    "description": f"service health issues in {namespace}/{service_name}",
+                    "limit":       3,
+                },
             )
 
         if not tasks:

@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     )
     langfuse_secret_name: str = "agentify/dev/langfuse"
 
+    # Voyage AI — embedding model for semantic memory (P8).
+    # Set VOYAGE_API_KEY to enable; omit to run without semantic similarity search.
+    voyage_api_key: str = Field(default="", validation_alias=AliasChoices("VOYAGE_API_KEY"))
+    voyage_model: str = "voyage-3-lite"   # 512-dim, cheapest; ~$0.00002 per trace
+
     # AWS
     aws_region: str = "ap-southeast-2"
     cloudwatch_log_group: str = "/agentify/agent"

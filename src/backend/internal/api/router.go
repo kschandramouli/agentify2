@@ -58,6 +58,9 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("PUT /admin/pricing", h.HandleUpsertPricing)
 	mux.HandleFunc("POST /admin/pricing", h.HandleUpsertPricing)
 
+	// Semantic memory: similar past incidents retrieval (P8 — called by the Python agent's get_similar_incidents tool)
+	mux.HandleFunc("GET /api/incidents/similar", h.HandleSimilarIncidents)
+
 	// Admin: on-demand cert renewal — issues from Vault PKI + updates K8s Secret
 	mux.HandleFunc("POST /admin/certs/renew", h.HandleCertRenew)
 

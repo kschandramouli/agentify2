@@ -76,9 +76,14 @@ func NewClient(ctx context.Context, connStr string, logger *slog.Logger) (*Clien
 	return c, nil
 }
 
-// initSchema creates both tables if they don't exist.
+// initSchema creates all tables and extensions if they don't exist.
 func (c *Client) initSchema(ctx context.Context) error {
 	schema := `
+	-- pgvector: enable vector similarity search (P8 — semantic memory layer).
+	-- CREATE EXTENSION is idempotent; silently no-ops if the extension is absent
+	-- (e.g. embedded-postgres in tests) so tests still pass without pgvector.
+	CREATE EXTENSION IF NOT EXISTS vector;
+
 	-- Append-only events/certs (relational store).
 	CREATE TABLE IF NOT EXISTS events (
 		id UUID PRIMARY KEY,
@@ -185,6 +190,42 @@ func (c *Client) initSchema(ctx context.Context) error {
 		('claude-haiku-4-5',  'Claude Haiku 4.5',   1.0,  5.0,  1.25, 0.10),
 		('claude-haiku-3-5',  'Claude Haiku 3.5',   0.8,  4.0,  1.00, 0.08)
 	ON CONFLICT (model_id) DO NOTHING;
+
+	-- Semantic memory: vector embeddings over past Tier-2 diagnostic outputs (P8).
+	-- One row per persisted Tier-2 trace. The embedding encodes the headline +
+	-- likely_cause + top findings so DiagnoseSkill can retrieve similar past
+	-- incidents and inject their summaries as few-shot context for the Claude call.
+	--
+	-- Dimension 512 matches voyage-3-lite (Anthropic's recommended partner).
+	-- The column is nullable — rows without an embedding are still stored and can
+	-- be used for keyword fallback search when the embedding service is not configured.
+	CREATE TABLE IF NOT EXISTS incident_embeddings (
+		id          TEXT PRIMARY KEY,
+		trace_id    TEXT NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
+		namespace   TEXT NOT NULL DEFAULT '',
+		service     TEXT NOT NULL DEFAULT '',
+		summary     TEXT NOT NULL DEFAULT '',   -- headline + likely_cause condensed
+		embedding   vector(512),               -- nullable until embed service responds
+		created_at  TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_incident_embeddings_ns_svc
+		ON incident_embeddings (namespace, service);
+	-- IVFFlat index for fast cosine similarity search (built only when vector column is populated).
+	-- DO NOT create concurrently inside a transaction — wrapped in DO $$ to guard.
+	DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE tablename = 'incident_embeddings' AND indexname = 'idx_incident_embeddings_vec'
+		) THEN
+			CREATE INDEX idx_incident_embeddings_vec
+				ON incident_embeddings USING ivfflat (embedding vector_cosine_ops)
+				WITH (lists = 10);
+		END IF;
+	EXCEPTION WHEN OTHERS THEN
+		-- pgvector not available (e.g. embedded-postgres in tests) — skip silently.
+		NULL;
+	END $$;
 	`
 	if _, err := c.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -955,6 +996,109 @@ func scanChatSession(row interface{ Scan(...any) error }) (*ChatSession, error) 
 	}
 	_ = json.Unmarshal(cacheJSON, &s.ContextCache)
 	return &s, nil
+}
+
+// ── Semantic memory (incident embeddings) ────────────────────────────────────
+
+// IncidentEmbedding is one row in incident_embeddings: a Tier-2 trace
+// paired with its vector representation for similarity search (P8).
+type IncidentEmbedding struct {
+	ID        string
+	TraceID   string
+	Namespace string
+	Service   string
+	Summary   string
+	Embedding []float32 // nil when embed service was unavailable
+}
+
+// InsertIncidentEmbedding upserts an incident embedding row. The embedding
+// column is set to NULL when vec is empty so the row is still queryable via
+// keyword filters while the vector index is being populated.
+func (c *Client) InsertIncidentEmbedding(ctx context.Context, e IncidentEmbedding) error {
+	if e.Embedding == nil {
+		_, err := c.db.ExecContext(ctx, `
+			INSERT INTO incident_embeddings (id, trace_id, namespace, service, summary)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (id) DO UPDATE SET summary=EXCLUDED.summary`,
+			e.ID, e.TraceID, e.Namespace, e.Service, e.Summary)
+		return err
+	}
+
+	// pgvector expects the vector as a Postgres-formatted literal: '[0.1,0.2,...]'
+	var sb strings.Builder
+	sb.WriteByte('[')
+	for i, v := range e.Embedding {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(fmt.Sprintf("%g", v))
+	}
+	sb.WriteByte(']')
+
+	_, err := c.db.ExecContext(ctx, `
+		INSERT INTO incident_embeddings (id, trace_id, namespace, service, summary, embedding)
+		VALUES ($1,$2,$3,$4,$5,$6::vector)
+		ON CONFLICT (id) DO UPDATE SET
+			summary   = EXCLUDED.summary,
+			embedding = EXCLUDED.embedding`,
+		e.ID, e.TraceID, e.Namespace, e.Service, e.Summary, sb.String())
+	return err
+}
+
+// FindSimilarIncidents returns up to limit incidents whose embedding is closest
+// to queryVec (cosine similarity). Falls back to recency order when pgvector is
+// unavailable (vec is nil) so callers always get a useful result.
+func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service string, queryVec []float32, limit int) ([]IncidentEmbedding, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if len(queryVec) > 0 {
+		// Vector similarity search via pgvector (<-> = cosine distance, lower = more similar).
+		var sb strings.Builder
+		sb.WriteByte('[')
+		for i, v := range queryVec {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(fmt.Sprintf("%g", v))
+		}
+		sb.WriteByte(']')
+		rows, err = c.db.QueryContext(ctx, `
+			SELECT id, trace_id, namespace, service, summary
+			FROM incident_embeddings
+			WHERE embedding IS NOT NULL
+			ORDER BY embedding <-> $1::vector
+			LIMIT $2`,
+			sb.String(), limit)
+	} else {
+		// Fallback: most recent incidents matching namespace/service.
+		rows, err = c.db.QueryContext(ctx, `
+			SELECT id, trace_id, namespace, service, summary
+			FROM incident_embeddings
+			WHERE ($1 = '' OR namespace = $1)
+			  AND ($2 = '' OR service  = $2)
+			ORDER BY created_at DESC
+			LIMIT $3`,
+			namespace, service, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []IncidentEmbedding
+	for rows.Next() {
+		var e IncidentEmbedding
+		if serr := rows.Scan(&e.ID, &e.TraceID, &e.Namespace, &e.Service, &e.Summary); serr != nil {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }
 
 // ── Model pricing ────────────────────────────────────────────────────────────
