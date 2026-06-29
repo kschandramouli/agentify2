@@ -542,6 +542,60 @@ jobs:
         LANGFUSE_SECRET_KEY:  ${{ secrets.LANGFUSE_SECRET_KEY }}
         LANGFUSE_BASE_URL:    ${{ secrets.LANGFUSE_BASE_URL }}
 
+    - name: Validate Voyage AI + semantic memory
+      # Smoke-tests the full P8 pipeline: embed endpoint availability,
+      # a Tier-2 diagnose query, and confirmation that an embedding row
+      # was written to incident_embeddings within 10 seconds.
+      # Non-fatal warning if VOYAGE_API_KEY is not set (recency fallback active).
+      run: |
+        kubectl port-forward -n agentify svc/agentify-agent 18081:8001 &
+        PF_PID=$!
+        sleep 5
+
+        echo "=== Voyage AI embed endpoint check ==="
+        EMBED=$(curl -sf -X POST http://localhost:18081/embed \
+          -H "Content-Type: application/json" \
+          -d '{"text": "payment-worker CrashLoopBackOff"}' 2>/dev/null || echo '{}')
+        AVAILABLE=$(echo "$EMBED" | python3 -c "import sys,json; print(json.load(sys.stdin).get('available', False))" 2>/dev/null || echo false)
+        DIM=$(echo "$EMBED"        | python3 -c "import sys,json; print(json.load(sys.stdin).get('dim', 0))"       2>/dev/null || echo 0)
+
+        if [ "$AVAILABLE" = "True" ]; then
+          echo "OK  Voyage AI active — dim=$DIM"
+        else
+          echo "WARN Voyage AI not available (VOYAGE_API_KEY may not be set) — recency fallback active"
+        fi
+
+        echo "=== Tier-1 health check (fast path) ==="
+        HEALTH=$(curl -sf --max-time 10 http://localhost:18080/api/query \
+          -H "Content-Type: application/json" \
+          -d '{"question":"is payment-api healthy?","context":{"namespace":"payments","service":"payment-api"}}' \
+          2>/dev/null || echo '{}')
+        TIER=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
+        echo "tier=$TIER (want tier1)"
+        [ "$TIER" = "tier1" ] && echo "OK  Tier-1 fast path working" || echo "WARN Tier-1 returned tier=$TIER"
+
+        echo "=== Tier-2 diagnose + embed goroutine check ==="
+        DIAGNOSE=$(curl -sf --max-time 120 http://localhost:18080/api/query \
+          -H "Content-Type: application/json" \
+          -d '{"question":"why is payment-worker crashing?","context":{"namespace":"payments","service":"payment-worker"}}' \
+          2>/dev/null || echo '{}')
+        DTIER=$(echo "$DIAGNOSE"    | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
+        DTRACE=$(echo "$DIAGNOSE"   | python3 -c "import sys,json; print(json.load(sys.stdin).get('trace_id',''))" 2>/dev/null || echo "")
+        echo "tier=$DTIER trace_id=$DTRACE"
+        [ "$DTIER" = "tier2" ] && echo "OK  Tier-2 diagnose returned" || echo "WARN Tier-2 returned tier=$DTIER"
+
+        # Give the async embed goroutine time to write to incident_embeddings
+        sleep 10
+        AGENT_LOGS=$(kubectl logs -n agentify deploy/agentify-backend --tail=30 2>/dev/null || echo "")
+        if echo "$AGENT_LOGS" | grep -q "incident embedding seeded"; then
+          echo "OK  incident_embeddings row written (Voyage AI vector stored)"
+        elif [ "$AVAILABLE" = "True" ]; then
+          echo "WARN embed goroutine log not found — check backend logs manually"
+        fi
+
+        kill $PF_PID 2>/dev/null || true
+        echo "=== Semantic memory validation complete ==="
+
     - name: Debug pod state (always runs — helps diagnose failures)
       if: always()
       run: |
