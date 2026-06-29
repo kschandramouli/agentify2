@@ -80,9 +80,11 @@ func NewClient(ctx context.Context, connStr string, logger *slog.Logger) (*Clien
 func (c *Client) initSchema(ctx context.Context) error {
 	schema := `
 	-- pgvector: enable vector similarity search (P8 — semantic memory layer).
-	-- CREATE EXTENSION is idempotent; silently no-ops if the extension is absent
-	-- (e.g. embedded-postgres in tests) so tests still pass without pgvector.
-	CREATE EXTENSION IF NOT EXISTS vector;
+	-- Wrapped in DO $$ so the error is swallowed when the OS package is absent
+	-- (e.g. embedded-postgres in CI tests which don't ship pgvector).
+	DO $$ BEGIN
+		CREATE EXTENSION IF NOT EXISTS vector;
+	EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 	-- Append-only events/certs (relational store).
 	CREATE TABLE IF NOT EXISTS events (
@@ -191,40 +193,41 @@ func (c *Client) initSchema(ctx context.Context) error {
 		('claude-haiku-3-5',  'Claude Haiku 3.5',   0.8,  4.0,  1.00, 0.08)
 	ON CONFLICT (model_id) DO NOTHING;
 
-	-- Semantic memory: vector embeddings over past Tier-2 diagnostic outputs (P8).
-	-- One row per persisted Tier-2 trace. The embedding encodes the headline +
-	-- likely_cause + top findings so DiagnoseSkill can retrieve similar past
-	-- incidents and inject their summaries as few-shot context for the Claude call.
-	--
-	-- Dimension 512 matches voyage-3-lite (Anthropic's recommended partner).
-	-- The column is nullable — rows without an embedding are still stored and can
-	-- be used for keyword fallback search when the embedding service is not configured.
+	-- Semantic memory base table (always created — no pgvector type here).
+	-- The embedding column is added below only when pgvector is available.
 	CREATE TABLE IF NOT EXISTS incident_embeddings (
 		id          TEXT PRIMARY KEY,
 		trace_id    TEXT NOT NULL REFERENCES traces(id) ON DELETE CASCADE,
 		namespace   TEXT NOT NULL DEFAULT '',
 		service     TEXT NOT NULL DEFAULT '',
-		summary     TEXT NOT NULL DEFAULT '',   -- headline + likely_cause condensed
-		embedding   vector(512),               -- nullable until embed service responds
+		summary     TEXT NOT NULL DEFAULT '',
 		created_at  TIMESTAMP DEFAULT NOW()
 	);
 	CREATE INDEX IF NOT EXISTS idx_incident_embeddings_ns_svc
 		ON incident_embeddings (namespace, service);
-	-- IVFFlat index for fast cosine similarity search (built only when vector column is populated).
-	-- DO NOT create concurrently inside a transaction — wrapped in DO $$ to guard.
+
+	-- Add the vector column + IVFFlat index only when pgvector is installed.
+	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
 	BEGIN
+		-- Add embedding column (vector(512) = voyage-3-lite dimensions)
+		IF NOT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'incident_embeddings' AND column_name = 'embedding'
+		) THEN
+			EXECUTE 'ALTER TABLE incident_embeddings ADD COLUMN embedding vector(512)';
+		END IF;
+		-- IVFFlat cosine index for fast similarity search
 		IF NOT EXISTS (
 			SELECT 1 FROM pg_indexes
 			WHERE tablename = 'incident_embeddings' AND indexname = 'idx_incident_embeddings_vec'
 		) THEN
-			CREATE INDEX idx_incident_embeddings_vec
+			EXECUTE 'CREATE INDEX idx_incident_embeddings_vec
 				ON incident_embeddings USING ivfflat (embedding vector_cosine_ops)
-				WITH (lists = 10);
+				WITH (lists = 10)';
 		END IF;
 	EXCEPTION WHEN OTHERS THEN
-		-- pgvector not available (e.g. embedded-postgres in tests) — skip silently.
-		NULL;
+		NULL;  -- pgvector not available — vector search disabled, keyword fallback active
 	END $$;
 	`
 	if _, err := c.db.ExecContext(ctx, schema); err != nil {
