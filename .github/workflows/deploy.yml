@@ -243,11 +243,15 @@ jobs:
           sleep 10
         fi
 
-        # Idempotent install/upgrade — uses cluster-default StorageClass for PVC.
+        # Idempotent install/upgrade — applies manifests and returns immediately.
+        # Pod readiness is handled by the "Wait for Vault to be ready" step below,
+        # which polls vault-0 explicitly and gives it up to 3 minutes to schedule.
+        # --wait is intentionally omitted: on cold starts after scale-up the image
+        # pull alone can exceed 180s, causing a false "context deadline exceeded".
         helm upgrade --install vault hashicorp/vault \
           --namespace vault --create-namespace \
           -f infra/kubernetes/vault/vault-values.yaml \
-          --timeout=180s --wait
+          --timeout=120s
         echo "Vault Helm chart applied."
 
     - name: Wait for Vault to be ready
