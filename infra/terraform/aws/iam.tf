@@ -208,6 +208,46 @@ resource "aws_iam_role_policy" "ci" {
           aws_secretsmanager_secret.adapter.arn,
         ]
       },
+      # Secrets Manager: create + populate the Langfuse secret via terraform apply
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:DeleteSecret",
+        ]
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.this.account_id}:secret:${var.project}/${var.env}/langfuse*"
+      },
+      # IAM: create/update policy versions for the targeted terraform apply
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:GetPolicy",
+          "iam:GetPolicyVersion",
+          "iam:ListPolicyVersions",
+          "iam:CreatePolicyVersion",
+          "iam:DeletePolicyVersion",
+          "iam:SetDefaultPolicyVersion",
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.this.account_id}:policy/${local.name}-agent-secrets"
+      },
+      # S3 + DynamoDB: Terraform remote state (targeted apply)
+      {
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+        Resource = [
+          "arn:aws:s3:::agentify-tfstate-f6e00ef8",
+          "arn:aws:s3:::agentify-tfstate-f6e00ef8/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.this.account_id}:table/agentify-tfstate-lock"
+      },
       # EKS: kubectl + pause/resume.
       # Nodegroup ARN format differs from cluster ARN: nodegroup/cluster/ng/uuid
       {
