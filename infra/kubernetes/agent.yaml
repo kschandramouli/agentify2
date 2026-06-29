@@ -46,6 +46,15 @@ spec:
             secretKeyRef:
               name: agentify-anthropic-secret
               key: api_key
+        # Voyage AI key for semantic memory embeddings (P8).
+        # optional: true — agent starts normally without it; get_similar_incidents
+        # falls back to recency-ordered results instead of vector similarity.
+        - name: VOYAGE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: agentify-voyage-secret
+              key: api_key
+              optional: true
         # Vault connectivity for VaultCertSkill (optional — skill degrades gracefully if unset).
         - name: VAULT_ADDR
           value: "http://vault.vault.svc.cluster.local:8200"
