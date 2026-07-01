@@ -329,13 +329,17 @@ jobs:
 
         echo "Dev-mode token stored in vault-unseal-keys + agentify-vault-secret."
 
-    - name: Configure Vault (first deploy only — skipped when already configured)
+    - name: Configure Vault (idempotent — skipped when already configured)
+      # Consolidation: the legacy `pki` mount (with payment-service role) was
+      # replaced by `pki-payments` (payment-api + payment-worker roles) which
+      # all payment pod init containers already use. This step now creates only
+      # the canonical pki-payments configuration. Annotation is reset to force
+      # one re-run that updates the policies to reference pki-payments.
       run: |
-        # Check if PKI is already enabled (idempotency guard).
         VAULT_CONFIGURED=$(kubectl get secret vault-unseal-keys -n vault \
           -o jsonpath='{.metadata.annotations.vault-configured}' 2>/dev/null || echo "")
-        if [ "$VAULT_CONFIGURED" = "true" ]; then
-          echo "Vault already configured — skipping."
+        if [ "$VAULT_CONFIGURED" = "pki-payments-v2" ]; then
+          echo "Vault already configured (pki-payments-v2) — skipping."
           exit 0
         fi
 
@@ -343,52 +347,62 @@ jobs:
         PF_PID=$!
         sleep 5
 
-        # Dev mode: root token is always "root".
-        ROOT_TOKEN="root"
         export VAULT_ADDR=http://127.0.0.1:8200
-        export VAULT_TOKEN="$ROOT_TOKEN"
+        export VAULT_TOKEN="root"   # dev mode
 
-        # Install vault CLI on the runner.
         curl -fsSL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip \
           -o /tmp/vault.zip && unzip -q /tmp/vault.zip -d /tmp && chmod +x /tmp/vault
         export PATH="/tmp:$PATH"
 
-        # Enable Kubernetes auth.
+        # Kubernetes auth
         vault auth enable kubernetes 2>/dev/null || echo "Kubernetes auth already enabled."
         K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
         vault write auth/kubernetes/config kubernetes_host="$K8S_HOST"
 
-        # Enable KV v2.
+        # KV v2
         vault secrets enable -path=secret kv-v2 2>/dev/null || echo "KV already enabled."
 
-        # Enable PKI + create CA for payments namespace.
-        vault secrets enable pki 2>/dev/null || echo "PKI already enabled."
-        vault secrets tune -max-lease-ttl=8760h pki
-        vault write pki/root/generate/internal \
+        # pki-payments — the single canonical PKI mount for all payment services.
+        # payment-api role:    used by payment and payment-api service pods.
+        # payment-worker role: used by payment-worker service pods.
+        vault secrets enable -path=pki-payments pki 2>/dev/null || echo "pki-payments already enabled."
+        vault secrets tune -max-lease-ttl=8760h pki-payments
+        vault write pki-payments/root/generate/internal \
           common_name="payments.svc.cluster.local Root CA" ttl=8760h > /dev/null 2>&1 || true
-        vault write pki/config/urls \
-          issuing_certificates="http://vault.vault.svc.cluster.local:8200/v1/pki/ca" \
-          crl_distribution_points="http://vault.vault.svc.cluster.local:8200/v1/pki/crl"
-        vault write pki/roles/payment-service \
-          allowed_domains="payments.svc.cluster.local,payment.payments.svc.cluster.local" \
+        vault write pki-payments/config/urls \
+          issuing_certificates="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/ca" \
+          crl_distribution_points="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/crl"
+        vault write pki-payments/roles/payment-api \
+          allowed_domains="payments.svc.cluster.local,payment.payments.svc.cluster.local,payment-api.payments.svc.cluster.local" \
+          allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
+        vault write pki-payments/roles/payment-worker \
+          allowed_domains="payments.svc.cluster.local,payment-worker.payments.svc.cluster.local" \
           allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
 
-        # Policies and Kubernetes roles.
+        # Policies — all referencing pki-payments (consolidated, no more pki/ paths)
         vault policy write payment-service-policy - <<'HCL'
-        path "pki/issue/payment-service" { capabilities = ["create","update"] }
-        path "pki/cert/*"                { capabilities = ["read"] }
-        path "secret/data/payments/*"   { capabilities = ["read"] }
-        path "auth/token/renew-self"    { capabilities = ["update"] }
+        path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
+        path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
+        path "pki-payments/cert/*"               { capabilities = ["read"] }
+        path "secret/data/payments/*"            { capabilities = ["read"] }
+        path "auth/token/renew-self"             { capabilities = ["update"] }
         HCL
         vault policy write cert-rotator-policy - <<'HCL'
-        path "pki/issue/payment-service" { capabilities = ["create","update"] }
-        path "pki/revoke"                { capabilities = ["create","update"] }
-        path "pki/cert/*"                { capabilities = ["read"] }
-        path "secret/data/payments/*"   { capabilities = ["create","update","read"] }
-        path "auth/token/renew-self"    { capabilities = ["update"] }
+        path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
+        path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
+        path "pki-payments/revoke"               { capabilities = ["create","update"] }
+        path "pki-payments/cert/*"               { capabilities = ["read"] }
+        path "secret/data/payments/*"            { capabilities = ["create","update","read"] }
+        path "auth/token/renew-self"             { capabilities = ["update"] }
         HCL
-        vault write auth/kubernetes/role/payment-service \
-          bound_service_account_names=payment-service \
+
+        # Kubernetes auth roles
+        vault write auth/kubernetes/role/payment-api \
+          bound_service_account_names=payment-api \
+          bound_service_account_namespaces=payments \
+          policies=payment-service-policy ttl=1h
+        vault write auth/kubernetes/role/payment-worker \
+          bound_service_account_names=payment-worker \
           bound_service_account_namespaces=payments \
           policies=payment-service-policy ttl=1h
         vault write auth/kubernetes/role/cert-rotator \
@@ -396,11 +410,12 @@ jobs:
           bound_service_account_namespaces=payments \
           policies=cert-rotator-policy ttl=1h
 
-        # Mark as configured so this step is skipped on future deploys.
-        kubectl annotate secret vault-unseal-keys -n vault vault-configured=true
+        # Stamp new version so future runs skip this step
+        kubectl annotate secret vault-unseal-keys -n vault \
+          vault-configured=pki-payments-v2 --overwrite
 
         kill $PF_PID 2>/dev/null || true
-        echo "Vault configuration complete."
+        echo "Vault configuration complete (pki-payments-v2)."
 
     - name: Apply Kubernetes manifests
       run: |
