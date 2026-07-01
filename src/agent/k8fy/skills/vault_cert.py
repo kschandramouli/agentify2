@@ -35,14 +35,15 @@ _VAULT_TOOLS = [
 
 # Maps namespace/service → renewal parameters. Extend as more services are added.
 #
-# PKI mount and role must match what vault-setup.sh created:
-#   vault secrets enable pki             → mount = "pki"
-#   vault write pki/roles/payment-service → role  = "payment-service"
+# Confirmed live Vault configuration (kubectl exec vault-0 -- vault list pki-payments/roles):
+#   Mount:  pki-payments
+#   Roles:  payment-api   (for payment and payment-api services)
+#           payment-worker (for payment-worker)
 #
 _RENEW_CONFIG: Dict[str, Dict[str, str]] = {
-    "payments/payment":        {"pki_mount": "pki", "pki_role": "payment-service", "common_name": "payment.payments.svc.cluster.local",        "k8s_secret": "payment-tls", "k8s_ns": "payments"},
-    "payments/payment-api":    {"pki_mount": "pki", "pki_role": "payment-service", "common_name": "payment-api.payments.svc.cluster.local",    "k8s_secret": "payment-tls", "k8s_ns": "payments"},
-    "payments/payment-worker": {"pki_mount": "pki", "pki_role": "payment-service", "common_name": "payment-worker.payments.svc.cluster.local", "k8s_secret": "payment-tls", "k8s_ns": "payments"},
+    "payments/payment":        {"pki_mount": "pki-payments", "pki_role": "payment-api",    "common_name": "payment.payments.svc.cluster.local",        "k8s_secret": "payment-tls", "k8s_ns": "payments"},
+    "payments/payment-api":    {"pki_mount": "pki-payments", "pki_role": "payment-api",    "common_name": "payment-api.payments.svc.cluster.local",    "k8s_secret": "payment-tls", "k8s_ns": "payments"},
+    "payments/payment-worker": {"pki_mount": "pki-payments", "pki_role": "payment-worker", "common_name": "payment-worker.payments.svc.cluster.local", "k8s_secret": "payment-tls", "k8s_ns": "payments"},
 }
 
 _DEFAULT_TTL = "24h"
