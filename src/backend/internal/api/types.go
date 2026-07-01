@@ -189,4 +189,5 @@ type CertRenewResponse struct {
 	ExpiresAt        string   `json:"expires_at,omitempty"`
 	DaysUntilExpiry  int      `json:"days_until_expiry,omitempty"`
 	DnsNames         []string `json:"dns_names,omitempty"`
+	TraceID          string   `json:"trace_id,omitempty"`
 }

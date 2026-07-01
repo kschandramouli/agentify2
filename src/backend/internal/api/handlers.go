@@ -1461,6 +1461,8 @@ func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	start := time.Now()
+	traceID := uuid.New().String()
 	var req CertRenewRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1575,6 +1577,25 @@ func (h *Handler) HandleCertRenew(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Surface the trace ID in the response so the UI can link to Query History.
+	resp.TraceID = traceID
+
+	// Log the renewal as a trace so it appears in Query History alongside
+	// regular cert_check and diagnose queries.
+	h.logTrace(
+		traceID,
+		fmt.Sprintf("renew TLS cert for %s/%s", req.Namespace, req.Service),
+		"renew_cert",
+		req.Namespace,
+		"tier2",
+		resp.Status,
+		[]string{"k8fy.certificates"},
+		1.0,
+		nil,
+		start,
+		agentResp,
+	)
 
 	writeJSON(w, http.StatusOK, resp)
 }

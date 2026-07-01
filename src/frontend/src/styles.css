@@ -1566,7 +1566,17 @@ code {
   cursor: pointer;
   font-family: var(--font-sans);
   transition: border-color var(--t-fast);
+  /* Tell the browser to use dark-mode chrome for the date picker popup
+     and the calendar icon — without this the icon is dark-on-dark and invisible */
+  color-scheme: dark;
 }
+/* Make the calendar icon match the accent colour */
+.adm-date-input::-webkit-calendar-picker-indicator {
+  filter: invert(0.7) sepia(1) saturate(3) hue-rotate(190deg);
+  cursor: pointer;
+  opacity: 0.8;
+}
+.adm-date-input::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 
 .adm-date-input:focus { border-color: var(--accent); }
 
