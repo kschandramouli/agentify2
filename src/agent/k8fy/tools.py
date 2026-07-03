@@ -260,7 +260,7 @@ async def _vault_get_cert_status(pki_role: str, kv_path: str = "") -> Dict[str, 
                             date_str = out.split("=", 1)[1]
                             expiry = datetime.datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
                             days = (expiry - datetime.datetime.utcnow()).days
-                            result["expiry"] = expiry.isoformat()
+                            result["expiry"] = expiry.strftime("%-d %b %Y, %H:%M UTC")
                             result["days_remaining"] = days
                             result["rotation_recommended"] = days < 30
                             result["status"] = "critical" if days < 7 else "warning" if days < 30 else "healthy"
@@ -320,7 +320,7 @@ async def _vault_rotate_cert(
                 _cert_obj = _x509.load_pem_x509_certificate(cert_pem.encode())
                 _exp = getattr(_cert_obj, "not_valid_after_utc", None) or \
                        _cert_obj.not_valid_after.replace(tzinfo=datetime.timezone.utc)
-                expires_at_iso = _exp.isoformat()
+                expires_at_iso = _exp.strftime("%-d %b %Y, %H:%M UTC")
                 days_until_expiry = (_exp - datetime.datetime.now(datetime.timezone.utc)).days
                 try:
                     _san = _cert_obj.extensions.get_extension_for_oid(_EXT.SUBJECT_ALTERNATIVE_NAME)

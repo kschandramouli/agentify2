@@ -176,8 +176,11 @@ def normalize_certificate_event(
     days_until_expiry: Optional[int] = None
     expires_iso: Optional[str] = None
     if expires_at is not None:
-        expires_iso = expires_at.astimezone(timezone.utc).isoformat()
-        days_until_expiry = (expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).days
+        utc = expires_at.astimezone(timezone.utc)
+        # Human-readable UTC string so the UI and investigate chat show the same format:
+        # "4 Jul 2026, 02:31 UTC"  (day without leading zero, 24-h, explicit timezone)
+        expires_iso = utc.strftime("%-d %b %Y, %H:%M UTC")
+        days_until_expiry = (utc - datetime.now(timezone.utc)).days
 
     payload = {
         "secret": secret_name,

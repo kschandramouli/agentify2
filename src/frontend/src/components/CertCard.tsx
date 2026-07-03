@@ -5,10 +5,15 @@ import { renewCert } from "../api";
 function formatExpiry(iso: string): string {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      year: "numeric", month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
-    });
+    // Always render in UTC so the UI and chat interface show identical values.
+    // Format: "4 Jul 2026, 02:31 UTC"
+    const d = new Date(iso);
+    const day   = d.getUTCDate();
+    const month = d.toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" });
+    const year  = d.getUTCFullYear();
+    const hh    = String(d.getUTCHours()).padStart(2, "0");
+    const mm    = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${day} ${month} ${year}, ${hh}:${mm} UTC`;
   } catch {
     return iso;
   }
