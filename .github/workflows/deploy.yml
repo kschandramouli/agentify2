@@ -329,20 +329,13 @@ jobs:
 
         echo "Dev-mode token stored in vault-unseal-keys + agentify-vault-secret."
 
-    - name: Configure Vault (idempotent — skipped when already configured)
-      # Consolidation: the legacy `pki` mount (with payment-service role) was
-      # replaced by `pki-payments` (payment-api + payment-worker roles) which
-      # all payment pod init containers already use. This step now creates only
-      # the canonical pki-payments configuration. Annotation is reset to force
-      # one re-run that updates the policies to reference pki-payments.
+    - name: Configure Vault (runs every deploy — idempotent commands)
+      # Vault runs in dev mode which stores all data IN MEMORY.
+      # Every vault-0 pod restart (scale-down/up, deploy) wipes PKI mounts,
+      # roles, and policies. The annotation guard has been removed so this step
+      # runs on every deploy and recreates all configuration. All commands use
+      # the "|| echo already-exists" pattern so they are safe to re-run.
       run: |
-        VAULT_CONFIGURED=$(kubectl get secret vault-unseal-keys -n vault \
-          -o jsonpath='{.metadata.annotations.vault-configured}' 2>/dev/null || echo "")
-        if [ "$VAULT_CONFIGURED" = "pki-payments-v2" ]; then
-          echo "Vault already configured (pki-payments-v2) — skipping."
-          exit 0
-        fi
-
         kubectl port-forward -n vault svc/vault 8200:8200 &
         PF_PID=$!
         sleep 5
@@ -412,7 +405,7 @@ jobs:
 
         # Stamp new version so future runs skip this step
         kubectl annotate secret vault-unseal-keys -n vault \
-          vault-configured=pki-payments-v2 --overwrite
+          vault-configured=pki-payments-v2 --overwrite  # kept for reference only, no longer gates the step
 
         kill $PF_PID 2>/dev/null || true
         echo "Vault configuration complete (pki-payments-v2)."
