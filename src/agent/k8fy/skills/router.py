@@ -10,8 +10,11 @@ from typing import Any, Dict, Optional
 from k8fy.agent import K8fyAgent, get_k8fy_agent
 from k8fy.skills.cert_audit import CertAuditSkill
 from k8fy.skills.change_history import ChangeHistorySkill
+from k8fy.skills.deployment_guardian import DeploymentGuardianSkill
 from k8fy.skills.diagnose import DiagnoseSkill
 from k8fy.skills.health_check import HealthSkill
+from k8fy.skills.incident_responder import IncidentResponderSkill
+from k8fy.skills.remediation_executor import RemediationExecutorSkill
 from k8fy.skills.restart_trend import RestartTrendSkill
 from k8fy.skills.vault_cert import VaultCertSkill
 from models.response import AgentResponse
@@ -31,6 +34,12 @@ class SkillRouter:
             "metrics_history":RestartTrendSkill(),
             "vault_cert":     VaultCertSkill(),
             "renew_cert":     VaultCertSkill(),  # same skill, intent triggers _renew()
+            # Phase-3 remediation (ADR 0020 / spec 011 Use Cases 1+2). incident_respond
+            # only ever proposes; execute_remediation is the deterministic, no-LLM
+            # dispatch reached exclusively after a human approves that proposal.
+            "incident_respond":   IncidentResponderSkill(),
+            "execute_remediation": RemediationExecutorSkill(),
+            "deploy_guardian_check": DeploymentGuardianSkill(),
         }
         # Fallback: full K8fyAgent for general_query or anything new.
         self._fallback: Optional[K8fyAgent] = None

@@ -385,3 +385,47 @@ export interface SyncResult {
 export function syncNamespaces(): Promise<SyncResult> {
   return postJSON<SyncResult>("/admin/sync", {});
 }
+
+// ── Remediation proposals (ADR 0020 / spec 011 Use Cases 1+2) ────────────────
+// Every proposal here is propose-only until explicitly approved — nothing in
+// this file executes an infrastructure change on its own.
+
+export interface RemediationProposal {
+  id: string;
+  trace_id?: string;
+  use_case: "incident_responder" | "deployment_guardian";
+  namespace: string;
+  service: string;
+  proposed_action: "restart_deployment" | "scale_deployment" | "rollback_deployment" | "rotate_cert" | "human_escalation";
+  action_params: Record<string, unknown>;
+  analysis: {
+    reasoning?: string;
+    blast_radius?: string;
+    evidence?: string[];
+    confidence?: number;
+  };
+  status: "pending" | "approved" | "rejected" | "executed" | "failed" | "expired";
+  created_at: string;
+  expires_at: string;
+  decided_at?: string;
+  decided_by?: string;
+  executed_at?: string;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export async function listRemediationProposals(status?: string): Promise<RemediationProposal[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await fetch(`/admin/remediation${qs}`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<RemediationProposal[]>;
+}
+
+export function approveRemediation(id: string): Promise<RemediationProposal> {
+  return postJSON<RemediationProposal>(`/admin/remediation/${encodeURIComponent(id)}/approve`, {});
+}
+
+export function rejectRemediation(id: string): Promise<RemediationProposal> {
+  return postJSON<RemediationProposal>(`/admin/remediation/${encodeURIComponent(id)}/reject`, {});
+}

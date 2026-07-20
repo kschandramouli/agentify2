@@ -170,6 +170,56 @@ type QueryResponse struct {
 	Tier   string `json:"tier,omitempty"`
 }
 
+// RemediationStore is the remediation-proposal CRUD interface implemented by
+// the Postgres client (ADR 0020 / spec 011 Use Cases 1+2).
+type RemediationStore interface {
+	CreateRemediationProposal(ctx context.Context, p *pgstore.RemediationProposal) error
+	GetRemediationProposal(ctx context.Context, id string) (*pgstore.RemediationProposal, error)
+	ListRemediationProposals(ctx context.Context, status string, limit int) ([]pgstore.RemediationProposal, error)
+	DecideRemediationProposal(ctx context.Context, id, status, decidedBy string) (bool, error)
+	CompleteRemediationProposal(ctx context.Context, id, status string, result map[string]interface{}, errMsg string) error
+	ProposalExistsForEvent(ctx context.Context, sourceEventID string) (bool, error)
+}
+
+// RemediationProposalResponse is the API shape of a remediation proposal.
+type RemediationProposalResponse struct {
+	ID             string                 `json:"id"`
+	TraceID        string                 `json:"trace_id,omitempty"`
+	UseCase        string                 `json:"use_case"`
+	Namespace      string                 `json:"namespace"`
+	Service        string                 `json:"service"`
+	ProposedAction string                 `json:"proposed_action"`
+	ActionParams   map[string]interface{} `json:"action_params"`
+	Analysis       map[string]interface{} `json:"analysis"`
+	Status         string                 `json:"status"`
+	CreatedAt      time.Time              `json:"created_at"`
+	ExpiresAt      time.Time              `json:"expires_at"`
+	DecidedAt      *time.Time             `json:"decided_at,omitempty"`
+	DecidedBy      string                 `json:"decided_by,omitempty"`
+	ExecutedAt     *time.Time             `json:"executed_at,omitempty"`
+	Result         map[string]interface{} `json:"result,omitempty"`
+	Error          string                 `json:"error,omitempty"`
+}
+
+func remediationToResponse(p pgstore.RemediationProposal) RemediationProposalResponse {
+	params := p.ActionParams
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	analysis := p.Analysis
+	if analysis == nil {
+		analysis = map[string]interface{}{}
+	}
+	return RemediationProposalResponse{
+		ID: p.ID, TraceID: p.TraceID, UseCase: p.UseCase,
+		Namespace: p.Namespace, Service: p.Service, ProposedAction: p.ProposedAction,
+		ActionParams: params, Analysis: analysis, Status: p.Status,
+		CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt,
+		DecidedAt: p.DecidedAt, DecidedBy: p.DecidedBy, ExecutedAt: p.ExecutedAt,
+		Result: p.Result, Error: p.Error,
+	}
+}
+
 // CertRenewRequest is the payload for POST /admin/certs/renew.
 type CertRenewRequest struct {
 	Namespace string `json:"namespace"` // K8s namespace (e.g. "payments")

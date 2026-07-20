@@ -206,6 +206,33 @@ func (c *Client) initSchema(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_incident_embeddings_ns_svc
 		ON incident_embeddings (namespace, service);
 
+	-- Remediation proposals (ADR 0020 / spec 011 Use Cases 1+2): every Phase-3
+	-- write action (restart/scale/rollback) is proposed here first and only
+	-- executed after an explicit human approval — never auto-executed.
+	CREATE TABLE IF NOT EXISTS remediation_proposals (
+		id               TEXT PRIMARY KEY,
+		trace_id         TEXT NOT NULL DEFAULT '',
+		use_case         TEXT NOT NULL,                  -- incident_responder | deployment_guardian
+		namespace        TEXT NOT NULL DEFAULT '',
+		service          TEXT NOT NULL DEFAULT '',
+		proposed_action  TEXT NOT NULL,                  -- restart_deployment | scale_deployment | rollback_deployment | rotate_cert | human_escalation
+		action_params    JSONB NOT NULL DEFAULT '{}',
+		analysis         JSONB NOT NULL DEFAULT '{}',     -- evidence, reasoning, blast_radius, confidence
+		status           TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | executed | failed | expired
+		source_event_id  TEXT NOT NULL DEFAULT '',        -- dedupes deploy-guardian checks against k8fy.events
+		created_at       TIMESTAMP DEFAULT NOW(),
+		expires_at       TIMESTAMP NOT NULL,
+		decided_at       TIMESTAMP,
+		decided_by       TEXT NOT NULL DEFAULT '',
+		executed_at      TIMESTAMP,
+		result           JSONB NOT NULL DEFAULT '{}',
+		error            TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_remediation_status  ON remediation_proposals(status);
+	CREATE INDEX IF NOT EXISTS idx_remediation_created  ON remediation_proposals(created_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_source_event
+		ON remediation_proposals(source_event_id) WHERE source_event_id != '';
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -1102,6 +1129,152 @@ func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service st
 		result = append(result, e)
 	}
 	return result, rows.Err()
+}
+
+// ── Remediation proposals (ADR 0020) ────────────────────────────────────────
+
+// RemediationProposal is one propose→approve/reject→execute record for a
+// Phase-3 write action (spec 011 Use Cases 1+2). Producing a proposal makes
+// no infrastructure calls; only an approved proposal is executed.
+type RemediationProposal struct {
+	ID              string
+	TraceID         string
+	UseCase         string // incident_responder | deployment_guardian
+	Namespace       string
+	Service         string
+	ProposedAction  string // restart_deployment | scale_deployment | rollback_deployment | rotate_cert | human_escalation
+	ActionParams    map[string]interface{}
+	Analysis        map[string]interface{}
+	Status          string // pending | approved | rejected | executed | failed | expired
+	SourceEventID   string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	DecidedAt       *time.Time
+	DecidedBy       string
+	ExecutedAt      *time.Time
+	Result          map[string]interface{}
+	Error           string
+}
+
+// CreateRemediationProposal inserts a new pending proposal. p.ID must be set by the caller.
+func (c *Client) CreateRemediationProposal(ctx context.Context, p *RemediationProposal) error {
+	paramsJSON, err := json.Marshal(p.ActionParams)
+	if err != nil {
+		return fmt.Errorf("marshal action_params: %w", err)
+	}
+	analysisJSON, err := json.Marshal(p.Analysis)
+	if err != nil {
+		return fmt.Errorf("marshal analysis: %w", err)
+	}
+	_, err = c.db.ExecContext(ctx, `
+		INSERT INTO remediation_proposals
+		  (id, trace_id, use_case, namespace, service, proposed_action,
+		   action_params, analysis, status, source_event_id, created_at, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,NOW(),$10)`,
+		p.ID, p.TraceID, p.UseCase, p.Namespace, p.Service, p.ProposedAction,
+		paramsJSON, analysisJSON, p.SourceEventID, p.ExpiresAt)
+	return err
+}
+
+const remediationSelectCols = `
+	SELECT id, trace_id, use_case, namespace, service, proposed_action,
+	       action_params, analysis, status, source_event_id,
+	       created_at, expires_at, decided_at, decided_by, executed_at, result, error
+	FROM remediation_proposals`
+
+func scanRemediationProposal(row interface{ Scan(...any) error }) (*RemediationProposal, error) {
+	var p RemediationProposal
+	var paramsJSON, analysisJSON, resultJSON []byte
+	err := row.Scan(
+		&p.ID, &p.TraceID, &p.UseCase, &p.Namespace, &p.Service, &p.ProposedAction,
+		&paramsJSON, &analysisJSON, &p.Status, &p.SourceEventID,
+		&p.CreatedAt, &p.ExpiresAt, &p.DecidedAt, &p.DecidedBy, &p.ExecutedAt, &resultJSON, &p.Error)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(paramsJSON, &p.ActionParams)
+	_ = json.Unmarshal(analysisJSON, &p.Analysis)
+	_ = json.Unmarshal(resultJSON, &p.Result)
+	return &p, nil
+}
+
+// GetRemediationProposal returns one proposal by ID.
+func (c *Client) GetRemediationProposal(ctx context.Context, id string) (*RemediationProposal, error) {
+	row := c.db.QueryRowContext(ctx, remediationSelectCols+` WHERE id = $1`, id)
+	return scanRemediationProposal(row)
+}
+
+// ListRemediationProposals returns proposals newest-first, optionally filtered by status.
+// An empty status returns all proposals.
+func (c *Client) ListRemediationProposals(ctx context.Context, status string, limit int) ([]RemediationProposal, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var rows *sql.Rows
+	var err error
+	if status != "" {
+		rows, err = c.db.QueryContext(ctx,
+			remediationSelectCols+` WHERE status = $1 ORDER BY created_at DESC LIMIT $2`, status, limit)
+	} else {
+		rows, err = c.db.QueryContext(ctx,
+			remediationSelectCols+` ORDER BY created_at DESC LIMIT $1`, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list remediation proposals: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RemediationProposal
+	for rows.Next() {
+		p, err := scanRemediationProposal(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan remediation proposal: %w", err)
+		}
+		result = append(result, *p)
+	}
+	return result, rows.Err()
+}
+
+// DecideRemediationProposal transitions a proposal from pending to approved/rejected.
+// The WHERE status='pending' guard makes this idempotent: a duplicate click or
+// webhook retry after the first decision affects zero rows (ok==false), so the
+// caller must treat that as "already decided" rather than re-executing.
+func (c *Client) DecideRemediationProposal(ctx context.Context, id, status, decidedBy string) (bool, error) {
+	res, err := c.db.ExecContext(ctx, `
+		UPDATE remediation_proposals
+		SET status = $1, decided_at = NOW(), decided_by = $2
+		WHERE id = $3 AND status = 'pending'`,
+		status, decidedBy, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ProposalExistsForEvent reports whether a proposal already exists for the
+// given source deploy event (dedupes DeploymentGuardian's sweep so the same
+// deploy never generates a second proposal).
+func (c *Client) ProposalExistsForEvent(ctx context.Context, sourceEventID string) (bool, error) {
+	var exists bool
+	err := c.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM remediation_proposals WHERE source_event_id = $1)`,
+		sourceEventID).Scan(&exists)
+	return exists, err
+}
+
+// CompleteRemediationProposal records the outcome of executing an approved proposal.
+func (c *Client) CompleteRemediationProposal(ctx context.Context, id, status string, result map[string]interface{}, errMsg string) error {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	_, err = c.db.ExecContext(ctx, `
+		UPDATE remediation_proposals
+		SET status = $1, executed_at = NOW(), result = $2, error = $3
+		WHERE id = $4`,
+		status, resultJSON, errMsg, id)
+	return err
 }
 
 // ── Model pricing ────────────────────────────────────────────────────────────

@@ -86,3 +86,14 @@ class ReasoningOutput(BaseModel):
     findings: List[Any] = []
     likely_cause: Optional[str] = None
     severity: str = "info"  # info | warning | critical
+
+    # New remediation-proposal fields (ADR 0020 / spec 011 Use Cases 1+2).
+    # Empty/None for every other prompt. This call NEVER executes anything —
+    # it only produces the fields a human reviews before approving.
+    degraded: bool = True        # whether this situation actually warrants a proposal (see DeploymentGuardianSkill)
+    proposed_action: str = ""   # restart_deployment | scale_deployment | rollback_deployment | rotate_cert | human_escalation
+    target_deployment: str = ""  # deployment name the action applies to; empty for human_escalation
+    target_replicas: Optional[float] = None  # desired replica count — only for scale_deployment
+    blast_radius: str = ""       # one sentence: what could go wrong if this is approved
+    evidence: List[str] = []     # bullets supporting the decision
+    reasoning: str = ""          # why this action, not an alternative

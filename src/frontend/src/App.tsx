@@ -6,8 +6,9 @@ import { SyncPanel } from "./components/SyncPanel";
 import { MetricsPanel } from "./components/MetricsPanel";
 import { PricingPanel } from "./components/PricingPanel";
 import { ChatPanel } from "./components/ChatPanel";
+import { RemediationPanel } from "./components/RemediationPanel";
 
-type Page = "observability" | "registry" | "traces" | "sync" | "metrics" | "pricing" | "chat";
+type Page = "observability" | "registry" | "traces" | "sync" | "metrics" | "pricing" | "chat" | "remediation";
 
 interface NavItem {
   id: Page;
@@ -32,11 +33,12 @@ const MAIN_NAV: NavItem[] = [
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { id: "registry",  label: "Pod Registry",    icon: "⬡", description: "Browse live pods"            },
-  { id: "traces",    label: "Query History",   icon: "≡", description: "Past queries & traces"       },
-  { id: "sync",      label: "Namespace Sync",  icon: "⟳", description: "Sync cluster namespaces"    },
-  { id: "metrics",   label: "Metrics",         icon: "◈", description: "Token usage & cost"          },
-  { id: "pricing",   label: "Model Pricing",   icon: "⊙", description: "$/MTok rates for all models" },
+  { id: "registry",     label: "Pod Registry",    icon: "⬡", description: "Browse live pods"            },
+  { id: "traces",       label: "Query History",   icon: "≡", description: "Past queries & traces"       },
+  { id: "sync",         label: "Namespace Sync",  icon: "⟳", description: "Sync cluster namespaces"    },
+  { id: "metrics",      label: "Metrics",         icon: "◈", description: "Token usage & cost"          },
+  { id: "pricing",      label: "Model Pricing",   icon: "⊙", description: "$/MTok rates for all models" },
+  { id: "remediation",  label: "Remediation",     icon: "⏸", description: "Proposed actions awaiting approval (ADR 0020)" },
 ];
 
 const ALL_NAV = [...MAIN_NAV, ...ADMIN_NAV];
@@ -130,6 +132,7 @@ export function App() {
           {page === "metrics"  && <MetricsPanel />}
           {page === "pricing"  && <PricingPanel />}
           {page === "chat"     && <ChatPanel />}
+          {page === "remediation" && <RemediationPanel />}
         </main>
       </div>
     </div>

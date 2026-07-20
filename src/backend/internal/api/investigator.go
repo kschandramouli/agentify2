@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -14,7 +15,13 @@ import (
 	"github.com/chan/agentify/backend/internal/models"
 	"github.com/chan/agentify/backend/internal/orchestrator/evaluator"
 	"github.com/chan/agentify/backend/internal/storage/registry"
+	pgstore "github.com/chan/agentify/backend/internal/storage/postgres"
 )
+
+// k8sPodSuffix strips the two trailing K8s hash segments from a pod name to
+// recover its deployment/service name (same technique used by
+// storage/postgres.TrackedEntities).
+var k8sPodSuffix = regexp.MustCompile(`-[a-z0-9]{6,12}-[a-z0-9]{5}$`)
 
 // reasoner is the slice of the agent client the investigator needs; an interface
 // so the sweep loop can be tested without a real agent.
@@ -36,12 +43,19 @@ type InvestigationConfig struct {
 	MaxPerSweep     int
 	Cooldown        time.Duration
 	CertCriticalDays int
+
+	// RemediationEnabled additionally proposes a remediation (ADR 0020 / spec
+	// 011 Use Case 1) when a namespace diagnoses as DEGRADED/UNHEALTHY. It is
+	// never auto-executed — only a pending proposal is created.
+	RemediationEnabled bool
+	ProposalTTL        time.Duration
 }
 
 // nsAnomaly is the deterministic trigger summary for one namespace.
 type nsAnomaly struct {
-	reasons   []string
-	hasUnhealthy bool // pod-level failure → critical; cert-only → warning
+	reasons      []string
+	services     []string // best-effort deployment names derived from failing pods, for remediation targeting
+	hasUnhealthy bool      // pod-level failure → critical; cert-only → warning
 }
 
 func (a nsAnomaly) severity() string {
@@ -58,13 +72,14 @@ type incident struct {
 // Investigator runs the periodic sweep → diagnose → notify loop. It reuses the
 // deterministic evaluator to trigger and the existing diagnose path to explain.
 type Investigator struct {
-	registry  registry.PodStore
-	queryExec signalFetcher
-	reasoner  reasoner
-	redactor  *governance.Redactor
-	notifier  Notifier
-	logger    *slog.Logger
-	cfg       InvestigationConfig
+	registry         registry.PodStore
+	queryExec        signalFetcher
+	reasoner         reasoner
+	redactor         *governance.Redactor
+	notifier         Notifier
+	remediationStore RemediationStore // nil disables remediation proposals even if cfg.RemediationEnabled
+	logger           *slog.Logger
+	cfg              InvestigationConfig
 
 	open      map[string]incident  // currently-open incidents, keyed by namespace
 	lastAlert map[string]time.Time // last open/close action per namespace (cooldown)
@@ -76,15 +91,16 @@ func NewInvestigator(h *Handler, notifier Notifier, cfg InvestigationConfig, log
 		cfg.MaxPerSweep = 5
 	}
 	return &Investigator{
-		registry:  h.orch.GetPodRegistry(),
-		queryExec: h.queryExec,
-		reasoner:  h.agentClient,
-		redactor:  h.redactor,
-		notifier:  notifier,
-		logger:    logger,
-		cfg:       cfg,
-		open:      map[string]incident{},
-		lastAlert: map[string]time.Time{},
+		registry:         h.orch.GetPodRegistry(),
+		queryExec:        h.queryExec,
+		reasoner:         h.agentClient,
+		redactor:         h.redactor,
+		notifier:         notifier,
+		remediationStore: h.remediationStore,
+		logger:           logger,
+		cfg:              cfg,
+		open:             map[string]incident{},
+		lastAlert:        map[string]time.Time{},
 	}
 }
 
@@ -182,13 +198,16 @@ func (in *Investigator) gather(ctx context.Context) (map[string]nsAnomaly, error
 		return nil, err
 	}
 	out := map[string]nsAnomaly{}
-	add := func(ns, reason string, unhealthy bool) {
+	add := func(ns, reason, service string, unhealthy bool) {
 		if ns == "" {
 			return
 		}
 		a := out[ns]
 		a.reasons = append(a.reasons, reason)
 		a.hasUnhealthy = a.hasUnhealthy || unhealthy
+		if service != "" && !containsString(a.services, service) {
+			a.services = append(a.services, service)
+		}
 		out[ns] = a
 	}
 
@@ -210,7 +229,9 @@ func (in *Investigator) gather(ctx context.Context) (map[string]nsAnomaly, error
 					continue
 				}
 				if status, reason := evaluator.PodHealth(p); status == evaluator.StatusUnhealthy {
-					add(ns, fmt.Sprintf("pod %s: %s", asString(p["pod_id"]), reason), true)
+					podID := asString(p["pod_id"])
+					service := k8sPodSuffix.ReplaceAllString(podID, "")
+					add(ns, fmt.Sprintf("pod %s: %s", podID, reason), service, true)
 				}
 			}
 		case pod.ID == "k8fy.certificates":
@@ -226,7 +247,7 @@ func (in *Investigator) gather(ctx context.Context) (map[string]nsAnomaly, error
 				}
 				_, days, _ := evaluator.CertRenewal(p)
 				if days < in.cfg.CertCriticalDays {
-					add(asString(p["namespace"]), fmt.Sprintf("cert %s expires in %dd", asString(p["secret"]), days), false)
+					add(asString(p["namespace"]), fmt.Sprintf("cert %s expires in %dd", asString(p["secret"]), days), "", false)
 				}
 			}
 		}
@@ -274,11 +295,73 @@ func (in *Investigator) investigateAndNotify(ctx context.Context, ns string, an 
 		Sources:   resp.Sources,
 		TraceID:   traceID,
 	}
+
+	// Phase-3 remediation (ADR 0020 / spec 011 Use Case 1) — opt-in. A
+	// DEGRADED/UNHEALTHY diagnosis additionally produces a pending proposal;
+	// it is never auto-executed. Requires an identified service to target.
+	if in.cfg.RemediationEnabled && in.remediationStore != nil &&
+		(resp.Status == "degraded" || resp.Status == "unhealthy") && len(an.services) > 0 {
+		alert.ProposalID = in.proposeRemediation(ctx, ns, an.services[0], traceID, agentData)
+	}
+
 	if err := in.notifier.Send(ctx, alert); err != nil {
 		in.logger.Warn("alert notification failed", "namespace", ns, "trace_id", traceID, "error", err)
 		return
 	}
 	in.logger.Info("investigation alert sent", "namespace", ns, "severity", alert.Severity, "trace_id", traceID)
+}
+
+// proposeRemediation calls IncidentResponderSkill (propose-only — no
+// infrastructure calls) and persists the result as a pending proposal.
+// Returns "" (and logs) on any failure — a failed proposal must never block
+// or degrade the read-only alert this sweep already produces.
+func (in *Investigator) proposeRemediation(ctx context.Context, ns, service, traceID string, agentData map[string]interface{}) string {
+	question := fmt.Sprintf("propose a remediation for %s/%s", ns, service)
+	resp, err := in.reasoner.Reason(question, "incident_respond", agentData, map[string]interface{}{"namespace": ns, "service": service}, traceID)
+	if err != nil {
+		in.logger.Warn("incident responder proposal failed", "namespace", ns, "service", service, "error", err)
+		return ""
+	}
+
+	action, _ := resp.Details["proposed_action"].(string)
+	if action == "" {
+		action = "human_escalation"
+	}
+	params, _ := resp.Details["action_params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+	}
+	p := &pgstore.RemediationProposal{
+		ID:             uuid.New().String(),
+		TraceID:        traceID,
+		UseCase:        "incident_responder",
+		Namespace:      ns,
+		Service:        service,
+		ProposedAction: action,
+		ActionParams:   params,
+		Analysis: map[string]interface{}{
+			"reasoning":    resp.Details["reasoning"],
+			"blast_radius": resp.Details["blast_radius"],
+			"evidence":     resp.Details["evidence"],
+			"confidence":   resp.Confidence,
+		},
+		ExpiresAt: time.Now().Add(in.cfg.ProposalTTL),
+	}
+	if err := in.remediationStore.CreateRemediationProposal(ctx, p); err != nil {
+		in.logger.Warn("persist remediation proposal failed", "namespace", ns, "service", service, "error", err)
+		return ""
+	}
+	return p.ID
+}
+
+// containsString reports whether s is already present in list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // --- helpers ---

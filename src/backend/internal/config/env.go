@@ -50,6 +50,16 @@ type Config struct {
 	InvestigationMaxPerSweep          int
 	InvestigationCooldownMinutes      int
 	InvestigationCertCriticalDays     int
+
+	// Phase-3 remediation with mandatory human approval (ADR 0020 / spec 011
+	// Use Cases 1+2). Both loops are opt-in and default off; proposals are
+	// never auto-executed regardless of confidence.
+	AutonomousRemediationEnabled      bool
+	DeployGuardianEnabled             bool
+	DeployGuardianPollIntervalMinutes int
+	DeployGuardianSettleSeconds       int
+	RemediationProposalTTLMinutes     int
+	RemediationAuthToken              string
 }
 
 // LoadFromEnv loads configuration from environment variables.
@@ -91,6 +101,13 @@ func LoadFromEnv() (*Config, error) {
 
 		RegistryCacheTTLSeconds:      getEnvInt("REGISTRY_CACHE_TTL_SECONDS", 30),
 		RegistryCacheMaxStaleSeconds: getEnvInt("REGISTRY_CACHE_MAX_STALE_SECONDS", 300),
+
+		AutonomousRemediationEnabled:      getEnvBool("AUTONOMOUS_REMEDIATION_ENABLED", false),
+		DeployGuardianEnabled:             getEnvBool("DEPLOY_GUARDIAN_ENABLED", false),
+		DeployGuardianPollIntervalMinutes: getEnvInt("DEPLOY_GUARDIAN_POLL_INTERVAL_MINUTES", 1),
+		DeployGuardianSettleSeconds:       getEnvInt("DEPLOY_GUARDIAN_SETTLE_SECONDS", 30),
+		RemediationProposalTTLMinutes:     getEnvInt("REMEDIATION_PROPOSAL_TTL_MINUTES", 30),
+		RemediationAuthToken:              getEnv("REMEDIATION_AUTH_TOKEN", ""),
 	}
 
 	// Validate required fields for production
@@ -132,4 +149,3 @@ func getEnvBool(key string, defaultVal bool) bool {
 		return defaultVal
 	}
 }
-

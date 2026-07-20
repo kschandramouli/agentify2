@@ -64,6 +64,15 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// Admin: on-demand cert renewal — issues from Vault PKI + updates K8s Secret
 	mux.HandleFunc("POST /admin/certs/renew", h.HandleCertRenew)
 
+	// Remediation proposals (ADR 0020 / spec 011 Use Cases 1+2): propose-only
+	// endpoint + admin approve/reject. Nothing executes without an explicit
+	// approve call — see remediation.go.
+	mux.HandleFunc("POST /api/incidents/respond", h.HandleIncidentRespond)
+	mux.HandleFunc("GET /admin/remediation", h.HandleRemediationList)
+	mux.HandleFunc("GET /admin/remediation/{id}", h.HandleRemediationGet)
+	mux.HandleFunc("POST /admin/remediation/{id}/approve", h.HandleRemediationApprove)
+	mux.HandleFunc("POST /admin/remediation/{id}/reject", h.HandleRemediationReject)
+
 	// TODO: add WebSocket handler for chat
 	// mux.HandleFunc("/ws/chat", h.HandleChatWebSocket)
 

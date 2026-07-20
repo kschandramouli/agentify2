@@ -22,6 +22,10 @@ type Alert struct {
 	Sources   []string
 	TraceID   string
 	Resolved  bool
+	// ProposalID references a pending remediation proposal (ADR 0020) created
+	// alongside this alert. Empty when remediation is disabled or proposing
+	// failed — the alert is still read-only in that case.
+	ProposalID string
 }
 
 // Notifier sends an alert to an outbound channel. Implemented by WebhookNotifier;
@@ -100,6 +104,10 @@ func formatAlertText(a Alert) string {
 	if a.TraceID != "" {
 		fmt.Fprintf(&b, "\ntrace_id: %s", a.TraceID)
 	}
-	b.WriteString("\n(read-only diagnosis — no action taken)")
+	if a.ProposalID != "" {
+		fmt.Fprintf(&b, "\n\n⏸ Remediation proposal #%s is pending review in the Admin Console — no action taken automatically.", a.ProposalID)
+	} else {
+		b.WriteString("\n(read-only diagnosis — no action taken)")
+	}
 	return b.String()
 }

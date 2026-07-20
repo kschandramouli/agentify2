@@ -211,6 +211,119 @@ func TestPurgeOlderThan(t *testing.T) {
 	}
 }
 
+// TestRemediationProposals covers the propose→approve/reject lifecycle (ADR
+// 0020): create, list/filter by status, and — most importantly — that the
+// decide step is idempotent under the WHERE status='pending' guard so a
+// duplicate approve/reject (double click, webhook retry) never re-decides or
+// re-executes an already-decided proposal.
+func TestRemediationProposals(t *testing.T) {
+	client := startEmbedded(t)
+	ctx := context.Background()
+
+	p := &RemediationProposal{
+		ID:             uuid.New().String(),
+		TraceID:        "trace-1",
+		UseCase:        "incident_responder",
+		Namespace:      "payments",
+		Service:        "payment-worker",
+		ProposedAction: "restart_deployment",
+		ActionParams:   map[string]interface{}{"deployment": "payment-worker"},
+		Analysis:       map[string]interface{}{"reasoning": "OOMKilled 3x", "confidence": 0.8},
+		ExpiresAt:      time.Now().Add(30 * time.Minute),
+	}
+	if err := client.CreateRemediationProposal(ctx, p); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	t.Run("get round-trips fields", func(t *testing.T) {
+		got, err := client.GetRemediationProposal(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != "pending" {
+			t.Errorf("want status=pending, got %q", got.Status)
+		}
+		if got.ActionParams["deployment"] != "payment-worker" {
+			t.Errorf("action_params not round-tripped: %v", got.ActionParams)
+		}
+		if got.Analysis["reasoning"] != "OOMKilled 3x" {
+			t.Errorf("analysis not round-tripped: %v", got.Analysis)
+		}
+	})
+
+	t.Run("list filters by status", func(t *testing.T) {
+		pending, err := client.ListRemediationProposals(ctx, "pending", 100)
+		if err != nil || len(pending) != 1 {
+			t.Fatalf("list pending: err=%v rows=%d", err, len(pending))
+		}
+		approved, err := client.ListRemediationProposals(ctx, "approved", 100)
+		if err != nil || len(approved) != 0 {
+			t.Fatalf("list approved: err=%v rows=%d (want 0)", err, len(approved))
+		}
+	})
+
+	t.Run("decide is idempotent — second decision is a no-op", func(t *testing.T) {
+		ok, err := client.DecideRemediationProposal(ctx, p.ID, "approved", "test-actor")
+		if err != nil || !ok {
+			t.Fatalf("first decide: ok=%v err=%v (want ok=true)", ok, err)
+		}
+		ok2, err := client.DecideRemediationProposal(ctx, p.ID, "rejected", "someone-else")
+		if err != nil {
+			t.Fatalf("second decide errored: %v", err)
+		}
+		if ok2 {
+			t.Fatal("second decide should be a no-op (ok=false) — proposal was already decided")
+		}
+		got, err := client.GetRemediationProposal(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get after decide: %v", err)
+		}
+		if got.Status != "approved" {
+			t.Errorf("status should remain 'approved' from the first decision, got %q", got.Status)
+		}
+		if got.DecidedBy != "test-actor" {
+			t.Errorf("decided_by should remain from the first decision, got %q", got.DecidedBy)
+		}
+	})
+
+	t.Run("complete records execution outcome", func(t *testing.T) {
+		if err := client.CompleteRemediationProposal(ctx, p.ID, "executed",
+			map[string]interface{}{"status": "restarted"}, ""); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		got, err := client.GetRemediationProposal(ctx, p.ID)
+		if err != nil {
+			t.Fatalf("get after complete: %v", err)
+		}
+		if got.Status != "executed" {
+			t.Errorf("want status=executed, got %q", got.Status)
+		}
+		if got.Result["status"] != "restarted" {
+			t.Errorf("result not round-tripped: %v", got.Result)
+		}
+	})
+
+	t.Run("ProposalExistsForEvent dedupes DeploymentGuardian's sweep", func(t *testing.T) {
+		eventID := uuid.New().String()
+		exists, err := client.ProposalExistsForEvent(ctx, eventID)
+		if err != nil || exists {
+			t.Fatalf("expected no proposal yet: exists=%v err=%v", exists, err)
+		}
+		dgp := &RemediationProposal{
+			ID: uuid.New().String(), UseCase: "deployment_guardian",
+			Namespace: "payments", Service: "payment-api", ProposedAction: "rollback_deployment",
+			SourceEventID: eventID, ExpiresAt: time.Now().Add(30 * time.Minute),
+		}
+		if err := client.CreateRemediationProposal(ctx, dgp); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		exists, err = client.ProposalExistsForEvent(ctx, eventID)
+		if err != nil || !exists {
+			t.Fatalf("expected proposal to exist: exists=%v err=%v", exists, err)
+		}
+	})
+}
+
 func mustTime(t *testing.T, s string) time.Time {
 	t.Helper()
 	ts, err := time.Parse(time.RFC3339, s)

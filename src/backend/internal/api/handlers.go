@@ -28,30 +28,34 @@ type Handler struct {
 	agentClient      *AgentClient
 	adapterClient    *AdapterClient
 	redactor         *governance.Redactor
-	integrationStore IntegrationStore // nil when postgres is not provisioned
-	traceStore       TraceStore       // nil when postgres is not provisioned
-	pricingStore     PricingStore     // nil when postgres is not provisioned
-	chatStore        ChatStore        // nil when postgres is not provisioned
-	logger           *slog.Logger
+	integrationStore  IntegrationStore // nil when postgres is not provisioned
+	traceStore        TraceStore       // nil when postgres is not provisioned
+	pricingStore      PricingStore     // nil when postgres is not provisioned
+	chatStore         ChatStore        // nil when postgres is not provisioned
+	remediationStore  RemediationStore // nil when postgres is not provisioned
+	remediationConfig RemediationConfig
+	logger            *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
 	return &Handler{
-		orch:             orch,
-		ingester:         ingester,
-		queryExec:        queryExec,
-		agentClient:      NewAgentClient(agentServiceURL),
-		adapterClient:    NewAdapterClient(adapterURL, adapterToken),
-		redactor:         redactor,
-		integrationStore: integrations,
-		traceStore:       traces,
-		pricingStore:     pricing,
-		chatStore:        chat,
-		logger:           logger,
+		orch:              orch,
+		ingester:          ingester,
+		queryExec:         queryExec,
+		agentClient:       NewAgentClient(agentServiceURL),
+		adapterClient:     NewAdapterClient(adapterURL, adapterToken),
+		redactor:          redactor,
+		integrationStore:  integrations,
+		traceStore:        traces,
+		pricingStore:      pricing,
+		chatStore:         chat,
+		remediationStore:  remediation,
+		remediationConfig: remediationCfg,
+		logger:            logger,
 	}
 }
 

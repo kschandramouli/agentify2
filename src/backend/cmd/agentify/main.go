@@ -80,6 +80,7 @@ func main() {
 	var traceStore api.TraceStore
 	var pricingStore api.PricingStore
 	var chatStore api.ChatStore
+	var remediationStore api.RemediationStore
 	if relational, err := orch.GetBackendFactory().GetBackend("relational"); err == nil {
 		if store, ok := relational.(api.IntegrationStore); ok {
 			integrationStore = store
@@ -93,11 +94,22 @@ func main() {
 		if store, ok := relational.(api.ChatStore); ok {
 			chatStore = store
 		}
+		if store, ok := relational.(api.RemediationStore); ok {
+			remediationStore = store
+		}
+	}
+
+	// Phase-3 remediation config (ADR 0020 / spec 011 Use Cases 1+2). Every
+	// write action is proposed first and only executed after an explicit
+	// human approval — never auto-executed regardless of confidence.
+	remediationCfg := api.RemediationConfig{
+		ProposalTTL: time.Duration(cfg.RemediationProposalTTLMinutes) * time.Minute,
+		AuthToken:   cfg.RemediationAuthToken,
 	}
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.
@@ -107,11 +119,34 @@ func main() {
 			MaxPerSweep:      cfg.InvestigationMaxPerSweep,
 			Cooldown:         time.Duration(cfg.InvestigationCooldownMinutes) * time.Minute,
 			CertCriticalDays: cfg.InvestigationCertCriticalDays,
+			// Phase-3 remediation (ADR 0020) — opt-in, off by default. When
+			// enabled, a DEGRADED/UNHEALTHY diagnosis also produces a pending
+			// remediation proposal; it is never auto-executed.
+			RemediationEnabled: cfg.AutonomousRemediationEnabled,
+			ProposalTTL:        remediationCfg.ProposalTTL,
 		}, logger)
 		go inv.Run(janitorCtx)
-		logger.Info("proactive investigation loop enabled", "interval_minutes", cfg.InvestigationSweepIntervalMinutes)
+		logger.Info("proactive investigation loop enabled",
+			"interval_minutes", cfg.InvestigationSweepIntervalMinutes,
+			"remediation_enabled", cfg.AutonomousRemediationEnabled)
 	} else {
 		logger.Info("proactive investigation loop disabled (opt-in)")
+	}
+
+	// Deployment Guardian poller (spec 011 Use Case 2). Opt-in: requires
+	// DEPLOY_GUARDIAN_ENABLED; proposes rollback on post-deploy degradation,
+	// never auto-executes (ADR 0020).
+	if cfg.DeployGuardianEnabled {
+		dg := api.NewDeploymentGuardian(handler, api.DeploymentGuardianConfig{
+			PollInterval: time.Duration(cfg.DeployGuardianPollIntervalMinutes) * time.Minute,
+			SettleAfter:  time.Duration(cfg.DeployGuardianSettleSeconds) * time.Second,
+			ProposalTTL:  remediationCfg.ProposalTTL,
+		}, logger)
+		go dg.Run(janitorCtx)
+		logger.Info("deployment guardian enabled",
+			"poll_interval_minutes", cfg.DeployGuardianPollIntervalMinutes)
+	} else {
+		logger.Info("deployment guardian disabled (opt-in)")
 	}
 
 	// Setup HTTP server

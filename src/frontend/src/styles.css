@@ -1136,6 +1136,57 @@ code {
 .cert-row__renew-msg--err { color: var(--crit); }
 
 /* ─────────────────────────────────────────────────────────────────────────────
+   REMEDIATION PANEL (ADR 0020 / spec 011 Use Cases 1+2)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.remediation-list { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+
+.remediation-blast-radius {
+  color: var(--warn);
+  font-size: 13px;
+  margin: 6px 0;
+}
+
+.remediation-evidence {
+  margin: 6px 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.remediation-evidence li { margin: 2px 0; }
+
+.remediation-meta {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.remediation-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.remediation-result {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.remediation-result pre {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.remediation-history { margin-top: 20px; }
+.remediation-history summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
    DIAGNOSIS CARD
    ───────────────────────────────────────────────────────────────────────────── */
 

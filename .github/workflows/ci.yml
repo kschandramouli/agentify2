@@ -40,8 +40,9 @@ jobs:
       with:
         python-version: "3.11"
         cache: pip
-    - run: pip install -r requirements.txt
+    - run: pip install -r requirements-dev.txt
     - run: python -m py_compile $(find . -name "*.py" -not -path "./.venv/*")
+    - run: python -m pytest tests/ -q
 
   adapter:
     name: Adapter (Python)

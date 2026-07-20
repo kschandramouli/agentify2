@@ -74,6 +74,19 @@ spec:
           value: "60"
         - name: INVESTIGATION_ENABLED
           value: "false"   # opt-in; set to "true" and add INVESTIGATION_WEBHOOK_URL to enable
+        # Phase-3 remediation (ADR 0020 / spec 011 Use Cases 1+2) — every write
+        # action is proposed first and only executed after explicit human
+        # approval; both loops default off. REMEDIATION_AUTH_TOKEN should be
+        # sourced from a Secret (same pattern as ADAPTER_AUTH_TOKEN above) once
+        # a paying deployment turns this on.
+        - name: AUTONOMOUS_REMEDIATION_ENABLED
+          value: "false"
+        - name: DEPLOY_GUARDIAN_ENABLED
+          value: "false"
+        - name: REMEDIATION_PROPOSAL_TTL_MINUTES
+          value: "30"
+        - name: REMEDIATION_AUTH_TOKEN
+          value: ""
         livenessProbe:
           httpGet:
             path: /health

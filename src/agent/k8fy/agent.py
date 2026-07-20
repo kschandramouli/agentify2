@@ -217,6 +217,40 @@ HEALTH_REASONING_SCHEMA: Dict[str, Any] = {
 }
 
 
+# Schema for the remediation-proposal skills (ADR 0020 / spec 011 Use Cases
+# 1+2 — IncidentResponderSkill, DeploymentGuardianSkill). This call NEVER
+# executes anything; it only produces the fields a human reviews before
+# approving. action_params is flattened into explicit typed fields
+# (target_deployment/target_replicas) rather than a free-form object because
+# Claude's structured-output schema requires additionalProperties: false.
+REMEDIATION_REASONING_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string", "description": "One-sentence summary of the proposed remediation."},
+        "status": {"type": "string", "description": "Always 'proposed' — this call never executes anything."},
+        "confidence": {"type": "number", "description": "0.0-1.0; lower if evidence is thin."},
+        "degraded": {
+            "type": "boolean",
+            "description": "Whether this situation actually warrants a remediation proposal. IncidentResponderSkill: always true (the incident is already confirmed). DeploymentGuardianSkill: true only if the post-deploy snapshot is measurably worse and attributable to the deploy.",
+        },
+        "proposed_action": {
+            "type": "string",
+            "enum": ["restart_deployment", "scale_deployment", "rollback_deployment", "rotate_cert", "human_escalation"],
+        },
+        "target_deployment": {"type": "string", "description": "Deployment name the action applies to. Empty for human_escalation."},
+        "target_replicas": {"type": ["number", "null"], "description": "Desired replica count. Only set for scale_deployment; null otherwise."},
+        "blast_radius": {"type": "string", "description": "One sentence: what could go wrong if this action is approved and executed."},
+        "evidence": {"type": "array", "items": {"type": "string"}, "description": "Bullet list of evidence supporting the decision."},
+        "reasoning": {"type": "string", "description": "Why this action was chosen over the alternatives."},
+    },
+    "required": [
+        "answer", "status", "confidence", "degraded", "proposed_action",
+        "target_deployment", "target_replicas", "blast_radius", "evidence", "reasoning",
+    ],
+    "additionalProperties": False,
+}
+
+
 class K8fyAgent:
     """K8fy agent for Kubernetes operations reasoning.
 
@@ -723,6 +757,18 @@ class K8fyAgent:
             details["incident_summary"] = parsed.incident_summary
         if parsed.timeline:
             details["timeline"] = parsed.timeline
+        if parsed.proposed_action:
+            action_params: Dict[str, Any] = {}
+            if parsed.target_deployment:
+                action_params["deployment"] = parsed.target_deployment
+            if parsed.target_replicas is not None:
+                action_params["replicas"] = int(parsed.target_replicas)
+            details["degraded"] = parsed.degraded
+            details["proposed_action"] = parsed.proposed_action
+            details["action_params"] = action_params
+            details["blast_radius"] = parsed.blast_radius
+            details["evidence"] = parsed.evidence
+            details["reasoning"] = parsed.reasoning
 
         return AgentResponse(
             answer=answer,

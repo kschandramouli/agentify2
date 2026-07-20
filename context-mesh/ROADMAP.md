@@ -34,11 +34,12 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P6** | HashiCorp Vault integration — cert management + autonomous rotation | **✅ Scaffold done (2026-06-17)** — open items: Vault HA, Terraform provider, dynamic secrets |
 | **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **✅ Done (2026-06-25)** — `scripts/seed_eval_dataset.py` + `scripts/run_evals.py` + deploy.yml gate; `intent`+`tier` added to QueryResponse | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
 | **P8** | RAG + pgvector + semantic memory (third memory layer) | After P7 | [ADR 0018](decisions/0018-three-layer-memory-architecture.md) |
-| **P9** | PR review agent — second domain use case proving two-tier generalises | After P8 | — |
+| **P9** | PR review agent — second domain use case proving two-tier generalises | **Not started. Architecture decision (2026-07-20): build as its own deployable agent, not a `SkillRouter` entry in `src/agent`** — see below | — |
 | **P10** | Context management at scale — budget-aware truncation, summarisation | Alongside P9 | — |
 | **P11** | Multi-provider routing: Bedrock stub | After P9 | [ADR 0008](decisions/0008-multi-provider-model-routing.md) |
 | **P12** | Multi-turn conversational chat — dedicated Chat nav page | After P11 | Architecture decided 2026-06-17 |
-| **P13** | Agentic use cases expansion | After P12 | [spec 011](specs/011-agentic-use-cases.md) |
+| **P13** | Agentic use cases expansion | **Use Cases 1+2 done (2026-07-20)** — see below; 3/4/5 not started | [spec 011](specs/011-agentic-use-cases.md), [ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md) |
+| **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
 
 ---
 
@@ -599,6 +600,92 @@ CREATE TABLE chat_sessions (
 | 5 | Summarisation at 20 turns | Long sessions compress without losing context |
 
 **See also:** Architecture discussion in project conversation history (2026-06-17).
+
+---
+
+## P13 — Agentic use cases: Incident Responder + Deployment Guardian (2026-07-20)
+
+**Status: done, with a deliberate governance change from spec 011's original design.**
+Use Case 1 (Incident Responder) and Use Case 2 (Deployment Guardian) are built,
+gated by a mandatory human-approval step for every write action — see
+[ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md), which
+amends [ADR 0003](decisions/0003-read-only-to-actions-boundary.md) to authorize
+Phase-3 actions (restart/scale/rollback) with that gate. Spec 011's original
+"confidence > 0.9 → auto-rollback" idea for Use Case 2 was explicitly rejected —
+every proposal requires an explicit approve/reject, regardless of confidence.
+
+**What shipped:**
+- `remediation_proposals` Postgres table + propose→approve/reject→execute
+  lifecycle (idempotent decisions, TTL-bounded proposals).
+- `IncidentResponderSkill` (wired into the existing spec 009 investigation
+  loop) and `DeploymentGuardianSkill` (new in-process poller over `k8fy.events`
+  deploy rows) — both Pattern A, both propose-only, never execute.
+- `action_executor.py` — the only code path that writes to a K8s Deployment
+  (restart/scale/rollback-via-change-history), reachable exclusively through a
+  deterministic `execute_remediation` dispatch after approval; never exposed
+  as a Claude-callable tool.
+- Admin Console **Remediation** panel (Approve/Reject) backed by the same POST
+  API (`/admin/remediation/{id}/approve|reject`, bearer-token guarded) so an
+  external approver (Slack, PagerDuty) can call it later without a redesign.
+- RBAC: a new namespace-scoped `agent-remediator` Role (mirrors the existing
+  `agent-cert-renewer` pattern), not a namespace-wide grant.
+
+**Deliberately deferred:** full ReplicaSet-revision rollback (MVP replays the
+previous deploy event's recorded images instead); Use Cases 3 (Capacity
+Intelligence), 4 (Knowledge Builder), 5 (PR Review) — untouched by this pass.
+
+---
+
+## P14 — Split out two standalone agents (agreed 2026-07-20)
+
+**Context:** everything in `src/agent` today is one FastAPI process with nine
+`SkillRouter` skills plus the chat agent — a router pattern (deterministic
+Go-side `inferIntent()` dispatch, not agent-to-agent delegation; see the
+"multi-agent vs one-agent-multi-skill" discussion, 2026-07-20). Reviewed
+whether any current or planned skill has a strong enough reason to be pulled
+out into its own deployable agent instead. Most don't — they share the same
+data model, the same read-only boundary, and the same redaction/tracing/cost
+plumbing, so splitting them would just reintroduce the polyglot-microservice
+complexity [ADR 0010](decisions/0010-postgres-single-store.md) already paid
+down once. Two do:
+
+### P14a — Remediation executor as its own network-isolated agent
+
+**Why:** `RemediationExecutorSkill` / `action_executor.py` (P13 / [ADR
+0020](decisions/0020-phase-3-remediation-with-approval-gate.md)) is the only
+write-capable code in the whole system. Today its isolation from the LLM
+reasoning loop is enforced **by convention** — it's simply never registered
+as a Claude-callable tool. That's a code-review guarantee, not an
+infrastructure one. Splitting it into its own minimal service converts that
+into a network-level guarantee: the general reasoning agent (which processes
+untrusted-ish inputs — log lines, adapter data) would have **no network path**
+to the K8s write RBAC at all, even if a future, more agentic skill widened the
+model's tool surface. Least-privilege separation between "reasons over data"
+and "holds write credentials" is a standard security boundary, not a
+theoretical one.
+
+**Shape:** a small stateless service exposing one dispatch endpoint
+(`restart_deployment` / `scale_deployment` / `rollback_deployment`), called
+only by the backend's `/admin/remediation/{id}/approve` path after a human
+has approved a proposal — same trigger, same RBAC (`agent-remediator` Role),
+just moved out of the general agent pod. No LLM in this service at all.
+
+### P14b — PR review agent (Use Case 5 / P9) as its own agent from the start
+
+**Why:** spec 011 already frames this as "the second-domain use case that
+proves the two-tier pattern generalises" — it shares zero data model with K8s
+pods/certs/events, needs entirely different tools (PR diff, GitHub API) and
+credentials (GitHub tokens, not K8s/Vault), and is triggered by a different
+event source (GitHub webhook) with no dependency on the K8fy pipeline
+running. Folding it into `SkillRouter` as a tenth entry would be the wrong
+call for a domain this disjoint — build it as its own deployable agent (or at
+minimum a fully standalone module) from day one, reusing the two-tier
+pattern (deterministic Tier-1 lint checks + Pattern-A Tier-2 skill) but not
+the K8fy process.
+
+**Sequencing:** independent of each other; P14a is the higher-priority of the
+two (closes an actual security gap in shipped code), P14b can land whenever
+P9 is picked up.
 
 ---
 
