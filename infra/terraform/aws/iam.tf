@@ -154,9 +154,17 @@ resource "aws_iam_role" "ci" {
         StringLike = {
           # Locked to these repos only. agentify2 added 2026-07-20 so it can
           # share this same CI role/cluster/ECR (deliberate — not isolated infra).
+          #
+          # GitHub's OIDC `sub` claim embeds immutable owner/repo IDs inline
+          # (e.g. "repo:kschandramouli@47712058/agentify2@1306530798:ref:...")
+          # rather than the plain "repo:OWNER/REPO:..." form docs commonly show —
+          # confirmed 2026-07-20 by decoding an actual token. Both forms are kept
+          # here so this survives if GitHub ever reverts the format.
           "token.actions.githubusercontent.com:sub" = [
             "repo:kschandramouli/agentify:*",
             "repo:kschandramouli/agentify2:*",
+            "repo:kschandramouli@*/agentify:*",
+            "repo:kschandramouli@*/agentify2@*:*",
           ]
         }
         StringEquals = {
