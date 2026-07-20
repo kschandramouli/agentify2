@@ -152,8 +152,12 @@ resource "aws_iam_role" "ci" {
       Action = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringLike = {
-          # Lock to this repo. Change the org/repo name if needed.
-          "token.actions.githubusercontent.com:sub" = "repo:kschandramouli/agentify:*"
+          # Locked to these repos only. agentify2 added 2026-07-20 so it can
+          # share this same CI role/cluster/ECR (deliberate — not isolated infra).
+          "token.actions.githubusercontent.com:sub" = [
+            "repo:kschandramouli/agentify:*",
+            "repo:kschandramouli/agentify2:*",
+          ]
         }
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
