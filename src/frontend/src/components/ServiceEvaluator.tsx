@@ -377,8 +377,8 @@ const LLM_SCENARIOS = [
   { tier: 1 as const, label: "Health check",        when: "Any query — always runs first",                cost: "Free" },
   { tier: 1 as const, label: "Certificate check",   when: "Any query — always runs first",                cost: "Free" },
   { tier: 2 as const, label: "Correlated diagnosis", when: "When health or cert is degraded/unhealthy",   cost: "Opus call" },
-  { tier: 2 as const, label: "Change history",       when: "Optional — recent deployments & rollouts",   cost: "Opus call" },
-  { tier: 2 as const, label: "Restart trend",        when: "Optional — restart counts over time",        cost: "Opus call" },
+  { tier: 2 as const, label: "Change history",       when: "Always runs — recent deployments & rollouts", cost: "Opus call" },
+  { tier: 2 as const, label: "Restart trend",        when: "Always runs — restart counts over time",      cost: "Opus call" },
   { tier: 2 as const, label: "Pod logs",             when: "Claude tool — crash reason from container",  cost: "Opus tool" },
   { tier: 2 as const, label: "Metrics history",      when: "Claude tool — time-series data fetch",       cost: "Opus tool" },
   { tier: 2 as const, label: "Proactive sweep",      when: "Background (P4c) — fires on anomaly detect", cost: "Opus call" },
@@ -404,8 +404,6 @@ interface EvalState {
 export function ServiceEvaluator() {
   const [raw, setRaw] = useState("payments/payment");
   const [state, setState] = useState<EvalState>({ phase: "idle", checks: [] });
-  const [runChangeHistory, setRunChangeHistory] = useState(false);
-  const [runRestartTrend, setRunRestartTrend] = useState(false);
   const [showScenarios, setShowScenarios] = useState(false);
 
   const isBusy = state.phase !== "idle" && state.phase !== "done";
@@ -466,15 +464,12 @@ export function ServiceEvaluator() {
     ];
 
     const allOk = checks.every(c => !c.error && c.resp && !NEEDS_CLAUDE.has(c.resp.status));
-    if (allOk && !runChangeHistory && !runRestartTrend) {
-      setState({ phase: "done", checks, ctx });
-      return;
-    }
 
-    // ── Tier-2: diagnosis (when issues found) + optional extras ──
+    // ── Tier-2: correlated diagnosis (only when issues found) + change
+    // history / restart trend (always, on every Diagnose click) ──
     setState({ phase: "tier2", checks, ctx,
-      changeHistory: runChangeHistory ? { pending: true } : undefined,
-      restartTrend: runRestartTrend ? { pending: true } : undefined,
+      changeHistory: { pending: true },
+      restartTrend: { pending: true },
     });
 
     const promises: Promise<void>[] = [];
@@ -498,11 +493,11 @@ export function ServiceEvaluator() {
       }
     }
 
-    // Optional Tier-2 extras
+    // Change history + restart trend — always run alongside every Diagnose click.
     let chResult: Tier2Result | undefined;
     let rtResult: Tier2Result | undefined;
 
-    if (runChangeHistory) {
+    {
       const t = Date.now();
       promises.push(
         checkChangeHistory(ctx)
@@ -510,7 +505,7 @@ export function ServiceEvaluator() {
           .catch(err => { chResult = { error: err instanceof Error ? err.message : "failed", durationMs: Date.now() - t }; })
       );
     }
-    if (runRestartTrend) {
+    {
       const t = Date.now();
       promises.push(
         checkRestartTrend(ctx)
@@ -569,21 +564,7 @@ export function ServiceEvaluator() {
           </button>
         </div>
 
-        {/* Optional Tier-2 checks */}
         <div className="eval-options">
-          <span className="eval-options__label">Also run:</span>
-          <label className="eval-option">
-            <input type="checkbox" checked={runChangeHistory}
-              onChange={e => setRunChangeHistory(e.target.checked)} disabled={isBusy} />
-            <span>Recent deployments</span>
-            <TierTag tier={2} />
-          </label>
-          <label className="eval-option">
-            <input type="checkbox" checked={runRestartTrend}
-              onChange={e => setRunRestartTrend(e.target.checked)} disabled={isBusy} />
-            <span>Restart trend</span>
-            <TierTag tier={2} />
-          </label>
           <button type="button" className="eval-options__info"
             onClick={() => setShowScenarios(v => !v)}>
             {showScenarios ? "▾" : "▸"} When does Claude run?
@@ -645,10 +626,10 @@ export function ServiceEvaluator() {
             </div>
           )}
 
-          {s.phase === "done" && !s.diagnosis && !s.diagError && !runChangeHistory && !runRestartTrend && (
+          {s.phase === "done" && !s.diagnosis && !s.diagError && (
             <div className="eval-results__all-clear">
               <span>✓</span>
-              All checks nominal — Claude was not needed.
+              Health &amp; certs nominal — no active incident to correlate.
             </div>
           )}
 
@@ -663,7 +644,7 @@ export function ServiceEvaluator() {
             </div>
           )}
 
-          {(s.changeHistory || runChangeHistory) && (
+          {s.changeHistory && (
             <div className="eval-results__section">
               <h3 className="eval-results__section-title">Recent deployments <TierTag tier={2} /></h3>
               <Tier2CheckCard
@@ -675,7 +656,7 @@ export function ServiceEvaluator() {
             </div>
           )}
 
-          {(s.restartTrend || runRestartTrend) && (
+          {s.restartTrend && (
             <div className="eval-results__section">
               <h3 className="eval-results__section-title">Restart trend <TierTag tier={2} /></h3>
               <Tier2CheckCard
