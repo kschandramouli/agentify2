@@ -33,6 +33,21 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # TEMPORARY — remove once the OIDC trust-policy mismatch is root-caused.
+    # Prints the actual sub/aud/iss claims GitHub is presenting, so they can be
+    # compared byte-for-byte against the IAM role's trust policy instead of
+    # assumed. These claims aren't secret — they're exactly what AWS evaluates
+    # the trust policy against.
+    - name: Debug OIDC token claims (temporary)
+      run: |
+        IDTOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+        if [ -z "$IDTOKEN" ] || [ "$IDTOKEN" = "null" ]; then
+          echo "ERROR: no ID token returned — check that 'permissions: id-token: write' is in effect for this job."
+          exit 1
+        fi
+        echo "$IDTOKEN" | cut -d '.' -f2 | base64 -d 2>/dev/null | jq .
+
     - name: Configure AWS credentials (OIDC)
       uses: aws-actions/configure-aws-credentials@v4
       with:
