@@ -1,6 +1,8 @@
 # Deploy: build images, push to ECR, and roll out to EKS.
 # Triggered manually (workflow_dispatch) or on merge to main after CI passes.
 #
+# (trivial trigger commit — verifying agentify2's OIDC trust-policy fix, 2026-07-21)
+#
 # Required GitHub Actions secrets:
 #   AWS_ROLE_ARN        — from Terraform output ci_role_arn (OIDC, no long-lived key)
 #   AWS_REGION          — ap-southeast-2
