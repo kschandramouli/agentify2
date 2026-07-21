@@ -40,6 +40,8 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P12** | Multi-turn conversational chat — dedicated Chat nav page | After P11 | Architecture decided 2026-06-17 |
 | **P13** | Agentic use cases expansion | **Use Cases 1+2 done (2026-07-20)** — see below; 3/4/5 not started | [spec 011](specs/011-agentic-use-cases.md), [ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md) |
 | **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
+| **P15** | Pull-based log-platform connector (OpenSearch/Elasticsearch first) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Proposed (2026-07-21) — see below | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit) |
+| **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 
 ---
 
@@ -686,6 +688,72 @@ the K8fy process.
 **Sequencing:** independent of each other; P14a is the higher-priority of the
 two (closes an actual security gap in shipped code), P14b can land whenever
 P9 is picked up.
+
+---
+
+## P15 — Pull-based log-platform connector (proposed 2026-07-21)
+
+**Context:** today's `get_pod_logs` fetches a bounded tail directly from the K8s
+API via the adapter, redacts it (denylist scrubber — freeform text can't use
+the allowlist gate structured fields get), and discards it — never persisted
+(spec 008, [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md)). The
+ask: stop hitting cluster logs directly; integrate with wherever the org's
+logs actually land (Splunk, an OpenSearch/Elasticsearch index, potentially fed
+by Kinesis Firehose).
+
+**Decision (2026-07-21):** pull, not push. The agent becomes a bounded,
+time-windowed *reader* of the existing log platform at diagnosis time — same
+fetch-redact-discard discipline as today, just a different backend behind the
+same tool shape. This explicitly does **not** revisit ADR 0014 or ADR 0010
+(Postgres-only): nothing new gets persisted, so the "logs are ephemeral, no
+retention question" premise holds. **Rejected alternative:** continuous
+stream consumption (agentify itself consuming a live Kafka/Kinesis topic and
+indexing it) — bigger lift (needs a real log store, volume-aware retention,
+ingest-time structured redaction instead of the denylist scrubber), and only
+justified by a proactive/pattern-mining use case that doesn't exist yet. ADR
+0014's own "revisit if" clause anticipates that path; treat it as a distinct
+future decision if a concrete use case (e.g. extending the P4c investigation
+loop) demands it — don't bundle it into this item.
+
+**First target: OpenSearch/Elasticsearch** (query DSL over an index — fits if
+logs are Firehose-delivered into one). Splunk (REST search API) is the
+natural second connector if needed later.
+
+**Shape:** a pluggable log-backend abstraction — direct K8s fetch (existing)
+becomes one implementation; OpenSearch becomes a second. Both sit behind the
+same `get_pod_logs`-equivalent tool contract (bounded tail/window, entity
+filter, redact-before-the-agent-sees-it). No new Postgres tables, no new
+retention janitor.
+
+## P16 — Multi-cluster connector (proposed 2026-07-21)
+
+**Context:** the ask is to keep adding cluster connections (integration +
+authn/authz) over time, not just one hardcoded adapter. This is **more built
+than it looks**: `Integration` (`internal/models/integration.go`) already has
+almost the right shape — `{ID, Name, AdapterURL, Namespaces, Status, Token}`,
+one row per cluster/adapter, full CRUD, admin UI panel. What's missing is
+wiring: the actual outbound adapter client (`h.adapterClient` in
+`handlers.go`) is a single global built once at startup from one adapter
+URL/token — it never consults `integrationStore`.
+
+**Decision (2026-07-21):** tracked as its own item, separate from P15 (log
+platforms). Making it real requires: (1) routing a query's namespace/service
+to the right `Integration` row (namespace→cluster mapping — explicit on the
+record or discovered via sync); (2) a per-Integration `AdapterClient`
+(keyed/cached), not a startup-time singleton; (3) moving `Integration.Token`
+off plaintext Postgres storage — already flagged in the code as a prototype
+shortcut — onto a Secrets-Manager reference, fetched via IRSA the same way the
+agent already fetches its Anthropic/Langfuse keys, since per-cluster/per-log-
+platform credentials (Splunk API tokens, Kafka SASL, Kinesis IAM) are more
+sensitive than the single dev-cluster bearer token this shortcut was written
+for.
+
+**Explicitly not in scope:** this is multi-**cluster**, not multi-**tenant** —
+[ADR 0009](decisions/0009-tenancy-single-tenant-per-deployment.md) (single-
+tenant per deployment, no `tenant_id`/RLS) stays as-is. If this ever needs to
+serve multiple *customers* (not just multiple clusters for one operator),
+that's a separate, larger decision revisiting ADR 0009 — don't let tenant-
+isolation machinery creep in under cover of this item.
 
 ---
 
