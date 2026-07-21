@@ -725,6 +725,71 @@ same `get_pod_logs`-equivalent tool contract (bounded tail/window, entity
 filter, redact-before-the-agent-sees-it). No new Postgres tables, no new
 retention janitor.
 
+**Design refined 2026-07-21 (brainstorm), scope confirmed as read-connector
+only — the ingest pipeline (Fluent Bit/Firehose + OpenSearch domain + index
+templates) is explicitly out of scope for this item; assumed to exist or be
+stood up separately:**
+
+- **Clarified Firehose's role:** it's a delivery mechanism (producer →
+  buffer/batch → OpenSearch), not something queried at read time. Two
+  standard ingest topologies exist upstream of this item — Fluent Bit → ES
+  output plugin directly, or Fluent Bit/app → CloudWatch Logs → subscription
+  filter → Firehose → OpenSearch (only worth the extra hop for fan-out to a
+  second destination like S3). Neither is this item's concern; only the
+  resulting OpenSearch index/schema is.
+- **Interface:** a `LogSource` Go interface (`FetchLogs(ctx, LogQuery) (LogResult, error)`)
+  behind the existing `handlePodLogs` call site. `K8sAdapterLogSource` wraps
+  today's `AdapterClient.FetchLogs` unchanged; `OpenSearchLogSource` is the
+  new implementation. Selected by config (`LOG_SOURCE=k8s_adapter|opensearch`).
+  The agent-side `get_pod_logs` tool contract (`LogRequest`/`LogResponse` shape
+  in `internal/api/adapter_client.go`) does not change.
+- **Query construction:** OpenSearch Query DSL (`POST /<index>/_search`) — bool
+  query on namespace + pod (prefix match for the deployment, same K8s-hash-
+  suffix-stripping already used elsewhere) + container; mandatory bounded
+  `range` filter on `@timestamp` (never an open-ended query); `sort` desc;
+  `size` capped to match today's 100-default/200-cap tail convention.
+  `previous=true` (crashed-container-instance logs) has no direct OpenSearch
+  equivalent without a restart/instance-id field on documents — fallback is
+  bounding the time window tightly around the restart timestamp already known
+  from `k8fy.metrics`, which `DiagnoseSkill` already correlates against.
+- **Schema (greenfield — proposed, not yet built):** modeled on Fluent Bit's
+  standard Kubernetes-filter output (near-zero-transform match if Fluent Bit
+  ever becomes the actual shipper) rather than a bespoke convention:
+  ```
+  @timestamp                    — range-filter field
+  kubernetes.cluster_name       — P16 forward-compat (unused until multi-cluster)
+  kubernetes.namespace_name
+  kubernetes.pod_name
+  kubernetes.container_name
+  kubernetes.labels.app         — optional, deployment-level correlation
+  log.level                     — parsed level if the shipper extracts one
+  message                       — freetext line; the only field the denylist scrubber touches
+  stream                        — stdout/stderr
+  ```
+  Index naming: daily-rotated (`logs-<yyyy.MM.dd>`, queried via a `logs-*`
+  alias) with retention handled by an OpenSearch **Index State Management
+  (ISM)** policy (automatic rollover/deletion) — replaces the Postgres
+  age-based janitor pattern (ADR 0015 already flags that janitor as a
+  stopgap not meant for real log volume; ISM is the native mechanism for
+  exactly this).
+- **Two-layer redaction — a real improvement over today, not just a lateral
+  move:** because OpenSearch documents are structured (unlike a raw K8s log
+  tail), the connector can allowlist at the *field* level (only ever return
+  `{timestamp, level, message, pod, namespace, container}`, silently dropping
+  anything else — arbitrary custom labels, attached metadata) **and** still
+  denylist-scrub the freetext `message` field with the existing `RedactText`
+  scrubber. Belt and suspenders, not possible with a raw pod-log tail. Worth
+  documenting as an ADR update when this lands, not just folded in silently.
+- **Auth: IAM via IRSA** (SigV4-signed requests, fine-grained access control
+  scoped to search/get only — no write/delete) — same pattern already used
+  for Secrets-Manager-backed credentials elsewhere, avoiding a new static
+  credential to rotate. Rejected: basic auth (master user/password) — only
+  the fallback if the OpenSearch domain isn't using IAM-based access control.
+- **Reliability:** request timeout + graceful degradation on a slow/failed
+  query (same `process_tool_call` convention already used everywhere in
+  `tools.py` — a failed tool call returns "logs unavailable," never crashes
+  the diagnose call).
+
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 
 **Context:** the ask is to keep adding cluster connections (integration +
