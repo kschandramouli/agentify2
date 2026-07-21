@@ -61,6 +61,14 @@ This table stays valid forever because it keys on traits, not event types.
 > Postgres events table** (no separate datastore yet) — `GetBackend` aliases the
 > `timeseries`/`logs` store types to the relational events backend. The traits and
 > routing are unchanged; only the realized backend differs. Revisit at scale.
+>
+> **First real `log / search index` realization (2026-07-21, [ADR
+> 0021](../decisions/0021-log-platform-test-infra.md)):** a test-scoped
+> OpenSearch domain now realizes this family for the P15 log connector's
+> `payments` namespace test source — the first store engine beyond Postgres
+> since ADR 0010. Scope is narrow: this is the connector's test pipeline, not
+> a migration of `k8fy.events` (which stays Postgres-aliased per ADR 0013)
+> off the relational store.
 
 An event with multiple access patterns may land in multiple stores (e.g. a ticket
 body → vector for semantic search **and** KV for point-lookup by id). Decide the

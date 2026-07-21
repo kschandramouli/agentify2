@@ -95,3 +95,34 @@ variable "ci_role_name" {
   default     = ""
   description = "Name of the CI IAM role to attach Vault secrets read policy to. Leave empty to skip attachment."
 }
+
+# ── P15 test log-platform (ADR 0021) ─────────────────────────────────────────
+# Fargate + Kinesis Firehose + OpenSearch, used to validate the P15 log
+# connector against a real, isolated log source. Off by default — the
+# OpenSearch domain is the dominant cost item of this whole stack, so it
+# should only exist while a test session is actually running.
+variable "enable_log_platform_test" {
+  type        = bool
+  default     = false
+  description = "Provisions the Fargate profile + Firehose + OpenSearch test log pipeline (ADR 0021). Keep false except during an active test session."
+}
+
+# Single source of truth for every cluster onboarded to the test log
+# pipeline. Onboarding a new cluster = add one entry here (see ADR 0021 for
+# why the Fargate profile scales via for_each but the aws-observability
+# ConfigMap does not).
+variable "clusters" {
+  type = map(object({
+    cluster_name = string
+    subnet_ids   = list(string)
+    namespace    = string
+  }))
+  default     = {}
+  description = "Clusters onboarded to the shared Firehose/OpenSearch log pipeline. Populated in main.tf for the cluster this root module manages; add entries for additional clusters here."
+}
+
+variable "opensearch_instance_type" {
+  type        = string
+  default     = "t3.small.search"
+  description = "Cheapest viable OpenSearch instance type for the test log pipeline (dev/test volume only)."
+}
