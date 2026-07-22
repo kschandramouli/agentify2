@@ -50,9 +50,10 @@ fi
 echo "Onboarding cluster '${CLUSTER_KEY}' (${CLUSTER_NAME}) to Firehose stream '${FIREHOSE_STREAM_NAME}'..."
 aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
-export aws_region="$AWS_REGION"
-export firehose_stream_name="$FIREHOSE_STREAM_NAME"
-envsubst '${aws_region} ${firehose_stream_name}' < "$TEMPLATE" | kubectl apply -f -
+# sed, not envsubst — only two known placeholders, not worth a gettext
+# dependency (envsubst isn't installed by default on macOS, and Homebrew
+# isn't always reachable from every network).
+sed -e "s|\${aws_region}|${AWS_REGION}|g" -e "s|\${firehose_stream_name}|${FIREHOSE_STREAM_NAME}|g" "$TEMPLATE" | kubectl apply -f -
 
 echo "Done. Fargate pods scheduled after this point in the target namespace(s)"
 echo "will get the log router sidecar injected automatically — restart any"
