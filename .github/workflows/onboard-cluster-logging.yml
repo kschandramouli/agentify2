@@ -1,0 +1,68 @@
+# Apply the Fargate logging ConfigMap for one cluster onboarded to the P15
+# test log pipeline (ADR 0021) — the one piece of that pipeline that can't be
+# driven by Terraform's kubernetes provider across multiple clusters (provider
+# connections are static in HCL; see scripts/onboard_cluster_logging.sh).
+#
+# Run once per cluster (or after the ConfigMap template changes) from:
+#   Actions → Onboard cluster logging → Run workflow
+#
+# Prerequisites:
+#   terraform apply -var enable_log_platform_test=true already run
+#   AWS_ROLE_ARN, AWS_REGION  ← GitHub secrets (already set for agentify2)
+#
+# Runs on a GitHub-hosted runner specifically to avoid needing aws/kubectl/jq
+# set up on a local machine or CloudShell — ubuntu-latest already ships all
+# three, and the existing agentify-dev-ci role already has both an EKS access
+# entry (AmazonEKSClusterAdminPolicy) and OIDC trust covering this repo.
+
+name: Onboard cluster logging
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_key:
+        description: 'Cluster key from the `clusters` Terraform variable (e.g. agentify_dev)'
+        required: true
+        default: 'agentify_dev'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  onboard:
+    name: Apply Fargate logging ConfigMap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Terraform init
+        working-directory: infra/terraform/aws
+        run: terraform init
+        env:
+          TF_VAR_anthropic_api_key: "placeholder" # init doesn't evaluate variables; kept for parity with other workflows
+          TF_VAR_github_token:      "unused"
+
+      - name: Run onboarding script
+        run: |
+          chmod +x scripts/onboard_cluster_logging.sh
+          scripts/onboard_cluster_logging.sh "${{ github.event.inputs.cluster_key }}"
+        env:
+          TF_VAR_anthropic_api_key: "placeholder"
+          TF_VAR_github_token:      "unused"
+
+      - name: Verify
+        run: |
+          echo "=== payments namespace pods (look for a fargate-* node) ==="
+          kubectl get pods -n payments -o wide
