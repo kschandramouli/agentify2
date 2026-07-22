@@ -1,7 +1,12 @@
-# ── P15 test log-platform: Fargate → Kinesis Firehose → OpenSearch ───────────
-# ADR 0021. Off by default (var.enable_log_platform_test) — the OpenSearch
-# domain is the dominant cost item here and should only run during an active
-# test session. See ADR 0021 for the full design rationale.
+# ── P15 test log-platform: Fargate → Kinesis Firehose → S3 → Athena ─────────
+# ADR 0021 (revised 2026-07-22). Off by default (var.enable_log_platform_test).
+#
+# This is a TEST HARNESS only — in production, P15's connector reads whatever
+# log platform is already the customer's source of truth (Splunk first,
+# Elasticsearch/OpenSearch second — see ADR 0021/ROADMAP P15). S3 + Athena is
+# not a customer-facing connector target; it's the cheapest way to stand up a
+# realistic, queryable log source to validate the LogSource interface against,
+# without a continuously-billed search-engine instance.
 
 locals {
   # Single source of truth for every cluster onboarded to this log pipeline.
@@ -22,6 +27,8 @@ locals {
   )
 
   active_clusters = var.enable_log_platform_test ? local.log_platform_clusters : {}
+  log_bucket_name = "${local.name}-log-test"
+  glue_db_name    = replace("${local.name}_logs", "-", "_")
 }
 
 # ── Fargate profile(s) — one per onboarded cluster, for_each over the registry ─
@@ -76,24 +83,27 @@ resource "aws_eks_fargate_profile" "log_test" {
   }
 }
 
-# ── Kinesis Firehose delivery stream → OpenSearch (+ S3 failure backup) ──────
+# ── S3 (partitioned by hour) — the Firehose destination for this test harness ─
 
-resource "aws_s3_bucket" "firehose_backup" {
+resource "aws_s3_bucket" "logs" {
   count  = var.enable_log_platform_test ? 1 : 0
-  bucket = "${local.name}-log-test-firehose-backup"
+  bucket = local.log_bucket_name
 }
 
-# Failure-backup data only — not meant to be retained. Short lifecycle.
-resource "aws_s3_bucket_lifecycle_configuration" "firehose_backup" {
+# "logs/" — primary delivered records (Hive-style year=/month=/day=/hour=
+# partitioning, matched by the Glue table's partition projection below).
+# "errors/" — records Firehose couldn't deliver. "athena-results/" — query
+# output location. All test-harness data, not meant to be retained long.
+resource "aws_s3_bucket_lifecycle_configuration" "logs" {
   count  = var.enable_log_platform_test ? 1 : 0
-  bucket = aws_s3_bucket.firehose_backup[0].id
+  bucket = aws_s3_bucket.logs[0].id
 
   rule {
-    id     = "expire-backup-records"
+    id     = "expire-log-test-data"
     status = "Enabled"
-    filter {} # applies to every object in the bucket
+    filter {}
     expiration {
-      days = 7
+      days = 14
     }
   }
 }
@@ -117,132 +127,180 @@ resource "aws_iam_role_policy" "firehose_delivery" {
   name  = "${local.name}-firehose-delivery"
   role  = aws_iam_role.firehose_delivery[0].id
 
+  # S3 only — unlike an OpenSearch destination, Firehose writing to S3 needs
+  # no VPC delivery ENIs, so no ec2:CreateNetworkInterface permissions here.
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket"]
-        Resource = [aws_s3_bucket.firehose_backup[0].arn, "${aws_s3_bucket.firehose_backup[0].arn}/*"]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "es:ESHttpPost", "es:ESHttpPut", "es:ESHttpGet",
-          "es:DescribeElasticsearchDomain", "es:DescribeDomain",
-        ]
-        Resource = ["${aws_opensearch_domain.logs[0].arn}", "${aws_opensearch_domain.logs[0].arn}/*"]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["ec2:CreateNetworkInterface", "ec2:DeleteNetworkInterface", "ec2:DescribeNetworkInterfaces"]
-        Resource = ["*"] # required for Firehose's VPC-delivery ENIs into the OpenSearch domain's subnets
-      },
-    ]
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket"]
+      Resource = [aws_s3_bucket.logs[0].arn, "${aws_s3_bucket.logs[0].arn}/*"]
+    }]
   })
 }
 
 resource "aws_kinesis_firehose_delivery_stream" "logs" {
   count       = var.enable_log_platform_test ? 1 : 0
   name        = "${local.name}-log-test"
-  destination = "opensearch"
+  destination = "extended_s3"
 
-  opensearch_configuration {
-    domain_arn = aws_opensearch_domain.logs[0].arn
-    role_arn   = aws_iam_role.firehose_delivery[0].arn
-    index_name = "logs"
-
-    vpc_config {
-      subnet_ids         = [module.vpc.private_subnets[0]] # single-AZ domain — one subnet is enough
-      security_group_ids = [aws_security_group.firehose_delivery[0].id]
-      role_arn           = aws_iam_role.firehose_delivery[0].arn
-    }
-
-    s3_backup_mode = "FailedDocumentsOnly"
-
-    s3_configuration {
-      role_arn   = aws_iam_role.firehose_delivery[0].arn
-      bucket_arn = aws_s3_bucket.firehose_backup[0].arn
-    }
+  extended_s3_configuration {
+    role_arn            = aws_iam_role.firehose_delivery[0].arn
+    bucket_arn          = aws_s3_bucket.logs[0].arn
+    prefix              = "logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/"
+    error_output_prefix = "errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+    buffering_size      = 5   # MB — small on purpose, this is low test volume
+    buffering_interval  = 300 # seconds
+    compression_format  = "GZIP"
   }
 }
 
-# ── OpenSearch domain (VPC-based, IAM-authenticated, single instance) ───────
+# ── Glue Data Catalog + Athena — the query surface for this test harness ────
+# Partition projection (not MSCK REPAIR / a Glue crawler) so partitions never
+# need a separate sync step — Athena computes them from the query's time
+# range directly, matching the "bounded time window" query discipline P15
+# is designed around.
+#
+# NOTE: validate the JSON SerDe column mapping and types against a real
+# ingested record before relying on this — the Fargate log router's exact
+# output shape hasn't been confirmed against a live pipeline yet.
 
-resource "aws_security_group" "opensearch" {
-  count       = var.enable_log_platform_test ? 1 : 0
-  name        = "${local.name}-opensearch"
-  description = "Allow OpenSearch queries from EKS nodes + Firehose VPC delivery"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress {
-    description     = "OpenSearch from EKS nodes (backend/agent querying logs)"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [module.eks.node_security_group_id, aws_security_group.firehose_delivery[0].id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "aws_glue_catalog_database" "logs" {
+  count = var.enable_log_platform_test ? 1 : 0
+  name  = local.glue_db_name
 }
 
-resource "aws_security_group" "firehose_delivery" {
-  count       = var.enable_log_platform_test ? 1 : 0
-  name        = "${local.name}-firehose-delivery"
-  description = "Firehose's VPC-delivery ENIs writing into the OpenSearch domain"
-  vpc_id      = module.vpc.vpc_id
+resource "aws_glue_catalog_table" "logs" {
+  count         = var.enable_log_platform_test ? 1 : 0
+  name          = "payments_logs"
+  database_name = aws_glue_catalog_database.logs[0].name
+  table_type    = "EXTERNAL_TABLE"
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_opensearch_domain" "logs" {
-  count          = var.enable_log_platform_test ? 1 : 0
-  domain_name    = "${local.name}-logs"
-  engine_version = "OpenSearch_2.15"
-
-  cluster_config {
-    instance_type            = var.opensearch_instance_type
-    instance_count           = 1
-    dedicated_master_enabled = false
-    zone_awareness_enabled   = false # single-AZ — cheapest viable config for test volume
+  parameters = {
+    classification              = "json"
+    "projection.enabled"        = "true"
+    "projection.year.type"      = "integer"
+    "projection.year.range"     = "2026,2100"
+    "projection.month.type"     = "integer"
+    "projection.month.range"    = "1,12"
+    "projection.month.digits"   = "2"
+    "projection.day.type"       = "integer"
+    "projection.day.range"      = "1,31"
+    "projection.day.digits"     = "2"
+    "projection.hour.type"      = "integer"
+    "projection.hour.range"     = "0,23"
+    "projection.hour.digits"    = "2"
+    "storage.location.template" = "s3://${aws_s3_bucket.logs[0].id}/logs/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/"
   }
 
-  ebs_options {
-    ebs_enabled = true
-    volume_type = "gp3"
-    volume_size = 10
+  partition_keys {
+    name = "year"
+    type = "string"
+  }
+  partition_keys {
+    name = "month"
+    type = "string"
+  }
+  partition_keys {
+    name = "day"
+    type = "string"
+  }
+  partition_keys {
+    name = "hour"
+    type = "string"
   }
 
-  vpc_options {
-    subnet_ids         = [module.vpc.private_subnets[0]] # single-AZ — same private subnets RDS already uses
-    security_group_ids = [aws_security_group.opensearch[0].id]
-  }
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.logs[0].id}/logs/"
+    input_format  = "org.apache.hadoop.mapred.TextInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
 
-  # IAM-based access control (matches P15's IRSA auth decision) — no internal
-  # fine-grained-access-control user database needed for this.
-  access_policies = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = {
-        AWS = [
-          module.backend_irsa.iam_role_arn,
-          module.agent_irsa.iam_role_arn,
-          aws_iam_role.firehose_delivery[0].arn,
-        ]
+    ser_de_info {
+      serialization_library = "org.openx.data.jsonserde.JsonSerDe"
+      parameters = {
+        "mapping.timestamp" = "@timestamp"
       }
-      Action   = "es:*"
-      Resource = "arn:aws:es:${var.aws_region}:${data.aws_caller_identity.this.account_id}:domain/${local.name}-logs/*"
-    }]
+    }
+
+    columns {
+      name = "timestamp"
+      type = "string"
+    }
+    columns {
+      name = "kubernetes"
+      type = "struct<cluster_name:string,namespace_name:string,pod_name:string,container_name:string,labels:struct<app:string>>"
+    }
+    columns {
+      name = "log"
+      type = "struct<level:string>"
+    }
+    columns {
+      name = "message"
+      type = "string"
+    }
+    columns {
+      name = "stream"
+      type = "string"
+    }
+  }
+}
+
+resource "aws_athena_workgroup" "logs" {
+  count = var.enable_log_platform_test ? 1 : 0
+  name  = "${local.name}-log-test"
+
+  configuration {
+    enforce_workgroup_configuration = true
+    bytes_scanned_cutoff_per_query  = 1073741824 # 1 GB cap per query — cost safety net for test volume
+    result_configuration {
+      output_location = "s3://${aws_s3_bucket.logs[0].id}/athena-results/"
+    }
+  }
+}
+
+# ── Query access — grants the existing backend/agent IRSA roles (already
+# attached to the pods that will run the P15 connector) Athena/Glue/S3 read
+# access. No new IAM role or ServiceAccount — reuses the IRSA wiring already
+# in place (module.backend_irsa / module.agent_irsa in iam.tf). ─────────────
+
+resource "aws_iam_role_policy" "log_query_access" {
+  for_each = var.enable_log_platform_test ? {
+    backend = module.backend_irsa.iam_role_name
+    agent   = module.agent_irsa.iam_role_name
+  } : {}
+  name = "${local.name}-log-query-${each.key}"
+  role = each.value
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution", "athena:GetQueryExecution",
+          "athena:GetQueryResults", "athena:StopQueryExecution",
+        ]
+        Resource = [aws_athena_workgroup.logs[0].arn]
+      },
+      {
+        Effect = "Allow"
+        Action = ["glue:GetTable", "glue:GetDatabase", "glue:GetPartitions"]
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.this.account_id}:catalog",
+          aws_glue_catalog_database.logs[0].arn,
+          "arn:aws:glue:${var.aws_region}:${data.aws_caller_identity.this.account_id}:table/${local.glue_db_name}/${aws_glue_catalog_table.logs[0].name}",
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:ListBucket"]
+        Resource = [aws_s3_bucket.logs[0].arn, "${aws_s3_bucket.logs[0].arn}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject"]
+        Resource = ["${aws_s3_bucket.logs[0].arn}/athena-results/*"]
+      },
+    ]
   })
 }

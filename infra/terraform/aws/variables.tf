@@ -121,8 +121,3 @@ variable "clusters" {
   description = "Clusters onboarded to the shared Firehose/OpenSearch log pipeline. Populated in main.tf for the cluster this root module manages; add entries for additional clusters here."
 }
 
-variable "opensearch_instance_type" {
-  type        = string
-  default     = "t3.small.search"
-  description = "Cheapest viable OpenSearch instance type for the test log pipeline (dev/test volume only)."
-}

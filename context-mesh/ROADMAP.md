@@ -40,7 +40,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P12** | Multi-turn conversational chat — dedicated Chat nav page | After P11 | Architecture decided 2026-06-17 |
 | **P13** | Agentic use cases expansion | **Use Cases 1+2 done (2026-07-20)** — see below; 3/4/5 not started | [spec 011](specs/011-agentic-use-cases.md), [ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md) |
 | **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
-| **P15** | Pull-based log-platform connector (OpenSearch/Elasticsearch first) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Proposed (2026-07-21) — see below | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit) |
+| **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 
 ---
@@ -715,9 +715,12 @@ justified by a proactive/pattern-mining use case that doesn't exist yet. ADR
 future decision if a concrete use case (e.g. extending the P4c investigation
 loop) demands it — don't bundle it into this item.
 
-**First target: OpenSearch/Elasticsearch** (query DSL over an index — fits if
-logs are Firehose-delivered into one). Splunk (REST search API) is the
-natural second connector if needed later.
+**Connector priority (confirmed 2026-07-22): Splunk first, Elasticsearch/
+OpenSearch second.** Splunk is its own implementation (SPL via the REST
+search-jobs API, Splunk token auth). Elasticsearch and OpenSearch share
+close enough to the same `_search` Query DSL that one connector covers both —
+the design below (query construction, schema) was written against that
+shared API and still applies once it's built as the second connector.
 
 **Shape:** a pluggable log-backend abstraction — direct K8s fetch (existing)
 becomes one implementation; OpenSearch becomes a second. Both sit behind the
@@ -789,6 +792,16 @@ stood up separately:**
   query (same `process_tool_call` convention already used everywhere in
   `tools.py` — a failed tool call returns "logs unavailable," never crashes
   the diagnose call).
+
+**Test harness built 2026-07-21/22 ([ADR 0021](decisions/0021-log-platform-test-infra.md)):**
+Fargate profile (`payments` namespace) → Kinesis Firehose → **S3 (Hive-partitioned)
++ Athena** — not OpenSearch. This is scaffolding to validate the `LogSource`
+interface cheaply (Athena has zero idle cost, unlike a continuously-billed
+search-engine instance); it is explicitly not a production connector target —
+real customers' source of truth is Splunk or Elasticsearch/OpenSearch, per the
+priority above, and those connectors are what actually ship. See ADR 0021 for
+the full infra design (Fargate/cluster-onboarding registry, Glue partition
+projection, IRSA-based query access reusing the existing backend/agent roles).
 
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 

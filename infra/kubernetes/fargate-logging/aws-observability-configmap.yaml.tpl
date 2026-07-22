@@ -8,8 +8,9 @@
 # for_each'd resources can).
 #
 # Placeholders (${...}) are substituted by the onboarding script from the
-# `clusters`/`opensearch` Terraform outputs — nothing here should be hand-edited
-# per cluster; edit the template once, re-run the script per cluster.
+# `clusters`/`log_platform_firehose_stream_name` Terraform outputs — nothing
+# here should be hand-edited per cluster; edit the template once, re-run the
+# script per cluster.
 #
 # NOTE: verify this against AWS's current Fargate logging documentation before
 # relying on it in a new region/EKS version — the Fargate Fluent Bit image's

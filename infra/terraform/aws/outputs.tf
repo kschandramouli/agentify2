@@ -57,12 +57,17 @@ output "clusters" {
   description = "Clusters onboarded to the log pipeline — read by scripts/onboard_cluster_logging.sh (terraform output -json clusters) so cluster config lives in exactly one place."
 }
 
-output "opensearch_endpoint" {
-  value       = try(aws_opensearch_domain.logs[0].endpoint, null)
-  description = "OpenSearch domain endpoint (null when enable_log_platform_test = false)."
-}
-
 output "log_platform_firehose_stream_name" {
   value       = try(aws_kinesis_firehose_delivery_stream.logs[0].name, null)
   description = "Firehose delivery stream name — used by scripts/onboard_cluster_logging.sh to render the Fargate logging ConfigMap."
+}
+
+output "log_platform_athena_workgroup" {
+  value       = try(aws_athena_workgroup.logs[0].name, null)
+  description = "Athena workgroup for querying the test log harness (null when enable_log_platform_test = false). Not a production connector target — see ADR 0021."
+}
+
+output "log_platform_glue_table" {
+  value       = try("${aws_glue_catalog_database.logs[0].name}.${aws_glue_catalog_table.logs[0].name}", null)
+  description = "Glue database.table to query from Athena for the test log harness."
 }

@@ -1,19 +1,21 @@
-# 0021 – Test log-platform infra for P15 (Fargate + Firehose + OpenSearch)
+# 0021 – Test log-platform infra for P15 (Fargate + Firehose + S3/Athena)
 
 ## Status
 
-Accepted   ·   (date: 2026-07-21)
+Accepted   ·   (date: 2026-07-21   ·   revised: 2026-07-22 — OpenSearch destination
+replaced with S3 + Athena; see "Revision" below)
 
 ## Context
 
-P15 ([ROADMAP.md](../ROADMAP.md)) designed a pull-based OpenSearch log
-connector for the agent, replacing direct-cluster log fetch as the intended
-production shape — but there was nowhere to test it against. The only log
-source in the system was on-demand K8s pod-log fetch (spec 008, ADR 0014),
-which is deliberately ephemeral and never persisted.
+P15 ([ROADMAP.md](../ROADMAP.md)) designed a pull-based log connector for the
+agent — reading whatever log platform is already the customer's source of
+truth (most commonly Splunk, Elasticsearch, or OpenSearch), rather than
+hitting cluster logs directly. But there was nowhere to test that connector
+against. The only log source in the system was on-demand K8s pod-log fetch
+(spec 008, ADR 0014), which is deliberately ephemeral and never persisted.
 
 We needed a real, separately-isolated log source and a real ingest pipeline
-into OpenSearch to validate P15's connector against, without:
+to validate P15's connector against, without:
 - provisioning a second EKS cluster (a second $73/mo control plane, a second
   VPC/ALB/Vault setup, and a second OIDC trust-policy configuration — none of
   which is needed just to prove out a log connector), or
@@ -24,7 +26,24 @@ This is also the **first storage backend introduced since ADR 0010** collapsed
 everything to a single Postgres store — `storage-strategy.md`'s `log / search
 index` trait family has existed in the decision function since day one, but
 was only ever realized by aliasing to the Postgres `events` table (ADR 0013).
-This ADR is the first case where it's realized by a real log/search engine.
+This ADR is the first case where it's realized by something else.
+
+## Important distinction: this ADR is a test harness, not the production connector
+
+In production, agentify never owns the log-ingest pipeline — the customer's
+own logging pipeline (their Fluent Bit/Logstash/vendor agents) already feeds
+their existing Splunk/Elasticsearch/OpenSearch, and P15's job is only to
+**read** from that platform at diagnosis time. Everything Fargate/Firehose/S3
+related in this ADR is scaffolding **we** stand up, purely to generate
+realistic, queryable test data to build and validate the read connector
+against — it is not what ships to a customer.
+
+**Production connector priority (confirmed 2026-07-22): Splunk first,
+Elasticsearch/OpenSearch second.** Splunk is its own implementation (SPL via
+the REST search-jobs API, Splunk token auth). Elasticsearch and OpenSearch
+share the same `_search` Query DSL closely enough that one connector
+implementation covers both. Both sit behind the same `LogSource` interface
+already designed in the P15 roadmap entry.
 
 ## Decision
 
@@ -39,17 +58,13 @@ This ADR is the first case where it's realized by a real log/search engine.
    (curl+jq against Vault's HTTP API) for cert issuance, not Vault Agent
    Injector sidecar/webhook injection, and have no DaemonSets, `hostPath`,
    `privileged`, or `hostNetwork` usage.
-2. **Ingest via Kinesis Firehose, not straight to OpenSearch.** Slightly more
-   moving parts than a direct write, but leaves room for a second destination
-   (S3 cold-archive) later without touching the ingest path again, and
-   matches the org's stated intent to standardize on Firehose as the fan-out
-   layer.
-3. **OpenSearch domain: VPC-based, IAM-authenticated, single instance, no
-   dedicated master.** Matches P15's IAM/IRSA auth decision; avoids the
-   internal fine-grained-access-control user database (unneeded complexity
-   for this). This is the dominant cost line item of the whole design —
-   estimate, don't assume, via the AWS Pricing Calculator before leaving it
-   running unattended.
+2. **Ingest via Kinesis Firehose.** Firehose is one-way delivery only (no read
+   API) — its role here is purely test-harness plumbing to get Fargate's
+   stdout into a queryable place cheaply, and it isn't tied to any one
+   destination: the same stream can be repointed or fanned out later without
+   touching the Fargate/ingest side.
+3. **Destination: S3 (Hive-partitioned by hour) + Athena, not an OpenSearch
+   domain.** Revised 2026-07-22 — see "Revision" below.
 4. **Multi-cluster onboarding is registry + `for_each`, not a Terraform
    module per cluster.** A Fargate profile is a pure EKS/AWS-API resource
    (`aws_eks_fargate_profile`) — it needs no live connection to the target
@@ -64,37 +79,63 @@ This ADR is the first case where it's realized by a real log/search engine.
    `clusters` map via `terraform output -json`, kept consistent across every
    cluster (including the first) rather than special-casing cluster #1.
 5. **Explicit cost toggle.** `variable "enable_log_platform_test"` (default
-   `false`) gates the entire Fargate-profile/Firehose/OpenSearch block. The
-   dominant cost item only exists when a test session is actually running;
-   tearing it down between sessions requires no hand-tracking of which
+   `false`) gates the entire Fargate-profile/Firehose/S3/Athena block.
+   Tearing it down between test sessions requires no hand-tracking of which
    resources to destroy.
-6. **The actual `OpenSearchLogSource` Go connector (`LogSource` interface,
-   query construction — already designed in the P15 roadmap entry) is
-   explicitly out of scope here.** This ADR covers only the infra + ingest
-   pipeline needed to produce real, queryable log data to build that
-   connector against.
+6. **The actual production `LogSource` connector implementations (Splunk,
+   Elasticsearch/OpenSearch) are explicitly out of scope here.** This ADR
+   covers only the infra + ingest pipeline needed to produce real, queryable
+   test log data — not the connector code itself, and not a customer-facing
+   deliverable.
+
+## Revision (2026-07-22): OpenSearch domain replaced with S3 + Athena
+
+The original decision used a VPC-based OpenSearch domain as the Firehose
+destination. Reconsidered because:
+- **It doesn't match what's being tested.** Real customers' source of truth
+  is Splunk or Elasticsearch/OpenSearch (their own, already populated by
+  their own pipeline) — this test harness was never meant to *be* that
+  production connector target, so there's no reason it needs to run a real
+  search-engine instance.
+- **Cost and setup complexity.** The OpenSearch domain was the dominant,
+  continuously-billed cost item and needed a VPC, security groups for both
+  querying and Firehose's VPC-delivery ENIs, and an IAM access-policy design
+  — all removed by switching destinations.
+- **Athena has zero idle cost** (pay-per-query-scanned-bytes only, no
+  standing instance) and still satisfies the pull/on-demand, bounded-time-
+  window query discipline P15 is built around — via Hive-style
+  `year=/month=/day=/hour=` S3 partitioning and Athena **partition
+  projection** (computed from the query's time range, not a Glue crawler or
+  `MSCK REPAIR TABLE` sync step).
+- Firehose's destination changed from `opensearch_configuration` to
+  `extended_s3_configuration` — no VPC config needed at all for an S3
+  destination (unlike OpenSearch, which required VPC-delivery ENIs).
+- Query access reuses the same IRSA roles as before
+  (`module.backend_irsa`/`module.agent_irsa`) — extended with
+  Athena/Glue/S3 read permissions instead of an OpenSearch `es:*` access
+  policy statement.
 
 ## Consequences
 
-- **Positive:** a real, low-cost, isolated log source to validate P15
-  against; a clean, low-friction path to onboard additional clusters later
-  (P16) without rearchitecting; the Firehose/OpenSearch pipeline is shared/
-  centralized across every onboarded cluster rather than duplicated per
-  cluster.
-- **Negative / cost accepted:** the OpenSearch domain is the first
-  continuously-billed resource outside the RDS/EKS baseline this project
-  already carries — worth monitoring via Cost Explorer, not just trusting the
-  toggle exists. Firehose-to-VPC-OpenSearch delivery and Fargate-in-public-
-  subnets connectivity are both AWS features assumed to behave the same way
-  the existing EC2 node group's public-subnet/no-NAT setup does — flagged in
-  the implementation as "validate, don't assume" rather than asserted with
-  certainty.
+- **Positive:** a real, near-zero-cost, isolated log source to validate P15's
+  connector interface against; a clean, low-friction path to onboard
+  additional clusters later (P16) without rearchitecting; the Firehose/S3/
+  Athena pipeline is shared/centralized across every onboarded cluster
+  rather than duplicated per cluster.
+- **Negative / cost accepted:** the Glue table's JSON SerDe column mapping is
+  designed against the expected Fargate log router output shape, not yet
+  validated against a real ingested record — flagged as "validate, don't
+  assume" in the implementation, worth confirming before relying on it.
+  Fargate-in-public-subnets connectivity (reaching ECR/Firehose without NAT)
+  is likewise assumed to behave like the existing EC2 node group's
+  public-subnet setup, not yet confirmed live.
 - **Negative / cost accepted:** the onboarding script (not pure Terraform)
   for the one K8s-native artifact is a deliberate compromise forced by a real
   Terraform limitation (static provider connections), not a preference —
   revisit if Terraform ever adds first-class multi-cluster provider
   iteration.
-- **Revisit if:** OpenSearch/Firehose costs materially exceed the rough
-  estimate once real usage is measured; a second cluster is actually
-  onboarded (exercises the `for_each` design for the first time); or the P15
-  connector, once built, reveals the greenfield schema needs revision.
+- **Revisit if:** Athena query costs or S3 storage materially exceed
+  expectations once real usage is measured; a second cluster is actually
+  onboarded (exercises the `for_each` design for the first time); or building
+  the real Splunk/Elasticsearch connectors reveals the greenfield schema
+  needs revision before this test harness's schema is locked in further.

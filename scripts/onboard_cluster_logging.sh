@@ -6,7 +6,7 @@
 # Terraform's kubernetes/helm provider *connections* are static in HCL — there
 # is no supported way to loop a provider connection across multiple clusters'
 # API servers the way ordinary resources loop via for_each. Every other piece
-# of this pipeline (Fargate profile, IAM, Firehose, OpenSearch) IS driven by
+# of this pipeline (Fargate profile, IAM, Firehose, S3/Athena) IS driven by
 # for_each over the `clusters` Terraform variable; this script is the one
 # per-cluster step, reading that same registry via `terraform output -json`
 # so cluster config lives in exactly one place.
