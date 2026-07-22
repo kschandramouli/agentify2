@@ -17,10 +17,14 @@ locals {
     {
       agentify_dev = {
         cluster_name = module.eks.cluster_name
-        subnet_ids   = module.vpc.public_subnets # same subnets the EC2 node group
-        # already uses — free egress via
-        # IGW, no NAT/endpoint cost
-        namespace = "payments"
+        # EKS Fargate profiles reject public subnets outright (confirmed via a
+        # real apply attempt, 2026-07-22 — "not a private subnet" API error).
+        # Single-AZ private subnet, matched by the VPC interface endpoints
+        # below (ecr.api/ecr.dkr/firehose) that give this one AZ's private
+        # subnet the internet-equivalent access Fargate pods need without a
+        # NAT gateway.
+        subnet_ids = [module.vpc.private_subnets[0]]
+        namespace  = "payments"
       }
     },
     var.clusters
@@ -81,6 +85,49 @@ resource "aws_eks_fargate_profile" "log_test" {
   selector {
     namespace = each.value.namespace
   }
+}
+
+# ── VPC interface endpoints — Fargate's only route to ECR/Firehose ──────────
+# Private subnets have no NAT gateway (deliberate, to avoid its ~$35/mo cost)
+# and Fargate profiles reject public subnets outright, so pods there have no
+# other way to pull images or reach Firehose's API. Single-AZ (matches the
+# single private subnet the Fargate profile above uses) to minimize the
+# per-AZ interface-endpoint cost; gated behind the same toggle as everything
+# else so this is $0 when not testing. S3 needs no interface endpoint — the
+# existing free Gateway endpoint (main.tf) already covers ECR's S3-backed
+# image-layer storage.
+
+resource "aws_security_group" "log_test_endpoints" {
+  count       = var.enable_log_platform_test ? 1 : 0
+  name        = "${local.name}-log-test-endpoints"
+  description = "Allow Fargate pods to reach the ECR/Firehose VPC interface endpoints"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description     = "HTTPS from Fargate pods (cluster security group)"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [module.eks.cluster_security_group_id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_vpc_endpoint" "log_test" {
+  for_each = var.enable_log_platform_test ? toset(["ecr.api", "ecr.dkr", "kinesis-firehose"]) : toset([])
+
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${var.aws_region}.${each.value}"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [module.vpc.private_subnets[0]]
+  security_group_ids  = [aws_security_group.log_test_endpoints[0].id]
+  private_dns_enabled = true
 }
 
 # ── S3 (partitioned by hour) — the Firehose destination for this test harness ─

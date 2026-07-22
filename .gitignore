@@ -41,6 +41,9 @@ prescriptive-guidance.pdf
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl.bak
+*.auto.tfvars
+*.tfvars
+!*.tfvars.example
 
 # Claude Code internal files (settings, memory) — do not commit
 .claude/
