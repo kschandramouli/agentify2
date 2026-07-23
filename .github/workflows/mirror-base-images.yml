@@ -1,0 +1,68 @@
+# Mirror the Docker Hub base images the 'payments-test' manifests need into
+# ECR (infra/terraform/aws/logging.tf, aws_ecr_repository.log_test_base_images)
+# — see scripts/mirror_base_images.sh for why this exists (the payments
+# namespace's Fargate profile has no NAT gateway, only VPC endpoints for
+# ECR/Firehose, so Docker Hub pulls from those pods time out — ADR 0021).
+#
+# Run once (or whenever the pinned base image tags change) from:
+#   Actions → Mirror base images to ECR → Run workflow
+#
+# Prerequisites:
+#   terraform apply -var enable_log_platform_test=true already run
+#   AWS_ROLE_ARN, AWS_REGION  ← GitHub secrets (already set for agentify2)
+#
+# Runs on a GitHub-hosted runner rather than a local machine specifically
+# because ubuntu-latest ships Docker + jq + AWS CLI out of the box and has
+# unrestricted internet access to Docker Hub — unlike a machine behind a
+# corporate proxy that corrupts/truncates large binary pulls.
+
+name: Mirror base images to ECR
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  mirror:
+    name: Mirror alpine/nginx base images to ECR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.9"
+
+      - name: Terraform init
+        working-directory: infra/terraform/aws
+        run: terraform init
+        env:
+          TF_VAR_anthropic_api_key: "placeholder" # init doesn't evaluate variables; kept for parity with other workflows
+          TF_VAR_github_token:      "unused"
+
+      - name: Run mirror script
+        run: |
+          chmod +x scripts/mirror_base_images.sh
+          scripts/mirror_base_images.sh
+        env:
+          TF_VAR_anthropic_api_key: "placeholder"
+          TF_VAR_github_token:      "unused"
+
+      - name: Verify
+        run: |
+          echo "=== Mirrored images ==="
+          for repo in alpine nginx; do
+            echo "--- agentify/log-test-base/${repo} ---"
+            aws ecr describe-images --repository-name "agentify/log-test-base/${repo}" \
+              --query 'imageDetails[].imageTags' --output table
+          done
