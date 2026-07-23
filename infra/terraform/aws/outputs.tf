@@ -71,3 +71,8 @@ output "log_platform_glue_table" {
   value       = try("${aws_glue_catalog_database.logs[0].name}.${aws_glue_catalog_table.logs[0].name}", null)
   description = "Glue database.table to query from Athena for the test log harness."
 }
+
+output "log_test_base_image_repos" {
+  value       = { for k, r in aws_ecr_repository.log_test_base_images : k => r.repository_url }
+  description = "ECR repos for the Docker Hub base images mirrored for the Fargate log test harness (alpine, nginx) — used by scripts/mirror_base_images.sh."
+}

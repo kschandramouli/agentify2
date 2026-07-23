@@ -130,6 +130,27 @@ resource "aws_vpc_endpoint" "log_test" {
   private_dns_enabled = true
 }
 
+# ── Mirrored base images (Docker Hub → ECR) ──────────────────────────────────
+# The `payments-test` manifests pull alpine/nginx straight from Docker Hub,
+# which works on the EC2 node group (has internet egress) but NOT on this
+# Fargate profile's subnet — deliberately built with VPC endpoints instead of
+# a NAT gateway to keep this test harness cheap, and ECR endpoints don't cover
+# non-ECR registries. Mirroring the handful of tags this namespace needs into
+# ECR is cheaper than a NAT gateway and needs no ongoing sync (test namespace,
+# pinned tags). Images are pushed manually (see scripts/mirror_base_images.sh)
+# since neither this repo's CI nor the operator's local machine reliably
+# reaches Docker Hub/GitHub release infra through the corporate proxy.
+resource "aws_ecr_repository" "log_test_base_images" {
+  for_each = var.enable_log_platform_test ? toset(["alpine", "nginx"]) : toset([])
+
+  name                 = "${var.project}/log-test-base/${each.key}"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
 # ── S3 (partitioned by hour) — the Firehose destination for this test harness ─
 
 resource "aws_s3_bucket" "logs" {

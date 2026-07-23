@@ -193,7 +193,9 @@ jobs:
         TAG=${{ env.IMAGE_TAG }}
 
         # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
-        for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml; do
+        for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml \
+                 infra/kubernetes/payments-test/payment-api.yaml infra/kubernetes/payments-test/payment-worker.yaml \
+                 infra/kubernetes/payments-test/payment-service.yaml; do
           sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" "$f"
         done
 

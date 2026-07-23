@@ -19,13 +19,12 @@ spec:
       serviceAccountName: payment-worker
       initContainers:
       - name: vault-cert-init
-        image: alpine:3.18
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/log-test-base/alpine:3.18-tools
         command:
         - sh
         - -c
         - |
           set -e
-          apk add --no-cache curl jq >/dev/null 2>&1
           VAULT="http://vault.vault.svc.cluster.local:8200"
           JWT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
           curl -sf -XPOST "$VAULT/v1/auth/kubernetes/login" \
@@ -59,7 +58,7 @@ spec:
             cpu: "200m"
       containers:
       - name: worker
-        image: alpine:3.19
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/log-test-base/alpine:3.19
         command:
         - /bin/sh
         - -c
