@@ -830,6 +830,14 @@ class K8fyAgent:
             actions = []
             for a in parsed.recommended_actions:
                 args = {k: v for k, v in a.arguments.items() if v is not None}
+                # Never trust the model's own namespace guess (seen defaulting
+                # to "default" — a plausible hallucination, not a real value it
+                # was told) — the conversation's context already carries the
+                # authoritative namespace, so it always wins here regardless
+                # of what the model put in arguments. RBAC (agent-live-diagnostics)
+                # only grants access within that one namespace anyway.
+                if context.get("namespace"):
+                    args["namespace"] = context["namespace"]
                 actions.append({"label": a.label, "tool": a.tool, "arguments": args})
             details["recommended_actions"] = actions
         return details, usage
