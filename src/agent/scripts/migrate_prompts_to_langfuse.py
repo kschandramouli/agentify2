@@ -28,6 +28,8 @@ from langfuse import Langfuse  # noqa: E402 — after sys.path manipulation
 from k8fy.prompts import (  # noqa: E402
     CERT_AUDIT_PROMPT,
     CHANGE_HISTORY_PROMPT,
+    CHAT_STRUCTURE_PROMPT,
+    CHAT_SYSTEM_PROMPT,
     DIAGNOSE_PROMPT,
     HEALTH_SKILL_PROMPT,
     RESTART_TREND_PROMPT,
@@ -41,6 +43,8 @@ PROMPTS = [
     ("k8fy/change-history",  CHANGE_HISTORY_PROMPT),
     ("k8fy/restart-trend",   RESTART_TREND_PROMPT),
     ("k8fy/diagnose",        DIAGNOSE_PROMPT),
+    ("k8fy/chat",            CHAT_SYSTEM_PROMPT),
+    ("k8fy/chat-structure",  CHAT_STRUCTURE_PROMPT),
 ]
 
 

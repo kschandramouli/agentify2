@@ -11,7 +11,7 @@ import metrics
 from config.claude_client import get_claude_client
 from config.settings import get_settings
 from k8fy.prompt_manager import get_prompt
-from k8fy.prompts import CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT
+from k8fy.prompts import CHAT_STRUCTURE_PROMPT, CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT
 from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
 from k8fy.tools import TOOLS, process_tool_call
 from models.response import AgentResponse, ReasoningOutput, ToolCall
@@ -19,6 +19,7 @@ from models.response import AgentResponse, ReasoningOutput, ToolCall
 _DEFAULT_SYSTEM_PROMPT = get_prompt("k8fy/system", SYSTEM_PROMPT)
 _DEFAULT_TOOLS = TOOLS
 _CHAT_SYSTEM_PROMPT = get_prompt("k8fy/chat", CHAT_SYSTEM_PROMPT)
+_CHAT_STRUCTURE_PROMPT = get_prompt("k8fy/chat-structure", CHAT_STRUCTURE_PROMPT)
 
 # Model pair for the advisor/executor strategy.
 # Executor (EXECUTOR_MODEL) is the primary model — handles all tool calls cheaply.
@@ -792,21 +793,15 @@ class K8fyAgent:
             response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
-                system=[{
-                    "type": "text",
-                    "text": (
-                        "Restructure the operator-facing answer below into the required schema. "
-                        "Derive timeline/findings/likely_cause from the answer's own content — do "
-                        "not invent evidence beyond what it already states. Only populate "
-                        "recommended_actions with live-diagnostic tool calls (namespace/pod must "
-                        "be real values already discussed above, e.g. from context); leave it "
-                        "empty if nothing there would help."
-                        f"\n\nContext: {json.dumps(context)}"
+                system=[{"type": "text", "text": _CHAT_STRUCTURE_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                output_config={"format": {"type": "json_schema", "schema": CHAT_REASONING_SCHEMA}},
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Context: {json.dumps(context)}"
                         f"\n\nAnswer to restructure:\n{answer_text}"
                     ),
                 }],
-                output_config={"format": {"type": "json_schema", "schema": CHAT_REASONING_SCHEMA}},
-                messages=[{"role": "user", "content": "Restructure the answer as instructed."}],
             )
             u = getattr(response, "usage", None)
             if u:

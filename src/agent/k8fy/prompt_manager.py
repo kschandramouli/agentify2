@@ -16,6 +16,9 @@ Prompt names used by this codebase:
   k8fy/change-history  — ChangeHistorySkill
   k8fy/restart-trend   — RestartTrendSkill
   k8fy/diagnose        — DiagnoseSkill
+  k8fy/chat            — multi-turn Chat page (free-form tool-calling loop)
+  k8fy/chat-structure  — reason_chat()'s second call, restructures the free-form
+                         answer into the sectioned fields the Chat UI renders
 """
 
 import logging

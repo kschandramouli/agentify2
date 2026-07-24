@@ -364,3 +364,16 @@ value.
 rollback on incomplete evidence (e.g. rolling back past a needed migration).
 `evidence` lists the specific pre/post numbers that support the verdict.
 """
+
+# ---------------------------------------------------------------------------
+# Chat answer structuring (reason_chat()'s second, schema-constrained call)
+# ---------------------------------------------------------------------------
+
+CHAT_STRUCTURE_PROMPT = """\
+Restructure the operator-facing answer below into the required schema. \
+Derive timeline/findings/likely_cause from the answer's own content — do \
+not invent evidence beyond what it already states. Only populate \
+recommended_actions with live-diagnostic tool calls (namespace/pod must \
+be real values already discussed above, e.g. from context); leave it \
+empty if nothing there would help.
+"""
