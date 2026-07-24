@@ -1,3 +1,4 @@
+---
 # Apply the Fargate logging ConfigMap for one cluster onboarded to the P15
 # test log pipeline (ADR 0021) — the one piece of that pipeline that can't be
 # driven by Terraform's kubernetes provider across multiple clusters (provider
@@ -40,7 +41,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -51,8 +52,8 @@ jobs:
         working-directory: infra/terraform/aws
         run: terraform init
         env:
-          TF_VAR_anthropic_api_key: "placeholder" # init doesn't evaluate variables; kept for parity with other workflows
-          TF_VAR_github_token:      "unused"
+          TF_VAR_anthropic_api_key: "placeholder"  # init doesn't evaluate variables; kept for parity with other workflows
+          TF_VAR_github_token: "unused"
 
       - name: Run onboarding script
         run: |
@@ -60,7 +61,7 @@ jobs:
           scripts/onboard_cluster_logging.sh "${{ github.event.inputs.cluster_key }}"
         env:
           TF_VAR_anthropic_api_key: "placeholder"
-          TF_VAR_github_token:      "unused"
+          TF_VAR_github_token: "unused"
 
       - name: Verify
         run: |

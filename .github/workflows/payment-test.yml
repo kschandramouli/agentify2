@@ -1,3 +1,4 @@
+---
 # Full P1–P4c integration test using a synthetic payment service in the
 # 'payments' namespace. Exercises every signal the platform is built to handle:
 #
@@ -29,221 +30,221 @@ jobs:
     name: Run full P1–P4c test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Update kubeconfig (with retry)
-      run: |
-        for i in 1 2 3 4 5; do
-          aws eks update-kubeconfig \
-            --name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --region ${{ secrets.AWS_REGION }} && break
-          echo "Attempt $i failed — waiting 15s before retry..."
-          sleep 15
-        done
+      - name: Update kubeconfig (with retry)
+        run: |
+          for i in 1 2 3 4 5; do
+            aws eks update-kubeconfig \
+              --name ${{ secrets.EKS_CLUSTER_NAME }} \
+              --region ${{ secrets.AWS_REGION }} && break
+            echo "Attempt $i failed — waiting 15s before retry..."
+            sleep 15
+          done
 
-    # ── Phase 1: Deploy healthy payment service ──────────────────────────────
-    - name: "Phase 1 — Deploy payments namespace + healthy service"
-      run: |
-        echo "━━━ PHASE 1: Healthy baseline ━━━"
-        # payment-service.yaml/payment-worker.yaml pull base images from the
-        # log-test ECR mirror (see infra/terraform/aws/logging.tf) — the
-        # 'payments' namespace's Fargate profile has no NAT/internet route,
-        # so Docker Hub pulls there time out (ADR 0021).
-        REGISTRY=${{ secrets.ECR_REGISTRY }}
-        sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" \
-          infra/kubernetes/payments-test/payment-service.yaml \
-          infra/kubernetes/payments-test/payment-worker.yaml
+      # ── Phase 1: Deploy healthy payment service ──────────────────────────────
+      - name: "Phase 1 — Deploy payments namespace + healthy service"
+        run: |
+          echo "━━━ PHASE 1: Healthy baseline ━━━"
+          # payment-service.yaml/payment-worker.yaml pull base images from the
+          # log-test ECR mirror (see infra/terraform/aws/logging.tf) — the
+          # 'payments' namespace's Fargate profile has no NAT/internet route,
+          # so Docker Hub pulls there time out (ADR 0021).
+          REGISTRY=${{ secrets.ECR_REGISTRY }}
+          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" \
+            infra/kubernetes/payments-test/payment-service.yaml \
+            infra/kubernetes/payments-test/payment-worker.yaml
 
-        kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
-        kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
+          kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
+          kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
 
-        echo "Waiting for payment deployment to be ready..."
-        kubectl rollout status deployment/payment -n payments --timeout=120s
+          echo "Waiting for payment deployment to be ready..."
+          kubectl rollout status deployment/payment -n payments --timeout=120s
 
-        echo ""
-        echo "Pods:"
-        kubectl get pods -n payments -o wide
+          echo ""
+          echo "Pods:"
+          kubectl get pods -n payments -o wide
 
-    - name: "Phase 1 — Redeploy adapter to watch 'payments' namespace"
-      run: |
-        # The adapter manifest already points to 'payments' + CERT_CHECK_INTERVAL=30s
-        # Push IRSA annotation and ECR registry before applying.
-        REGISTRY=${{ secrets.ECR_REGISTRY }}
-        TAG=$(kubectl get deployment k8fy-adapter -n agentify \
-          -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
-        ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter --query 'Role.Arn' --output text)
+      - name: "Phase 1 — Redeploy adapter to watch 'payments' namespace"
+        run: |
+          # The adapter manifest already points to 'payments' + CERT_CHECK_INTERVAL=30s
+          # Push IRSA annotation and ECR registry before applying.
+          REGISTRY=${{ secrets.ECR_REGISTRY }}
+          TAG=$(kubectl get deployment k8fy-adapter -n agentify \
+            -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
+          ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter --query 'Role.Arn' --output text)
 
-        sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/k8fy-adapter.yaml
-        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
-        # Keep the same image tag currently running
-        sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/k8fy-adapter.yaml
+          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
+          # Keep the same image tag currently running
+          sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
 
-        kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
-        kubectl rollout status deployment/k8fy-adapter -n agentify --timeout=120s
-        echo "Adapter now watching 'payments' namespace (cert check every 30s)"
+          kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+          kubectl rollout status deployment/k8fy-adapter -n agentify --timeout=120s
+          echo "Adapter now watching 'payments' namespace (cert check every 30s)"
 
-    - name: "Phase 1 — Wait 60s for adapter to ingest initial health state"
-      run: |
-        echo "Waiting 60s for initial scrape (pods + services)..."
-        sleep 60
+      - name: "Phase 1 — Wait 60s for adapter to ingest initial health state"
+        run: |
+          echo "Waiting 60s for initial scrape (pods + services)..."
+          sleep 60
 
-    - name: "Phase 1 — Validate: health check (Tier-1 fast path)"
-      run: |
-        echo "━━━ VALIDATION: health_check ━━━"
-        RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"is the payment service healthy?","context":{"namespace":"payments","service":"payment"}}')
-        echo "$RESP" | python3 -m json.tool
-        STATUS=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))")
-        echo "Status: $STATUS"
-        if [ "$STATUS" = "no_data" ]; then
-          echo "⚠ No data yet — adapter may still be starting. Continuing..."
-        else
-          echo "✅ Health data received"
-        fi
+      - name: "Phase 1 — Validate: health check (Tier-1 fast path)"
+        run: |
+          echo "━━━ VALIDATION: health_check ━━━"
+          RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"is the payment service healthy?","context":{"namespace":"payments","service":"payment"}}')
+          echo "$RESP" | python3 -m json.tool
+          STATUS=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))")
+          echo "Status: $STATUS"
+          if [ "$STATUS" = "no_data" ]; then
+            echo "⚠ No data yet — adapter may still be starting. Continuing..."
+          else
+            echo "✅ Health data received"
+          fi
 
-    # ── Phase 2: Rollout → deploy event ─────────────────────────────────────
-    - name: "Phase 2 — Trigger rollout to generate a deploy event"
-      run: |
-        echo "━━━ PHASE 2: Deploy event ━━━"
-        # Bump image from nginx:1.25-alpine → nginx:1.26-alpine to trigger a rollout.
-        # The adapter's watch_deployments will emit a k8fy.events 'deploy' event.
-        # Uses the same log-test ECR mirror as Phase 1 (Docker Hub isn't
-        # reachable from the 'payments' namespace's Fargate profile).
-        REGISTRY=${{ secrets.ECR_REGISTRY }}
-        kubectl set image deployment/payment payment=${REGISTRY}/agentify/log-test-base/nginx:1.26-alpine -n payments
-        kubectl rollout status deployment/payment -n payments --timeout=120s
-        echo "✅ Rollout complete — deploy event should be emitted within 30s"
-        sleep 35
+      # ── Phase 2: Rollout → deploy event ─────────────────────────────────────
+      - name: "Phase 2 — Trigger rollout to generate a deploy event"
+        run: |
+          echo "━━━ PHASE 2: Deploy event ━━━"
+          # Bump image from nginx:1.25-alpine → nginx:1.26-alpine to trigger a rollout.
+          # The adapter's watch_deployments will emit a k8fy.events 'deploy' event.
+          # Uses the same log-test ECR mirror as Phase 1 (Docker Hub isn't
+          # reachable from the 'payments' namespace's Fargate profile).
+          REGISTRY=${{ secrets.ECR_REGISTRY }}
+          kubectl set image deployment/payment payment=${REGISTRY}/agentify/log-test-base/nginx:1.26-alpine -n payments
+          kubectl rollout status deployment/payment -n payments --timeout=120s
+          echo "✅ Rollout complete — deploy event should be emitted within 30s"
+          sleep 35
 
-    - name: "Phase 2 — Validate: change history"
-      run: |
-        echo "━━━ VALIDATION: change_history ━━━"
-        RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"what changed in the payment deployment recently?","context":{"namespace":"payments","deployment":"payment"}}')
-        echo "$RESP" | python3 -m json.tool
+      - name: "Phase 2 — Validate: change history"
+        run: |
+          echo "━━━ VALIDATION: change_history ━━━"
+          RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"what changed in the payment deployment recently?","context":{"namespace":"payments","deployment":"payment"}}')
+          echo "$RESP" | python3 -m json.tool
 
-    # ── Phase 3: CrashLoopBackOff → restart trend ───────────────────────────
-    - name: "Phase 3 — Deploy crashing worker (CrashLoopBackOff)"
-      run: |
-        echo "━━━ PHASE 3: Restart trend ━━━"
-        kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
-        echo "Worker deployed — will crash every ~5s to build restart trend."
-        echo "Waiting 3 min for restart count to climb (6+ scrape cycles at 30s)..."
-        sleep 180
+      # ── Phase 3: CrashLoopBackOff → restart trend ───────────────────────────
+      - name: "Phase 3 — Deploy crashing worker (CrashLoopBackOff)"
+        run: |
+          echo "━━━ PHASE 3: Restart trend ━━━"
+          kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
+          echo "Worker deployed — will crash every ~5s to build restart trend."
+          echo "Waiting 3 min for restart count to climb (6+ scrape cycles at 30s)..."
+          sleep 180
 
-        echo "Current pod state:"
-        kubectl get pods -n payments -o wide
-        echo ""
-        kubectl describe pod -n payments -l app=payment-worker | grep -A 5 "Last State:"
+          echo "Current pod state:"
+          kubectl get pods -n payments -o wide
+          echo ""
+          kubectl describe pod -n payments -l app=payment-worker | grep -A 5 "Last State:"
 
-    - name: "Phase 3 — Validate: restart trend visible"
-      run: |
-        echo "━━━ VALIDATION: metrics_query ━━━"
-        RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"how many times has payment-worker restarted?","context":{"namespace":"payments","service":"payment-worker"}}')
-        echo "$RESP" | python3 -m json.tool
+      - name: "Phase 3 — Validate: restart trend visible"
+        run: |
+          echo "━━━ VALIDATION: metrics_query ━━━"
+          RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"how many times has payment-worker restarted?","context":{"namespace":"payments","service":"payment-worker"}}')
+          echo "$RESP" | python3 -m json.tool
 
-    # ── Phase 4: Expiring TLS cert ───────────────────────────────────────────
-    - name: "Phase 4 — Create TLS secret expiring in 5 days"
-      run: |
-        echo "━━━ PHASE 4: Expiring cert ━━━"
-        # Generate a self-signed cert with 5-day expiry (below 7-day critical threshold).
-        openssl req -x509 -nodes -days 5 -newkey rsa:2048 \
-          -keyout /tmp/tls.key -out /tmp/tls.crt \
-          -subj "/CN=payment.payments.svc.cluster.local" 2>/dev/null
+      # ── Phase 4: Expiring TLS cert ───────────────────────────────────────────
+      - name: "Phase 4 — Create TLS secret expiring in 5 days"
+        run: |
+          echo "━━━ PHASE 4: Expiring cert ━━━"
+          # Generate a self-signed cert with 5-day expiry (below 7-day critical threshold).
+          openssl req -x509 -nodes -days 5 -newkey rsa:2048 \
+            -keyout /tmp/tls.key -out /tmp/tls.crt \
+            -subj "/CN=payment.payments.svc.cluster.local" 2>/dev/null
 
-        kubectl create secret tls payment-tls \
-          --cert=/tmp/tls.crt --key=/tmp/tls.key \
-          -n payments --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret tls payment-tls \
+            --cert=/tmp/tls.crt --key=/tmp/tls.key \
+            -n payments --dry-run=client -o yaml | kubectl apply -f -
 
-        echo "TLS secret created (expires in 5 days)"
-        echo "Waiting 35s for cert scrape (CERT_CHECK_INTERVAL=30s)..."
-        sleep 35
+          echo "TLS secret created (expires in 5 days)"
+          echo "Waiting 35s for cert scrape (CERT_CHECK_INTERVAL=30s)..."
+          sleep 35
 
-    - name: "Phase 4 — Validate: cert check"
-      run: |
-        echo "━━━ VALIDATION: cert_check ━━━"
-        RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"when does the payment-tls certificate expire?","context":{"namespace":"payments","key":"payment-tls"}}')
-        echo "$RESP" | python3 -m json.tool
+      - name: "Phase 4 — Validate: cert check"
+        run: |
+          echo "━━━ VALIDATION: cert_check ━━━"
+          RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"when does the payment-tls certificate expire?","context":{"namespace":"payments","key":"payment-tls"}}')
+          echo "$RESP" | python3 -m json.tool
 
-    # ── Phase 5: Full diagnose ───────────────────────────────────────────────
-    - name: "Phase 5 — Full diagnose (all signals correlated)"
-      run: |
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "  PHASE 5: Full P1–P4c Diagnose"
-        echo "  Signals in play:"
-        echo "    k8fy.live-state.payments → health (worker degraded)"
-        echo "    k8fy.metrics             → restart trend"
-        echo "    k8fy.events              → deploy event (nginx 1.25→1.26)"
-        echo "    k8fy.certificates        → payment-tls expiring in 5d"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
+      # ── Phase 5: Full diagnose ───────────────────────────────────────────────
+      - name: "Phase 5 — Full diagnose (all signals correlated)"
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  PHASE 5: Full P1–P4c Diagnose"
+          echo "  Signals in play:"
+          echo "    k8fy.live-state.payments → health (worker degraded)"
+          echo "    k8fy.metrics             → restart trend"
+          echo "    k8fy.events              → deploy event (nginx 1.25→1.26)"
+          echo "    k8fy.certificates        → payment-tls expiring in 5d"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
 
-        RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"why is payment-worker crashing? diagnose the payment service in payments","context":{"namespace":"payments","service":"payment-worker"}}')
+          RESP=$(curl -s --max-time 200 -X POST http://${{ env.ALB }}/api/query \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"why is payment-worker crashing? diagnose the payment service in payments","context":{"namespace":"payments","service":"payment-worker"}}')
 
-        echo "Full response:"
-        echo "$RESP" | python3 -m json.tool
+          echo "Full response:"
+          echo "$RESP" | python3 -m json.tool
 
-        echo ""
-        echo "── Key fields ──"
-        echo "$RESP" | python3 -c "
-        import sys, json
-        r = json.load(sys.stdin)
-        print('Status   :', r.get('status'))
-        print('Confidence:', r.get('confidence'))
-        print('TraceID  :', r.get('trace_id'))
-        d = r.get('details', {})
-        print('Severity :', d.get('severity'))
-        print('Cause    :', d.get('likely_cause'))
-        print('Findings :')
-        for f in d.get('findings', []):
-            print('  •', f)
-        print('Actions  :')
-        for a in d.get('recommendations', []):
-            print('  •', a)
-        print('Sources  :', r.get('sources'))
-        "
+          echo ""
+          echo "── Key fields ──"
+          echo "$RESP" | python3 -c "
+          import sys, json
+          r = json.load(sys.stdin)
+          print('Status   :', r.get('status'))
+          print('Confidence:', r.get('confidence'))
+          print('TraceID  :', r.get('trace_id'))
+          d = r.get('details', {})
+          print('Severity :', d.get('severity'))
+          print('Cause    :', d.get('likely_cause'))
+          print('Findings :')
+          for f in d.get('findings', []):
+              print('  •', f)
+          print('Actions  :')
+          for a in d.get('recommendations', []):
+              print('  •', a)
+          print('Sources  :', r.get('sources'))
+          "
 
-    # ── Cleanup ─────────────────────────────────────────────────────────────
-    - name: "Cleanup — remove payment test resources"
-      if: github.event.inputs.cleanup == 'yes'
-      run: |
-        echo "━━━ CLEANUP ━━━"
-        kubectl delete namespace payments --ignore-not-found=true
-        echo "Payments namespace deleted."
+      # ── Cleanup ─────────────────────────────────────────────────────────────
+      - name: "Cleanup — remove payment test resources"
+        if: github.event.inputs.cleanup == 'yes'
+        run: |
+          echo "━━━ CLEANUP ━━━"
+          kubectl delete namespace payments --ignore-not-found=true
+          echo "Payments namespace deleted."
 
-        # Restore adapter to watch default (or adjust as needed)
-        kubectl set env deployment/k8fy-adapter -n agentify \
-          K8S_NAMESPACE=payments CERT_CHECK_INTERVAL=300
-        echo "Adapter restored to CERT_CHECK_INTERVAL=300s"
+          # Restore adapter to watch default (or adjust as needed)
+          kubectl set env deployment/k8fy-adapter -n agentify \
+            K8S_NAMESPACE=payments CERT_CHECK_INTERVAL=300
+          echo "Adapter restored to CERT_CHECK_INTERVAL=300s"
 
-    - name: "📋 Test Summary"
-      if: always()
-      run: |
-        echo "=================================================="
-        echo "  PAYMENT TEST SUMMARY"
-        echo "  ALB: http://${{ env.ALB }}"
-        echo "=================================================="
-        echo ""
-        echo "Phase  Signal              Expected outcome"
-        echo "──────────────────────────────────────────────────"
-        echo "1      k8fy.live-state     health_check (Tier-1, <5ms)"
-        echo "2      k8fy.events         deploy event (nginx rollout)"
-        echo "3      k8fy.metrics        restart trend (CrashLoopBackOff)"
-        echo "4      k8fy.certificates   cert expiry in 5d"
-        echo "5      ALL                 correlated diagnose (Tier-2 Opus)"
-        echo "=================================================="
+      - name: "📋 Test Summary"
+        if: always()
+        run: |
+          echo "=================================================="
+          echo "  PAYMENT TEST SUMMARY"
+          echo "  ALB: http://${{ env.ALB }}"
+          echo "=================================================="
+          echo ""
+          echo "Phase  Signal              Expected outcome"
+          echo "──────────────────────────────────────────────────"
+          echo "1      k8fy.live-state     health_check (Tier-1, <5ms)"
+          echo "2      k8fy.events         deploy event (nginx rollout)"
+          echo "3      k8fy.metrics        restart trend (CrashLoopBackOff)"
+          echo "4      k8fy.certificates   cert expiry in 5d"
+          echo "5      ALL                 correlated diagnose (Tier-2 Opus)"
+          echo "=================================================="

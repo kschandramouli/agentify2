@@ -1,3 +1,4 @@
+---
 # Mirror the Docker Hub base images the 'payments-test' manifests need into
 # ECR (infra/terraform/aws/logging.tf, aws_ecr_repository.log_test_base_images)
 # — see scripts/mirror_base_images.sh for why this exists (the payments
@@ -36,7 +37,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -47,8 +48,8 @@ jobs:
         working-directory: infra/terraform/aws
         run: terraform init
         env:
-          TF_VAR_anthropic_api_key: "placeholder" # init doesn't evaluate variables; kept for parity with other workflows
-          TF_VAR_github_token:      "unused"
+          TF_VAR_anthropic_api_key: "placeholder"  # init doesn't evaluate variables; kept for parity with other workflows
+          TF_VAR_github_token: "unused"
 
       - name: Run mirror script
         run: |
@@ -56,7 +57,7 @@ jobs:
           scripts/mirror_base_images.sh
         env:
           TF_VAR_anthropic_api_key: "placeholder"
-          TF_VAR_github_token:      "unused"
+          TF_VAR_github_token: "unused"
 
       - name: Verify
         run: |

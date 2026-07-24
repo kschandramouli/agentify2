@@ -1,3 +1,4 @@
+---
 # Pause: scale EKS nodes to 0 + stop RDS to reduce cost when not actively using.
 #
 # Cost during pause:
@@ -27,84 +28,84 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'pause'
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Snapshot RDS before stopping
-      run: |
-        SNAPSHOT_ID="agentify-dev-pause-$(date +%Y%m%d%H%M%S)"
-        echo "Creating RDS snapshot: $SNAPSHOT_ID"
-        aws rds create-db-snapshot \
-          --db-instance-identifier agentify-dev \
-          --db-snapshot-identifier "$SNAPSHOT_ID" \
-          --region ${{ secrets.AWS_REGION }}
-        echo "Snapshot requested — continuing (creation is async)"
+      - name: Snapshot RDS before stopping
+        run: |
+          SNAPSHOT_ID="agentify-dev-pause-$(date +%Y%m%d%H%M%S)"
+          echo "Creating RDS snapshot: $SNAPSHOT_ID"
+          aws rds create-db-snapshot \
+            --db-instance-identifier agentify-dev \
+            --db-snapshot-identifier "$SNAPSHOT_ID" \
+            --region ${{ secrets.AWS_REGION }}
+          echo "Snapshot requested — continuing (creation is async)"
 
-    - name: Scale EKS nodes to 0
-      run: |
-        # Look up the actual node group name — Terraform appends a unique suffix.
-        NG=$(aws eks list-nodegroups \
-          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --region ${{ secrets.AWS_REGION }} \
-          --query 'nodegroups[0]' --output text)
-        echo "Node group: $NG"
-        aws eks update-nodegroup-config \
-          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --nodegroup-name "$NG" \
-          --scaling-config minSize=0,maxSize=3,desiredSize=0 \
-          --region ${{ secrets.AWS_REGION }}
-        echo "$NG" > /tmp/ng_name
-        echo "Node group scaling to 0 requested"
-
-    - name: Wait for nodes to drain
-      run: |
-        NG=$(cat /tmp/ng_name)
-        echo "Waiting up to 5 min for nodes to scale down..."
-        for i in $(seq 1 30); do
-          COUNT=$(aws eks describe-nodegroup \
+      - name: Scale EKS nodes to 0
+        run: |
+          # Look up the actual node group name — Terraform appends a unique suffix.
+          NG=$(aws eks list-nodegroups \
+            --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'nodegroups[0]' --output text)
+          echo "Node group: $NG"
+          aws eks update-nodegroup-config \
             --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
             --nodegroup-name "$NG" \
-            --query 'nodegroup.scalingConfig.desiredSize' \
-            --output text --region ${{ secrets.AWS_REGION }})
-          if [ "$COUNT" = "0" ]; then
-            echo "Nodes at 0 ✅"; break
-          fi
-          echo "Waiting... ($i/30)"
-          sleep 10
-        done
+            --scaling-config minSize=0,maxSize=3,desiredSize=0 \
+            --region ${{ secrets.AWS_REGION }}
+          echo "$NG" > /tmp/ng_name
+          echo "Node group scaling to 0 requested"
 
-    - name: Stop RDS instance
-      run: |
-        # RDS enters 'backing-up' during snapshot — wait for 'available' first.
-        echo "Waiting for RDS to be available before stopping..."
-        for i in $(seq 1 24); do
-          STATUS=$(aws rds describe-db-instances \
+      - name: Wait for nodes to drain
+        run: |
+          NG=$(cat /tmp/ng_name)
+          echo "Waiting up to 5 min for nodes to scale down..."
+          for i in $(seq 1 30); do
+            COUNT=$(aws eks describe-nodegroup \
+              --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+              --nodegroup-name "$NG" \
+              --query 'nodegroup.scalingConfig.desiredSize' \
+              --output text --region ${{ secrets.AWS_REGION }})
+            if [ "$COUNT" = "0" ]; then
+              echo "Nodes at 0 ✅"; break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 10
+          done
+
+      - name: Stop RDS instance
+        run: |
+          # RDS enters 'backing-up' during snapshot — wait for 'available' first.
+          echo "Waiting for RDS to be available before stopping..."
+          for i in $(seq 1 24); do
+            STATUS=$(aws rds describe-db-instances \
+              --db-instance-identifier agentify-dev \
+              --query 'DBInstances[0].DBInstanceStatus' \
+              --output text --region ${{ secrets.AWS_REGION }})
+            if [ "$STATUS" = "available" ]; then
+              echo "RDS available ✅"; break
+            fi
+            echo "RDS status: $STATUS — waiting ($i/24)..."
+            sleep 10
+          done
+          aws rds stop-db-instance \
             --db-instance-identifier agentify-dev \
-            --query 'DBInstances[0].DBInstanceStatus' \
-            --output text --region ${{ secrets.AWS_REGION }})
-          if [ "$STATUS" = "available" ]; then
-            echo "RDS available ✅"; break
-          fi
-          echo "RDS status: $STATUS — waiting ($i/24)..."
-          sleep 10
-        done
-        aws rds stop-db-instance \
-          --db-instance-identifier agentify-dev \
-          --region ${{ secrets.AWS_REGION }}
-        echo "RDS stop requested (takes ~2 min)"
+            --region ${{ secrets.AWS_REGION }}
+          echo "RDS stop requested (takes ~2 min)"
 
-    - name: Summary
-      run: |
-        echo "✅ Paused. Running cost: ~\$73/month (EKS control plane only)."
-        echo ""
-        echo "Note: ALL pods across ALL namespaces have been evicted (nodes=0)."
-        echo "This includes any payment test pods in the 'payments' namespace."
-        echo "Kubernetes will automatically reschedule them when nodes come back."
-        echo ""
-        echo "Restore with the 'resume' workflow."
-        echo "  → Set 'Verify test services?' to 'yes' to wait for payment pods."
+      - name: Summary
+        run: |
+          echo "✅ Paused. Running cost: ~\$73/month (EKS control plane only)."
+          echo ""
+          echo "Note: ALL pods across ALL namespaces have been evicted (nodes=0)."
+          echo "This includes any payment test pods in the 'payments' namespace."
+          echo "Kubernetes will automatically reschedule them when nodes come back."
+          echo ""
+          echo "Restore with the 'resume' workflow."
+          echo "  → Set 'Verify test services?' to 'yes' to wait for payment pods."

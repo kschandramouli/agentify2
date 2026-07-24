@@ -1,3 +1,4 @@
+---
 # One-shot workflow to check ALB ingress status and controller health.
 # Trigger manually from Actions when the ALB address is missing after deploy.
 
@@ -14,187 +15,187 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Update kubeconfig (with retry)
-      run: |
-        for i in 1 2 3 4 5; do
-          aws eks update-kubeconfig \
-            --name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --region ${{ secrets.AWS_REGION }} && break
-          echo "Attempt $i failed — waiting 15s before retry..."
-          sleep 15
-        done
+      - name: Update kubeconfig (with retry)
+        run: |
+          for i in 1 2 3 4 5; do
+            aws eks update-kubeconfig \
+              --name ${{ secrets.EKS_CLUSTER_NAME }} \
+              --region ${{ secrets.AWS_REGION }} && break
+            echo "Attempt $i failed — waiting 15s before retry..."
+            sleep 15
+          done
 
-    - name: ALB controller pods
-      run: |
-        echo "=== ALB controller pods ==="
-        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o wide
-        echo ""
-        echo "=== ALB controller logs (last 30 lines) ==="
-        kubectl logs -n kube-system \
-          -l app.kubernetes.io/name=aws-load-balancer-controller \
-          --tail=30 2>/dev/null || echo "(no logs)"
+      - name: ALB controller pods
+        run: |
+          echo "=== ALB controller pods ==="
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o wide
+          echo ""
+          echo "=== ALB controller logs (last 30 lines) ==="
+          kubectl logs -n kube-system \
+            -l app.kubernetes.io/name=aws-load-balancer-controller \
+            --tail=30 2>/dev/null || echo "(no logs)"
 
-    - name: Ingress status
-      run: |
-        echo "=== Ingress object ==="
-        kubectl get ingress -n agentify -o wide
-        echo ""
-        echo "=== Ingress describe (events) ==="
-        kubectl describe ingress agentify -n agentify
+      - name: Ingress status
+        run: |
+          echo "=== Ingress object ==="
+          kubectl get ingress -n agentify -o wide
+          echo ""
+          echo "=== Ingress describe (events) ==="
+          kubectl describe ingress agentify -n agentify
 
-    - name: Check ALB in AWS
-      run: |
-        echo "=== ALBs in account (k8s-* prefix) ==="
-        # Note: requires elasticloadbalancing:DescribeLoadBalancers on CI role
-        aws elbv2 describe-load-balancers \
-          --query 'LoadBalancers[?starts_with(LoadBalancerName, `k8s-`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
-          --output table --region ${{ secrets.AWS_REGION }} 2>/dev/null || \
-          echo "(skipped — CI role missing elasticloadbalancing:DescribeLoadBalancers)"
+      - name: Check ALB in AWS
+        run: |
+          echo "=== ALBs in account (k8s-* prefix) ==="
+          # Note: requires elasticloadbalancing:DescribeLoadBalancers on CI role
+          aws elbv2 describe-load-balancers \
+            --query 'LoadBalancers[?starts_with(LoadBalancerName, `k8s-`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
+            --output table --region ${{ secrets.AWS_REGION }} 2>/dev/null || \
+            echo "(skipped — CI role missing elasticloadbalancing:DescribeLoadBalancers)"
 
-    - name: All pods (health snapshot)
-      run: |
-        echo "=== All pods in agentify namespace ==="
-        kubectl get pods -n agentify -o wide
-        echo ""
-        echo "=== pods in payments namespace ==="
-        kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
-        echo ""
-        echo "=== kube-system pods ==="
-        kubectl get pods -n kube-system | grep -E "alb|coredns|kube-proxy|vpc"
+      - name: All pods (health snapshot)
+        run: |
+          echo "=== All pods in agentify namespace ==="
+          kubectl get pods -n agentify -o wide
+          echo ""
+          echo "=== pods in payments namespace ==="
+          kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
+          echo ""
+          echo "=== kube-system pods ==="
+          kubectl get pods -n kube-system | grep -E "alb|coredns|kube-proxy|vpc"
 
-    - name: Backend logs (ingest + errors)
-      run: |
-        echo "=== Backend logs — last 50 lines ==="
-        kubectl logs -n agentify -l app=agentify-backend --tail=50 2>/dev/null || echo "(no logs)"
-        echo ""
-        echo "=== Backend ServiceAccount IRSA annotation ==="
-        kubectl get serviceaccount agentify-backend -n agentify \
-          -o jsonpath='{.metadata.annotations}' | python3 -m json.tool
+      - name: Backend logs (ingest + errors)
+        run: |
+          echo "=== Backend logs — last 50 lines ==="
+          kubectl logs -n agentify -l app=agentify-backend --tail=50 2>/dev/null || echo "(no logs)"
+          echo ""
+          echo "=== Backend ServiceAccount IRSA annotation ==="
+          kubectl get serviceaccount agentify-backend -n agentify \
+            -o jsonpath='{.metadata.annotations}' | python3 -m json.tool
 
-    - name: Agent pod — status, endpoints, logs
-      run: |
-        echo "=== Agent pods ==="
-        kubectl get pods -n agentify -l app=agentify-agent -o wide
-        echo ""
+      - name: Agent pod — status, endpoints, logs
+        run: |
+          echo "=== Agent pods ==="
+          kubectl get pods -n agentify -l app=agentify-agent -o wide
+          echo ""
 
-        echo "=== Agent service endpoints (empty = no Ready pods) ==="
-        kubectl get endpoints agentify-agent -n agentify
-        echo ""
+          echo "=== Agent service endpoints (empty = no Ready pods) ==="
+          kubectl get endpoints agentify-agent -n agentify
+          echo ""
 
-        echo "=== Agent pod logs — last 50 lines ==="
-        kubectl logs -n agentify -l app=agentify-agent --tail=50 2>/dev/null || echo "(no logs)"
-        echo ""
+          echo "=== Agent pod logs — last 50 lines ==="
+          kubectl logs -n agentify -l app=agentify-agent --tail=50 2>/dev/null || echo "(no logs)"
+          echo ""
 
-        echo "=== Agent describe (events, restarts, image) ==="
-        kubectl describe pods -n agentify -l app=agentify-agent | \
-          grep -A5 -E "State:|Image:|Reason:|Message:|Restart|Events:" || true
+          echo "=== Agent describe (events, restarts, image) ==="
+          kubectl describe pods -n agentify -l app=agentify-agent | \
+            grep -A5 -E "State:|Image:|Reason:|Message:|Restart|Events:" || true
 
-    - name: Agent K8s secret validation
-      run: |
-        echo "=== agentify-anthropic-secret presence ==="
-        kubectl get secret agentify-anthropic-secret -n agentify 2>/dev/null && \
-          echo "  secret EXISTS" || echo "  ⚠ SECRET MISSING"
-        echo ""
+      - name: Agent K8s secret validation
+        run: |
+          echo "=== agentify-anthropic-secret presence ==="
+          kubectl get secret agentify-anthropic-secret -n agentify 2>/dev/null && \
+            echo "  secret EXISTS" || echo "  ⚠ SECRET MISSING"
+          echo ""
 
-        echo "=== api_key format (first 12 chars only) ==="
-        KEY=$(kubectl get secret agentify-anthropic-secret -n agentify \
-          -o jsonpath='{.data.api_key}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-        if [ -z "$KEY" ]; then
-          echo "  ⚠ api_key is empty or secret missing"
-        elif echo "$KEY" | grep -qE '^\{'; then
-          echo "  ⚠ api_key looks like JSON — should be a raw sk-ant- string, not a Secrets Manager JSON blob"
-          echo "  First 40 chars: ${KEY:0:40}..."
-        elif echo "$KEY" | grep -q '^sk-ant-'; then
-          echo "  ✓ api_key has correct sk-ant- prefix (${KEY:0:12}...)"
-        else
-          echo "  ⚠ api_key does not start with sk-ant- — may be wrong value"
-          echo "  First 12 chars: ${KEY:0:12}..."
-        fi
+          echo "=== api_key format (first 12 chars only) ==="
+          KEY=$(kubectl get secret agentify-anthropic-secret -n agentify \
+            -o jsonpath='{.data.api_key}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          if [ -z "$KEY" ]; then
+            echo "  ⚠ api_key is empty or secret missing"
+          elif echo "$KEY" | grep -qE '^\{'; then
+            echo "  ⚠ api_key looks like JSON — should be a raw sk-ant- string, not a Secrets Manager JSON blob"
+            echo "  First 40 chars: ${KEY:0:40}..."
+          elif echo "$KEY" | grep -q '^sk-ant-'; then
+            echo "  ✓ api_key has correct sk-ant- prefix (${KEY:0:12}...)"
+          else
+            echo "  ⚠ api_key does not start with sk-ant- — may be wrong value"
+            echo "  First 12 chars: ${KEY:0:12}..."
+          fi
 
-    - name: Agent reachability from backend pod
-      run: |
-        echo "=== Curl agent /health from inside backend pod ==="
-        BACKEND_POD=$(kubectl get pods -n agentify -l app=agentify-backend \
-          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-        if [ -z "$BACKEND_POD" ]; then
-          echo "  ⚠ No backend pod found — skipping reachability test"
-        else
-          echo "  Using pod: $BACKEND_POD"
-          kubectl exec -n agentify "$BACKEND_POD" -- \
-            wget -qO- --timeout=5 http://agentify-agent:8001/health 2>&1 || \
-            echo "  ⚠ Agent /health unreachable from backend pod"
-        fi
+      - name: Agent reachability from backend pod
+        run: |
+          echo "=== Curl agent /health from inside backend pod ==="
+          BACKEND_POD=$(kubectl get pods -n agentify -l app=agentify-backend \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          if [ -z "$BACKEND_POD" ]; then
+            echo "  ⚠ No backend pod found — skipping reachability test"
+          else
+            echo "  Using pod: $BACKEND_POD"
+            kubectl exec -n agentify "$BACKEND_POD" -- \
+              wget -qO- --timeout=5 http://agentify-agent:8001/health 2>&1 || \
+              echo "  ⚠ Agent /health unreachable from backend pod"
+          fi
 
-    - name: End-to-end query smoke test (via ALB)
-      run: |
-        ALB=$(kubectl get ingress agentify -n agentify \
-          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        if [ -z "$ALB" ]; then
-          echo "  ⚠ ALB address not available — skipping query test"
-          exit 0
-        fi
-        echo "=== ALB health check ==="
-        curl -sf "http://${ALB}/health" && echo "" || echo "  ⚠ /health failed"
-        echo ""
+      - name: End-to-end query smoke test (via ALB)
+        run: |
+          ALB=$(kubectl get ingress agentify -n agentify \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          if [ -z "$ALB" ]; then
+            echo "  ⚠ ALB address not available — skipping query test"
+            exit 0
+          fi
+          echo "=== ALB health check ==="
+          curl -sf "http://${ALB}/health" && echo "" || echo "  ⚠ /health failed"
+          echo ""
 
-        echo "=== Tier-1 query (no LLM) ==="
-        RESP=$(curl -sf -X POST "http://${ALB}/api/query" \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"is payment healthy?","context":{"namespace":"payments","service":"payment"}}' \
-          --max-time 15 2>&1)
-        echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
-        STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
-        echo "  → status: $STATUS"
-        echo ""
-
-        echo "=== Tier-2 query (triggers Claude if service degraded) ==="
-        RESP2=$(curl -sf -X POST "http://${ALB}/api/query" \
-          -H 'Content-Type: application/json' \
-          -d '{"question":"why is payment-worker having issues?","context":{"namespace":"payments","service":"payment-worker"}}' \
-          --max-time 120 2>&1)
-        echo "$RESP2" | python3 -m json.tool 2>/dev/null || echo "$RESP2"
-        STATUS2=$(echo "$RESP2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
-        echo "  → status: $STATUS2"
-        if [ "$STATUS2" = "partial" ]; then
-          echo "  ⚠ status=partial — agent service unreachable from backend"
-        elif [ "$STATUS2" = "error" ]; then
-          echo "  ⚠ status=error — agent reached but Claude API call failed"
-        fi
-
-    - name: Adapter logs (emit + watch errors)
-      run: |
-        echo "=== Adapter logs — last 50 lines ==="
-        kubectl logs -n agentify -l app=k8fy-adapter --tail=50 2>/dev/null || echo "(no logs)"
-        echo ""
-        echo "=== Adapter env vars (namespace + intervals) ==="
-        kubectl get deployment k8fy-adapter -n agentify \
-          -o jsonpath='{.spec.template.spec.containers[0].env}' | python3 -m json.tool
-
-    - name: Test ingest endpoint directly
-      run: |
-        echo "=== POST a test event to /api/ingest ==="
-        # Run from within the cluster to verify the endpoint is reachable and accepting events
-        kubectl run ingest-test --rm -i --restart=Never \
-          --image=curlimages/curl:8.5.0 \
-          -n agentify -- \
-          curl -s -X POST http://agentify-backend:8080/api/ingest \
+          echo "=== Tier-1 query (no LLM) ==="
+          RESP=$(curl -sf -X POST "http://${ALB}/api/query" \
             -H 'Content-Type: application/json' \
-            -d '{
-              "id": "test-diag-001",
-              "timestamp": "2026-06-07T00:00:00Z",
-              "event_namespace": "k8fy.live-state",
-              "type": "pod_modified",
-              "source": "diagnostic",
-              "traits": {"shape":"structured","access_pattern":"point-lookup","temporality":"current-state","mutability":"mutable","authority":"derived","retention":"ephemeral"},
-              "payload": {"pod_id":"test-pod","namespace":"payments","phase":"Running","ready":true,"restarts":0},
-              "entity_key": "test-pod",
-              "tags": ["k8fy","payments"]
-            }' 2>&1 || echo "(test failed)"
+            -d '{"question":"is payment healthy?","context":{"namespace":"payments","service":"payment"}}' \
+            --max-time 15 2>&1)
+          echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+          STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
+          echo "  → status: $STATUS"
+          echo ""
+
+          echo "=== Tier-2 query (triggers Claude if service degraded) ==="
+          RESP2=$(curl -sf -X POST "http://${ALB}/api/query" \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"why is payment-worker having issues?","context":{"namespace":"payments","service":"payment-worker"}}' \
+            --max-time 120 2>&1)
+          echo "$RESP2" | python3 -m json.tool 2>/dev/null || echo "$RESP2"
+          STATUS2=$(echo "$RESP2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null)
+          echo "  → status: $STATUS2"
+          if [ "$STATUS2" = "partial" ]; then
+            echo "  ⚠ status=partial — agent service unreachable from backend"
+          elif [ "$STATUS2" = "error" ]; then
+            echo "  ⚠ status=error — agent reached but Claude API call failed"
+          fi
+
+      - name: Adapter logs (emit + watch errors)
+        run: |
+          echo "=== Adapter logs — last 50 lines ==="
+          kubectl logs -n agentify -l app=k8fy-adapter --tail=50 2>/dev/null || echo "(no logs)"
+          echo ""
+          echo "=== Adapter env vars (namespace + intervals) ==="
+          kubectl get deployment k8fy-adapter -n agentify \
+            -o jsonpath='{.spec.template.spec.containers[0].env}' | python3 -m json.tool
+
+      - name: Test ingest endpoint directly
+        run: |
+          echo "=== POST a test event to /api/ingest ==="
+          # Run from within the cluster to verify the endpoint is reachable and accepting events
+          kubectl run ingest-test --rm -i --restart=Never \
+            --image=curlimages/curl:8.5.0 \
+            -n agentify -- \
+            curl -s -X POST http://agentify-backend:8080/api/ingest \
+              -H 'Content-Type: application/json' \
+              -d '{
+                "id": "test-diag-001",
+                "timestamp": "2026-06-07T00:00:00Z",
+                "event_namespace": "k8fy.live-state",
+                "type": "pod_modified",
+                "source": "diagnostic",
+                "traits": {"shape":"structured","access_pattern":"point-lookup","temporality":"current-state","mutability":"mutable","authority":"derived","retention":"ephemeral"},
+                "payload": {"pod_id":"test-pod","namespace":"payments","phase":"Running","ready":true,"restarts":0},
+                "entity_key": "test-pod",
+                "tags": ["k8fy","payments"]
+              }' 2>&1 || echo "(test failed)"

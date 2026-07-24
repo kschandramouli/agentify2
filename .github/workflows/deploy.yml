@@ -1,3 +1,4 @@
+---
 # Deploy: build images, push to ECR, and roll out to EKS.
 # Triggered manually (workflow_dispatch) or on merge to main after CI passes.
 #
@@ -29,69 +30,69 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Ensure ECR repos exist
-      run: |
-        for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend; do
-          aws ecr describe-repositories --repository-names "$repo" \
-            --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 \
-          || aws ecr create-repository --repository-name "$repo" \
-            --region ${{ secrets.AWS_REGION }} \
-            --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability MUTABLE
-          echo "$repo ready"
-        done
+      - name: Ensure ECR repos exist
+        run: |
+          for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend; do
+            aws ecr describe-repositories --repository-names "$repo" \
+              --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$repo" \
+              --region ${{ secrets.AWS_REGION }} \
+              --image-scanning-configuration scanOnPush=true \
+              --image-tag-mutability MUTABLE
+            echo "$repo ready"
+          done
 
-    - name: Login to ECR
-      id: ecr_login
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Set image tag
-      id: meta
-      run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Set image tag
+        id: meta
+        run: echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-    - name: Build & push backend
-      uses: docker/build-push-action@v5
-      with:
-        context: src/backend
-        push: true
-        tags: |
-          ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ steps.meta.outputs.tag }}
-          ${{ secrets.ECR_REGISTRY }}/agentify/backend:latest
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: src/backend
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/agentify/backend:${{ steps.meta.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY }}/agentify/backend:latest
 
-    - name: Build & push agent
-      uses: docker/build-push-action@v5
-      with:
-        context: src/agent
-        push: true
-        tags: |
-          ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ steps.meta.outputs.tag }}
-          ${{ secrets.ECR_REGISTRY }}/agentify/agent:latest
+      - name: Build & push agent
+        uses: docker/build-push-action@v5
+        with:
+          context: src/agent
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ steps.meta.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY }}/agentify/agent:latest
 
-    - name: Build & push adapter
-      uses: docker/build-push-action@v5
-      with:
-        context: src/adapters/k8fy
-        push: true
-        tags: |
-          ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ steps.meta.outputs.tag }}
-          ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:latest
+      - name: Build & push adapter
+        uses: docker/build-push-action@v5
+        with:
+          context: src/adapters/k8fy
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ steps.meta.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:latest
 
-    - name: Build & push frontend
-      uses: docker/build-push-action@v5
-      with:
-        context: src/frontend
-        push: true
-        tags: |
-          ${{ secrets.ECR_REGISTRY }}/agentify/frontend:${{ steps.meta.outputs.tag }}
-          ${{ secrets.ECR_REGISTRY }}/agentify/frontend:latest
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: src/frontend
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/agentify/frontend:${{ steps.meta.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY }}/agentify/frontend:latest
 
   deploy:
     name: Deploy to EKS
@@ -100,574 +101,574 @@ jobs:
     env:
       IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Update kubeconfig (with retry)
-      run: |
-        for i in 1 2 3 4 5; do
-          aws eks update-kubeconfig \
-            --name ${{ secrets.EKS_CLUSTER_NAME }} \
-            --region ${{ secrets.AWS_REGION }} && break
-          echo "Attempt $i failed — waiting 15s before retry..."
-          sleep 15
-        done
-
-    - name: Wait for EKS nodes to be Ready
-      # Guard against deploys triggered immediately after a scale-up before any
-      # node has joined the cluster. Without this, every pod stays Pending with
-      # "no nodes available to schedule pods" and the deploy fails.
-      # Polls up to 10 minutes (60 × 10s) — managed node groups typically join
-      # within 2-4 minutes after the ASG launches the instance.
-      run: |
-        echo "Waiting for at least one Ready EKS node..."
-        for i in $(seq 1 60); do
-          READY=$(kubectl get nodes --no-headers 2>/dev/null \
-            | grep -c " Ready" || echo 0)
-          if [ "${READY}" -ge 1 ]; then
-            echo "  $READY node(s) Ready — proceeding"
-            kubectl get nodes -o wide
-            exit 0
-          fi
-          echo "  No ready nodes yet (attempt $i/60) — waiting 10s..."
-          sleep 10
-        done
-        echo "ERROR: No EKS nodes became Ready within 10 minutes"
-        kubectl get nodes -o wide || true
-        exit 1
-
-    - name: Sync K8s secrets from AWS Secrets Manager
-      # Creates (or updates) the K8s secrets the pods depend on.
-      # Idempotent: --dry-run=client + apply pattern means safe to re-run.
-      run: |
-        REGION=${{ secrets.AWS_REGION }}
-
-        # DB credentials
-        DB=$(aws secretsmanager get-secret-value --secret-id agentify/dev/db \
-               --region $REGION --query SecretString --output text)
-        kubectl create secret generic agentify-db-secret -n agentify \
-          --from-literal=host=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['host'])") \
-          --from-literal=port=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['port'])") \
-          --from-literal=dbname=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['dbname'])") \
-          --from-literal=username=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['username'])") \
-          --from-literal=password=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['password'])") \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        # Adapter auth token
-        ADAPTER_TOKEN=$(aws secretsmanager get-secret-value --secret-id agentify/dev/adapter \
-          --region $REGION --query SecretString --output text | \
-          python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
-        kubectl create secret generic agentify-adapter-secret -n agentify \
-          --from-literal=token=$ADAPTER_TOKEN \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        # Anthropic API key
-        ANTHROPIC_KEY=$(aws secretsmanager get-secret-value --secret-id agentify/dev/anthropic \
-          --region $REGION --query SecretString --output text | \
-          python3 -c "import sys,json;print(json.load(sys.stdin)['api_key'])")
-        kubectl create secret generic agentify-anthropic-secret -n agentify \
-          --from-literal=api_key=$ANTHROPIC_KEY \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        # Voyage AI key — comes from GitHub secrets (not Secrets Manager).
-        # optional: skip if not set so deploys work without semantic memory.
-        if [ -n "${{ secrets.VOYAGE_API_KEY }}" ]; then
-          kubectl create secret generic agentify-voyage-secret -n agentify \
-            --from-literal=api_key="${{ secrets.VOYAGE_API_KEY }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          echo "Voyage AI secret synced"
-        else
-          echo "VOYAGE_API_KEY not set — skipping (semantic memory will use recency fallback)"
-        fi
-
-        echo "K8s secrets synced from Secrets Manager"
-
-    - name: Update manifests (image tags + IRSA roles + registry)
-      run: |
-        REGISTRY=${{ secrets.ECR_REGISTRY }}
-        TAG=${{ env.IMAGE_TAG }}
-
-        # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
-        for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml \
-                 infra/kubernetes/payments-test/payment-api.yaml infra/kubernetes/payments-test/payment-worker.yaml \
-                 infra/kubernetes/payments-test/payment-service.yaml; do
-          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" "$f"
-        done
-
-        # 2. Pin images to the commit SHA (immutable tag).
-        sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
-        sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
-        sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
-        sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/frontend.yaml
-        sed -i "s|${REGISTRY}/agentify/frontend:latest|${REGISTRY}/agentify/frontend:${TAG}|g" infra/kubernetes/frontend.yaml
-
-        # 3. Substitute IRSA role ARN placeholders from live IAM (no hardcoding).
-        BACKEND_ROLE=$(aws iam get-role --role-name agentify-dev-backend --query 'Role.Arn' --output text)
-        AGENT_ROLE=$(aws iam get-role   --role-name agentify-dev-agent   --query 'Role.Arn' --output text)
-        ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter  --query 'Role.Arn' --output text)
-
-        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn|${BACKEND_ROLE}|g" infra/kubernetes/backend.yaml
-        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn|${AGENT_ROLE}|g"     infra/kubernetes/agent.yaml
-        sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
-
-        echo "Manifests updated — sample backend image:"
-        grep "image:" infra/kubernetes/backend.yaml | head -1
-
-    - name: Wait for AWS Load Balancer Controller webhook
-      # The AWS LBC registers a mutating webhook for Services. After a scale-up
-      # the LBC pod can take 60-120s to reschedule. If it has no endpoints the
-      # webhook call fails and any Helm chart that creates Services (including Vault)
-      # errors out. Wait up to 3 minutes, then delete the stale webhook config so
-      # the install can proceed (LBC will re-register it once its pod is ready).
-      run: |
-        echo "Checking AWS Load Balancer Controller webhook health..."
-        for i in $(seq 1 18); do
-          READY=$(kubectl get deployment aws-load-balancer-controller -n kube-system \
-            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-          if [ "${READY:-0}" -ge 1 ]; then
-            echo "AWS LBC ready ($READY replicas) — proceeding"
-            exit 0
-          fi
-          echo "  LBC not ready yet (attempt $i/18, readyReplicas=${READY:-0})"
-          sleep 10
-        done
-        echo "AWS LBC did not become ready in 3 minutes — deleting stale webhook so Helm can proceed"
-        echo "WARNING: Services will be created without LBC mutation; LBC will reconcile once it restarts"
-        kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
-
-    - name: Install/upgrade HashiCorp Vault
-      run: |
-        helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
-        helm repo update
-
-        # If a previous release is in a failed state (e.g. immutable StatefulSet
-        # field conflict from a prior attempt), uninstall cleanly before reinstalling.
-        # Also delete any Pending PVCs left over from the broken install so the new
-        # release can provision a fresh one with the correct storage class.
-        HELM_STATUS=$(helm status vault -n vault -o json 2>/dev/null \
-          | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null \
-          || echo "not-installed")
-        echo "Vault Helm release status: $HELM_STATUS"
-
-        # ── Handle StatefulSet immutable-field conflicts ───────────────────────
-        # volumeClaimTemplates is immutable after StatefulSet creation. Any change
-        # to storageClass OR switching between dev mode (no PVC) and standalone
-        # mode (with PVC) requires deleting the StatefulSet so Helm can recreate it.
-        #
-        # Dev mode target: StatefulSet should have zero volumeClaimTemplates.
-        # Check the count and delete if non-zero (means it was created in standalone mode).
-        VCT_COUNT=$(kubectl get statefulset vault -n vault \
-          -o jsonpath='{.spec.volumeClaimTemplates}' 2>/dev/null \
-          | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)" \
-          2>/dev/null || echo "0")
-        echo "StatefulSet volumeClaimTemplates count: $VCT_COUNT (dev mode wants: 0)"
-
-        if [ "$VCT_COUNT" != "0" ] && [ "$VCT_COUNT" != "" ]; then
-          echo "StatefulSet has PVC templates but dev mode needs none — deleting StatefulSet + PVCs..."
-          kubectl delete statefulset vault -n vault --ignore-not-found=true
-          kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
-          sleep 5
-        elif [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
-          echo "Cleaning up failed Vault release before reinstalling..."
-          helm uninstall vault -n vault --wait 2>/dev/null || true
-          kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
-          sleep 10
-        fi
-
-        # Idempotent install/upgrade — applies manifests and returns immediately.
-        # Pod readiness is handled by the "Wait for Vault to be ready" step below,
-        # which polls vault-0 explicitly and gives it up to 3 minutes to schedule.
-        # --wait is intentionally omitted: on cold starts after scale-up the image
-        # pull alone can exceed 180s, causing a false "context deadline exceeded".
-        helm upgrade --install vault hashicorp/vault \
-          --namespace vault --create-namespace \
-          -f infra/kubernetes/vault/vault-values.yaml \
-          --timeout=120s
-        echo "Vault Helm chart applied."
-
-    - name: Wait for Vault to be ready
-      # Dev mode: Vault starts pre-initialised and pre-unsealed — no init/unseal
-      # steps needed.  Root token is "root" (set in vault-values.yaml).
-      # We just wait for vault-0 to be Running and store the known token in
-      # the K8s secrets so VaultCertSkill and vault-setup.sh can use them.
-      run: |
-        echo "Waiting for vault-0 pod to be Running..."
-        for i in $(seq 1 18); do
-          STATUS=$(kubectl get pod vault-0 -n vault \
-            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
-          echo "  vault-0 status: $STATUS (attempt $i/18)"
-          [ "$STATUS" = "Running" ] && break
-          if [ "$STATUS" = "Pending" ]; then
-            kubectl describe pod vault-0 -n vault 2>/dev/null \
-              | grep -A8 "Events:" | tail -8 || true
-          fi
-          sleep 10
-        done
-
-        STATUS=$(kubectl get pod vault-0 -n vault \
-          -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
-        if [ "$STATUS" != "Running" ]; then
-          echo "Error: vault-0 is not Running after 3 minutes (status: $STATUS)"
-          kubectl get pods -n vault -o wide || true
-          exit 1
-        fi
-        echo "vault-0 is Running."
-
-        # Store the fixed dev-mode root token so other steps and VaultCertSkill
-        # can reference it without manual intervention.
-        kubectl create secret generic vault-unseal-keys -n vault \
-          --from-literal=unseal-key="dev-mode-no-unseal-needed" \
-          --from-literal=root-token="root" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        kubectl create secret generic agentify-vault-secret -n agentify \
-          --from-literal=token="root" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        echo "Dev-mode token stored in vault-unseal-keys + agentify-vault-secret."
-
-    - name: Configure Vault (runs every deploy — idempotent commands)
-      # Vault runs in dev mode which stores all data IN MEMORY.
-      # Every vault-0 pod restart (scale-down/up, deploy) wipes PKI mounts,
-      # roles, and policies. The annotation guard has been removed so this step
-      # runs on every deploy and recreates all configuration. All commands use
-      # the "|| echo already-exists" pattern so they are safe to re-run.
-      run: |
-        kubectl port-forward -n vault svc/vault 8200:8200 &
-        PF_PID=$!
-        sleep 5
-
-        export VAULT_ADDR=http://127.0.0.1:8200
-        export VAULT_TOKEN="root"   # dev mode
-
-        curl -fsSL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip \
-          -o /tmp/vault.zip && unzip -q /tmp/vault.zip -d /tmp && chmod +x /tmp/vault
-        export PATH="/tmp:$PATH"
-
-        # Kubernetes auth
-        vault auth enable kubernetes 2>/dev/null || echo "Kubernetes auth already enabled."
-        K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-        vault write auth/kubernetes/config kubernetes_host="$K8S_HOST"
-
-        # KV v2
-        vault secrets enable -path=secret kv-v2 2>/dev/null || echo "KV already enabled."
-
-        # pki-payments — the single canonical PKI mount for all payment services.
-        # payment-api role:    used by payment and payment-api service pods.
-        # payment-worker role: used by payment-worker service pods.
-        vault secrets enable -path=pki-payments pki 2>/dev/null || echo "pki-payments already enabled."
-        vault secrets tune -max-lease-ttl=8760h pki-payments
-        vault write pki-payments/root/generate/internal \
-          common_name="payments.svc.cluster.local Root CA" ttl=8760h > /dev/null 2>&1 || true
-        vault write pki-payments/config/urls \
-          issuing_certificates="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/ca" \
-          crl_distribution_points="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/crl"
-        vault write pki-payments/roles/payment-api \
-          allowed_domains="payments.svc.cluster.local,payment.payments.svc.cluster.local,payment-api.payments.svc.cluster.local" \
-          allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
-        vault write pki-payments/roles/payment-worker \
-          allowed_domains="payments.svc.cluster.local,payment-worker.payments.svc.cluster.local" \
-          allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
-
-        # Policies — all referencing pki-payments (consolidated, no more pki/ paths)
-        vault policy write payment-service-policy - <<'HCL'
-        path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
-        path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
-        path "pki-payments/cert/*"               { capabilities = ["read"] }
-        path "secret/data/payments/*"            { capabilities = ["read"] }
-        path "auth/token/renew-self"             { capabilities = ["update"] }
-        HCL
-        vault policy write cert-rotator-policy - <<'HCL'
-        path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
-        path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
-        path "pki-payments/revoke"               { capabilities = ["create","update"] }
-        path "pki-payments/cert/*"               { capabilities = ["read"] }
-        path "secret/data/payments/*"            { capabilities = ["create","update","read"] }
-        path "auth/token/renew-self"             { capabilities = ["update"] }
-        HCL
-
-        # Kubernetes auth roles
-        vault write auth/kubernetes/role/payment-api \
-          bound_service_account_names=payment-api \
-          bound_service_account_namespaces=payments \
-          policies=payment-service-policy ttl=1h
-        vault write auth/kubernetes/role/payment-worker \
-          bound_service_account_names=payment-worker \
-          bound_service_account_namespaces=payments \
-          policies=payment-service-policy ttl=1h
-        vault write auth/kubernetes/role/cert-rotator \
-          bound_service_account_names=cert-rotator \
-          bound_service_account_namespaces=payments \
-          policies=cert-rotator-policy ttl=1h
-
-        # Stamp new version so future runs skip this step
-        kubectl annotate secret vault-unseal-keys -n vault \
-          vault-configured=pki-payments-v2 --overwrite  # kept for reference only, no longer gates the step
-
-        kill $PF_PID 2>/dev/null || true
-        echo "Vault configuration complete (pki-payments-v2)."
-
-    - name: Apply Kubernetes manifests
-      run: |
-        kubectl apply -f infra/kubernetes/backend.yaml
-        kubectl apply -f infra/kubernetes/agent.yaml
-        kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
-        kubectl apply -f infra/kubernetes/frontend.yaml
-        kubectl apply -f infra/kubernetes/ingress.yaml
-        kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
-        kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
-        kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
-        kubectl apply -f infra/kubernetes/payments-test/serviceaccounts.yaml
-        kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
-        kubectl apply -f infra/kubernetes/payments-test/payment-api.yaml
-        kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
-
-    - name: Wait for rollouts
-      run: |
-        kubectl rollout status deployment/agentify-backend  -n agentify --timeout=300s
-
-        # Agent rollout: give K8s 60s to roll out normally, then repair any
-        # zombie ReplicaSets from prior failed deploys.
-        #
-        # Root cause: old RSes can be left with spec.replicas=1 if a prior
-        # deploy failed mid-rollout. Force-deleting their pods doesn't help
-        # because the RS controller immediately recreates them. We must scale
-        # the RS to 0 first, THEN delete the pod.
-        echo "=== agentify-agent rollout ==="
-        kubectl rollout status deployment/agentify-agent -n agentify --timeout=60s || true
-
-        # Identify the current RS by revision annotation (same mechanism K8s uses internally).
-        # We use the pod-template-hash label — not creation time — to distinguish
-        # current pods from stale ones. Creation time is unreliable: the zombie RS
-        # recreates its pod after each force-delete, so its pod can be newer than
-        # the current RS's pod, causing us to delete the wrong one.
-        CURRENT_REV=$(kubectl get deployment agentify-agent -n agentify -o json | \
-          jq -r '.metadata.annotations["deployment.kubernetes.io/revision"] // empty')
-
-        if [ -n "$CURRENT_REV" ]; then
-          CURRENT_HASH=$(kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
-            jq -r --arg rev "$CURRENT_REV" \
-            '.items[] | select(.metadata.annotations["deployment.kubernetes.io/revision"] == $rev)
-             | .metadata.labels["pod-template-hash"]')
-          echo "Current RS hash: $CURRENT_HASH (revision $CURRENT_REV)"
-
-          # Scale all non-current RSes to 0 so deleted pods are not recreated
-          kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
-            jq -r --arg rev "$CURRENT_REV" \
-            '.items[] | select(
-              .metadata.annotations["deployment.kubernetes.io/revision"] != $rev
-              and .spec.replicas > 0
-            ) | .metadata.name' | \
-          while read rs; do
-            [ -z "$rs" ] && continue
-            echo "Scaling zombie RS to 0: $rs"
-            kubectl scale replicaset "$rs" -n agentify --replicas=0
+      - name: Update kubeconfig (with retry)
+        run: |
+          for i in 1 2 3 4 5; do
+            aws eks update-kubeconfig \
+              --name ${{ secrets.EKS_CLUSTER_NAME }} \
+              --region ${{ secrets.AWS_REGION }} && break
+            echo "Attempt $i failed — waiting 15s before retry..."
+            sleep 15
           done
 
-          # Force-delete pods not belonging to the current RS (matched by hash, not age)
-          if [ -n "$CURRENT_HASH" ]; then
-            kubectl get pods -n agentify -l app=agentify-agent -o json | \
-              jq -r --arg hash "$CURRENT_HASH" \
-              '.items[] | select(.metadata.labels["pod-template-hash"] != $hash) | .metadata.name' | \
-            while read pod; do
-              [ -z "$pod" ] && continue
-              echo "Force-deleting stale pod: $pod"
-              kubectl delete pod "$pod" -n agentify --grace-period=0 --force
-            done
-            sleep 5
-          fi
-        fi
-
-        kubectl rollout status deployment/agentify-agent -n agentify --timeout=300s
-
-        kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
-        kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
-
-    - name: Seed namespace cache (post-deploy sync)
-      # Port-forward the backend and call /admin/sync so discovered namespaces/services
-      # are written into current_state immediately — without this the search autocomplete
-      # stays empty after a scale-up until the adapter re-emits all ingestion events.
-      run: |
-        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
-        PF_PID=$!
-        SYNCED=false
-        for i in 1 2 3 4 5 6; do
-          sleep 5
-          if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
-            echo "Namespace sync succeeded on attempt $i"
-            SYNCED=true
-            break
-          fi
-          echo "Attempt $i: backend not ready yet, retrying..."
-        done
-        kill $PF_PID 2>/dev/null || true
-        $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until the adapter re-emits events"
-
-    - name: Run eval regression suite
-      # Runs the k8fy-regression Langfuse dataset against the freshly deployed
-      # backend. Scores each item (intent routing, tier, status, required fields,
-      # latency) and fails the deploy if the mean score drops below 0.85.
-      # Skip when Langfuse credentials are not configured (opt-in per environment).
-      run: |
-        if [ -z "$LANGFUSE_PUBLIC_KEY" ] || [ -z "$LANGFUSE_SECRET_KEY" ]; then
-          echo "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set — skipping evals"
-          exit 0
-        fi
-
-        # Port-forward the backend so the script can reach it from the runner
-        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
-        PF_PID=$!
-        # Wait up to 20s for the port-forward to be ready
-        for i in $(seq 1 4); do
-          sleep 5
-          curl -sf http://localhost:18080/health > /dev/null 2>&1 && break
-          echo "Waiting for port-forward... ($i/4)"
-        done
-
-        pip install -q "langfuse>=2.0.0,<3.0.0" requests
-
-        # Seed the dataset (idempotent — safe to run on every deploy;
-        # uses stable item IDs so existing items are updated, not duplicated).
-        python scripts/seed_eval_dataset.py
-
-        python scripts/run_evals.py \
-          --backend-url http://localhost:18080 \
-          --run-name "ci-${{ env.IMAGE_TAG }}" \
-          --pass-threshold 0.85
-        EVAL_EXIT=$?
-
-        kill $PF_PID 2>/dev/null || true
-
-        if [ $EVAL_EXIT -ne 0 ]; then
-          echo "Eval gate FAILED — see Langfuse UI for per-item breakdown"
+      - name: Wait for EKS nodes to be Ready
+        # Guard against deploys triggered immediately after a scale-up before any
+        # node has joined the cluster. Without this, every pod stays Pending with
+        # "no nodes available to schedule pods" and the deploy fails.
+        # Polls up to 10 minutes (60 × 10s) — managed node groups typically join
+        # within 2-4 minutes after the ASG launches the instance.
+        run: |
+          echo "Waiting for at least one Ready EKS node..."
+          for i in $(seq 1 60); do
+            READY=$(kubectl get nodes --no-headers 2>/dev/null \
+              | grep -c " Ready" || echo 0)
+            if [ "${READY}" -ge 1 ]; then
+              echo "  $READY node(s) Ready — proceeding"
+              kubectl get nodes -o wide
+              exit 0
+            fi
+            echo "  No ready nodes yet (attempt $i/60) — waiting 10s..."
+            sleep 10
+          done
+          echo "ERROR: No EKS nodes became Ready within 10 minutes"
+          kubectl get nodes -o wide || true
           exit 1
-        fi
-      env:
-        LANGFUSE_PUBLIC_KEY:  ${{ secrets.LANGFUSE_PUBLIC_KEY }}
-        LANGFUSE_SECRET_KEY:  ${{ secrets.LANGFUSE_SECRET_KEY }}
-        LANGFUSE_BASE_URL:    ${{ secrets.LANGFUSE_BASE_URL }}
 
-    - name: Validate Voyage AI + semantic memory
-      # Smoke-tests the full P8 pipeline: embed endpoint availability,
-      # a Tier-2 diagnose query, and confirmation that an embedding row
-      # was written to incident_embeddings within 10 seconds.
-      # Non-fatal warning if VOYAGE_API_KEY is not set (recency fallback active).
-      run: |
-        kubectl port-forward -n agentify svc/agentify-agent 18081:8001 &
-        PF_PID=$!
-        sleep 5
+      - name: Sync K8s secrets from AWS Secrets Manager
+        # Creates (or updates) the K8s secrets the pods depend on.
+        # Idempotent: --dry-run=client + apply pattern means safe to re-run.
+        run: |
+          REGION=${{ secrets.AWS_REGION }}
 
-        echo "=== Voyage AI embed endpoint check ==="
-        EMBED=$(curl -sf -X POST http://localhost:18081/embed \
-          -H "Content-Type: application/json" \
-          -d '{"text": "payment-worker CrashLoopBackOff"}' 2>/dev/null || echo '{}')
-        AVAILABLE=$(echo "$EMBED" | python3 -c "import sys,json; print(json.load(sys.stdin).get('available', False))" 2>/dev/null || echo false)
-        DIM=$(echo "$EMBED"        | python3 -c "import sys,json; print(json.load(sys.stdin).get('dim', 0))"       2>/dev/null || echo 0)
+          # DB credentials
+          DB=$(aws secretsmanager get-secret-value --secret-id agentify/dev/db \
+                 --region $REGION --query SecretString --output text)
+          kubectl create secret generic agentify-db-secret -n agentify \
+            --from-literal=host=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['host'])") \
+            --from-literal=port=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['port'])") \
+            --from-literal=dbname=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['dbname'])") \
+            --from-literal=username=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['username'])") \
+            --from-literal=password=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['password'])") \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-        if [ "$AVAILABLE" = "True" ]; then
-          echo "OK  Voyage AI active — dim=$DIM"
-        else
-          echo "WARN Voyage AI not available (VOYAGE_API_KEY may not be set) — recency fallback active"
-        fi
+          # Adapter auth token
+          ADAPTER_TOKEN=$(aws secretsmanager get-secret-value --secret-id agentify/dev/adapter \
+            --region $REGION --query SecretString --output text | \
+            python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+          kubectl create secret generic agentify-adapter-secret -n agentify \
+            --from-literal=token=$ADAPTER_TOKEN \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-        echo "=== Tier-1 health check (fast path) ==="
-        HEALTH=$(curl -sf --max-time 10 http://localhost:18080/api/query \
-          -H "Content-Type: application/json" \
-          -d '{"question":"is payment-api healthy?","context":{"namespace":"payments","service":"payment-api"}}' \
-          2>/dev/null || echo '{}')
-        TIER=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
-        echo "tier=$TIER (want tier1)"
-        [ "$TIER" = "tier1" ] && echo "OK  Tier-1 fast path working" || echo "WARN Tier-1 returned tier=$TIER"
+          # Anthropic API key
+          ANTHROPIC_KEY=$(aws secretsmanager get-secret-value --secret-id agentify/dev/anthropic \
+            --region $REGION --query SecretString --output text | \
+            python3 -c "import sys,json;print(json.load(sys.stdin)['api_key'])")
+          kubectl create secret generic agentify-anthropic-secret -n agentify \
+            --from-literal=api_key=$ANTHROPIC_KEY \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-        echo "=== Tier-2 diagnose + embed goroutine check ==="
-        DIAGNOSE=$(curl -sf --max-time 120 http://localhost:18080/api/query \
-          -H "Content-Type: application/json" \
-          -d '{"question":"why is payment-worker crashing?","context":{"namespace":"payments","service":"payment-worker"}}' \
-          2>/dev/null || echo '{}')
-        DTIER=$(echo "$DIAGNOSE"    | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
-        DTRACE=$(echo "$DIAGNOSE"   | python3 -c "import sys,json; print(json.load(sys.stdin).get('trace_id',''))" 2>/dev/null || echo "")
-        echo "tier=$DTIER trace_id=$DTRACE"
-        [ "$DTIER" = "tier2" ] && echo "OK  Tier-2 diagnose returned" || echo "WARN Tier-2 returned tier=$DTIER"
-
-        # Give the async embed goroutine time to write to incident_embeddings
-        sleep 10
-        AGENT_LOGS=$(kubectl logs -n agentify deploy/agentify-backend --tail=30 2>/dev/null || echo "")
-        if echo "$AGENT_LOGS" | grep -q "incident embedding seeded"; then
-          echo "OK  incident_embeddings row written (Voyage AI vector stored)"
-        elif [ "$AVAILABLE" = "True" ]; then
-          echo "WARN embed goroutine log not found — check backend logs manually"
-        fi
-
-        kill $PF_PID 2>/dev/null || true
-        echo "=== Semantic memory validation complete ==="
-
-    - name: Debug pod state (always runs — helps diagnose failures)
-      if: always()
-      run: |
-        echo "=== Pods ==="
-        kubectl get pods -n agentify -o wide
-        echo ""
-        echo "=== Recent events ==="
-        kubectl get events -n agentify --sort-by='.lastTimestamp' | tail -20
-        echo ""
-        echo "=== Backend pod logs (last 30 lines) ==="
-        kubectl logs -n agentify -l app=agentify-backend --tail=30 2>/dev/null || echo "(no logs yet)"
-        echo ""
-        echo "=== Agent pod logs (last 20 lines) ==="
-        kubectl logs -n agentify -l app=agentify-agent --tail=20 2>/dev/null || echo "(no logs yet)"
-
-    - name: Job summary
-      if: always()
-      run: |
-        ALB=$(kubectl get ingress agentify -n agentify \
-          -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-
-        # ── Pod status table ──────────────────────────────────────────────────
-        POD_TABLE=$(kubectl get pods -n agentify \
-          -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[0].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount' \
-          2>/dev/null || echo "(unavailable)")
-
-        # ── Write GitHub job summary (shown on the Actions run page) ──────────
-        {
-          echo "## Deployment — \`${{ env.IMAGE_TAG }}\` — $(date -u '+%Y-%m-%d %H:%M UTC')"
-          echo ""
-
-          if [ -n "$ALB" ]; then
-            echo "### URLs"
-            echo "| | URL |"
-            echo "|---|---|"
-            echo "| **Frontend** | http://${ALB}/ |"
-            echo "| **Health** | http://${ALB}/health |"
-            echo "| **API** | http://${ALB}/api/query |"
-            echo "| **Metrics** | http://${ALB}/metrics |"
-            echo "| **Admin pods** | http://${ALB}/admin/pods |"
+          # Voyage AI key — comes from GitHub secrets (not Secrets Manager).
+          # optional: skip if not set so deploys work without semantic memory.
+          if [ -n "${{ secrets.VOYAGE_API_KEY }}" ]; then
+            kubectl create secret generic agentify-voyage-secret -n agentify \
+              --from-literal=api_key="${{ secrets.VOYAGE_API_KEY }}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            echo "Voyage AI secret synced"
           else
-            echo "> ⚠️ ALB address not yet assigned — check again in 2–3 min."
+            echo "VOYAGE_API_KEY not set — skipping (semantic memory will use recency fallback)"
           fi
 
-          echo ""
-          echo "### Pod status"
-          echo '```'
-          echo "$POD_TABLE"
-          echo '```'
+          echo "K8s secrets synced from Secrets Manager"
 
-          echo ""
-          echo "### Images"
-          echo "| Service | Image |"
-          echo "|---|---|"
-          echo "| backend  | \`agentify/backend:${{ env.IMAGE_TAG }}\` |"
-          echo "| agent    | \`agentify/agent:${{ env.IMAGE_TAG }}\` |"
-          echo "| adapter  | \`agentify/k8fy-adapter:${{ env.IMAGE_TAG }}\` |"
-          echo "| frontend | \`agentify/frontend:${{ env.IMAGE_TAG }}\` |"
-        } >> "$GITHUB_STEP_SUMMARY"
+      - name: Update manifests (image tags + IRSA roles + registry)
+        run: |
+          REGISTRY=${{ secrets.ECR_REGISTRY }}
+          TAG=${{ env.IMAGE_TAG }}
 
-        # ── Also print to log for quick terminal access ───────────────────────
-        echo "=== URLs ==="
-        [ -n "$ALB" ] && echo "  Frontend : http://${ALB}/" || echo "  ALB not assigned yet"
-        echo "  Health   : http://${ALB}/health"
-        echo "  API      : http://${ALB}/api/query"
+          # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
+          for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml \
+                   infra/kubernetes/payments-test/payment-api.yaml infra/kubernetes/payments-test/payment-worker.yaml \
+                   infra/kubernetes/payments-test/payment-service.yaml; do
+            sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" "$f"
+          done
+
+          # 2. Pin images to the commit SHA (immutable tag).
+          sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
+          sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
+          sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/frontend.yaml
+          sed -i "s|${REGISTRY}/agentify/frontend:latest|${REGISTRY}/agentify/frontend:${TAG}|g" infra/kubernetes/frontend.yaml
+
+          # 3. Substitute IRSA role ARN placeholders from live IAM (no hardcoding).
+          BACKEND_ROLE=$(aws iam get-role --role-name agentify-dev-backend --query 'Role.Arn' --output text)
+          AGENT_ROLE=$(aws iam get-role   --role-name agentify-dev-agent   --query 'Role.Arn' --output text)
+          ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter  --query 'Role.Arn' --output text)
+
+          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn|${BACKEND_ROLE}|g" infra/kubernetes/backend.yaml
+          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn|${AGENT_ROLE}|g"     infra/kubernetes/agent.yaml
+          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
+
+          echo "Manifests updated — sample backend image:"
+          grep "image:" infra/kubernetes/backend.yaml | head -1
+
+      - name: Wait for AWS Load Balancer Controller webhook
+        # The AWS LBC registers a mutating webhook for Services. After a scale-up
+        # the LBC pod can take 60-120s to reschedule. If it has no endpoints the
+        # webhook call fails and any Helm chart that creates Services (including Vault)
+        # errors out. Wait up to 3 minutes, then delete the stale webhook config so
+        # the install can proceed (LBC will re-register it once its pod is ready).
+        run: |
+          echo "Checking AWS Load Balancer Controller webhook health..."
+          for i in $(seq 1 18); do
+            READY=$(kubectl get deployment aws-load-balancer-controller -n kube-system \
+              -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            if [ "${READY:-0}" -ge 1 ]; then
+              echo "AWS LBC ready ($READY replicas) — proceeding"
+              exit 0
+            fi
+            echo "  LBC not ready yet (attempt $i/18, readyReplicas=${READY:-0})"
+            sleep 10
+          done
+          echo "AWS LBC did not become ready in 3 minutes — deleting stale webhook so Helm can proceed"
+          echo "WARNING: Services will be created without LBC mutation; LBC will reconcile once it restarts"
+          kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+
+      - name: Install/upgrade HashiCorp Vault
+        run: |
+          helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
+          helm repo update
+
+          # If a previous release is in a failed state (e.g. immutable StatefulSet
+          # field conflict from a prior attempt), uninstall cleanly before reinstalling.
+          # Also delete any Pending PVCs left over from the broken install so the new
+          # release can provision a fresh one with the correct storage class.
+          HELM_STATUS=$(helm status vault -n vault -o json 2>/dev/null \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null \
+            || echo "not-installed")
+          echo "Vault Helm release status: $HELM_STATUS"
+
+          # ── Handle StatefulSet immutable-field conflicts ───────────────────────
+          # volumeClaimTemplates is immutable after StatefulSet creation. Any change
+          # to storageClass OR switching between dev mode (no PVC) and standalone
+          # mode (with PVC) requires deleting the StatefulSet so Helm can recreate it.
+          #
+          # Dev mode target: StatefulSet should have zero volumeClaimTemplates.
+          # Check the count and delete if non-zero (means it was created in standalone mode).
+          VCT_COUNT=$(kubectl get statefulset vault -n vault \
+            -o jsonpath='{.spec.volumeClaimTemplates}' 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)" \
+            2>/dev/null || echo "0")
+          echo "StatefulSet volumeClaimTemplates count: $VCT_COUNT (dev mode wants: 0)"
+
+          if [ "$VCT_COUNT" != "0" ] && [ "$VCT_COUNT" != "" ]; then
+            echo "StatefulSet has PVC templates but dev mode needs none — deleting StatefulSet + PVCs..."
+            kubectl delete statefulset vault -n vault --ignore-not-found=true
+            kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
+            sleep 5
+          elif [ "$HELM_STATUS" = "failed" ] || [ "$HELM_STATUS" = "pending-upgrade" ]; then
+            echo "Cleaning up failed Vault release before reinstalling..."
+            helm uninstall vault -n vault --wait 2>/dev/null || true
+            kubectl delete pvc -n vault --all --ignore-not-found=true 2>/dev/null || true
+            sleep 10
+          fi
+
+          # Idempotent install/upgrade — applies manifests and returns immediately.
+          # Pod readiness is handled by the "Wait for Vault to be ready" step below,
+          # which polls vault-0 explicitly and gives it up to 3 minutes to schedule.
+          # --wait is intentionally omitted: on cold starts after scale-up the image
+          # pull alone can exceed 180s, causing a false "context deadline exceeded".
+          helm upgrade --install vault hashicorp/vault \
+            --namespace vault --create-namespace \
+            -f infra/kubernetes/vault/vault-values.yaml \
+            --timeout=120s
+          echo "Vault Helm chart applied."
+
+      - name: Wait for Vault to be ready
+        # Dev mode: Vault starts pre-initialised and pre-unsealed — no init/unseal
+        # steps needed.  Root token is "root" (set in vault-values.yaml).
+        # We just wait for vault-0 to be Running and store the known token in
+        # the K8s secrets so VaultCertSkill and vault-setup.sh can use them.
+        run: |
+          echo "Waiting for vault-0 pod to be Running..."
+          for i in $(seq 1 18); do
+            STATUS=$(kubectl get pod vault-0 -n vault \
+              -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+            echo "  vault-0 status: $STATUS (attempt $i/18)"
+            [ "$STATUS" = "Running" ] && break
+            if [ "$STATUS" = "Pending" ]; then
+              kubectl describe pod vault-0 -n vault 2>/dev/null \
+                | grep -A8 "Events:" | tail -8 || true
+            fi
+            sleep 10
+          done
+
+          STATUS=$(kubectl get pod vault-0 -n vault \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "Missing")
+          if [ "$STATUS" != "Running" ]; then
+            echo "Error: vault-0 is not Running after 3 minutes (status: $STATUS)"
+            kubectl get pods -n vault -o wide || true
+            exit 1
+          fi
+          echo "vault-0 is Running."
+
+          # Store the fixed dev-mode root token so other steps and VaultCertSkill
+          # can reference it without manual intervention.
+          kubectl create secret generic vault-unseal-keys -n vault \
+            --from-literal=unseal-key="dev-mode-no-unseal-needed" \
+            --from-literal=root-token="root" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic agentify-vault-secret -n agentify \
+            --from-literal=token="root" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Dev-mode token stored in vault-unseal-keys + agentify-vault-secret."
+
+      - name: Configure Vault (runs every deploy — idempotent commands)
+        # Vault runs in dev mode which stores all data IN MEMORY.
+        # Every vault-0 pod restart (scale-down/up, deploy) wipes PKI mounts,
+        # roles, and policies. The annotation guard has been removed so this step
+        # runs on every deploy and recreates all configuration. All commands use
+        # the "|| echo already-exists" pattern so they are safe to re-run.
+        run: |
+          kubectl port-forward -n vault svc/vault 8200:8200 &
+          PF_PID=$!
+          sleep 5
+
+          export VAULT_ADDR=http://127.0.0.1:8200
+          export VAULT_TOKEN="root"   # dev mode
+
+          curl -fsSL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip \
+            -o /tmp/vault.zip && unzip -q /tmp/vault.zip -d /tmp && chmod +x /tmp/vault
+          export PATH="/tmp:$PATH"
+
+          # Kubernetes auth
+          vault auth enable kubernetes 2>/dev/null || echo "Kubernetes auth already enabled."
+          K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          vault write auth/kubernetes/config kubernetes_host="$K8S_HOST"
+
+          # KV v2
+          vault secrets enable -path=secret kv-v2 2>/dev/null || echo "KV already enabled."
+
+          # pki-payments — the single canonical PKI mount for all payment services.
+          # payment-api role:    used by payment and payment-api service pods.
+          # payment-worker role: used by payment-worker service pods.
+          vault secrets enable -path=pki-payments pki 2>/dev/null || echo "pki-payments already enabled."
+          vault secrets tune -max-lease-ttl=8760h pki-payments
+          vault write pki-payments/root/generate/internal \
+            common_name="payments.svc.cluster.local Root CA" ttl=8760h > /dev/null 2>&1 || true
+          vault write pki-payments/config/urls \
+            issuing_certificates="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/ca" \
+            crl_distribution_points="http://vault.vault.svc.cluster.local:8200/v1/pki-payments/crl"
+          vault write pki-payments/roles/payment-api \
+            allowed_domains="payments.svc.cluster.local,payment.payments.svc.cluster.local,payment-api.payments.svc.cluster.local" \
+            allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
+          vault write pki-payments/roles/payment-worker \
+            allowed_domains="payments.svc.cluster.local,payment-worker.payments.svc.cluster.local" \
+            allow_subdomains=true allow_localhost=true max_ttl=720h generate_lease=true
+
+          # Policies — all referencing pki-payments (consolidated, no more pki/ paths)
+          vault policy write payment-service-policy - <<'HCL'
+          path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
+          path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
+          path "pki-payments/cert/*"               { capabilities = ["read"] }
+          path "secret/data/payments/*"            { capabilities = ["read"] }
+          path "auth/token/renew-self"             { capabilities = ["update"] }
+          HCL
+          vault policy write cert-rotator-policy - <<'HCL'
+          path "pki-payments/issue/payment-api"    { capabilities = ["create","update"] }
+          path "pki-payments/issue/payment-worker" { capabilities = ["create","update"] }
+          path "pki-payments/revoke"               { capabilities = ["create","update"] }
+          path "pki-payments/cert/*"               { capabilities = ["read"] }
+          path "secret/data/payments/*"            { capabilities = ["create","update","read"] }
+          path "auth/token/renew-self"             { capabilities = ["update"] }
+          HCL
+
+          # Kubernetes auth roles
+          vault write auth/kubernetes/role/payment-api \
+            bound_service_account_names=payment-api \
+            bound_service_account_namespaces=payments \
+            policies=payment-service-policy ttl=1h
+          vault write auth/kubernetes/role/payment-worker \
+            bound_service_account_names=payment-worker \
+            bound_service_account_namespaces=payments \
+            policies=payment-service-policy ttl=1h
+          vault write auth/kubernetes/role/cert-rotator \
+            bound_service_account_names=cert-rotator \
+            bound_service_account_namespaces=payments \
+            policies=cert-rotator-policy ttl=1h
+
+          # Stamp new version so future runs skip this step
+          kubectl annotate secret vault-unseal-keys -n vault \
+            vault-configured=pki-payments-v2 --overwrite  # kept for reference only, no longer gates the step
+
+          kill $PF_PID 2>/dev/null || true
+          echo "Vault configuration complete (pki-payments-v2)."
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f infra/kubernetes/backend.yaml
+          kubectl apply -f infra/kubernetes/agent.yaml
+          kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+          kubectl apply -f infra/kubernetes/frontend.yaml
+          kubectl apply -f infra/kubernetes/ingress.yaml
+          kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
+          kubectl apply -f infra/kubernetes/vault/vault-ingress.yaml
+          kubectl apply -f infra/kubernetes/payments-test/namespace.yaml
+          kubectl apply -f infra/kubernetes/payments-test/serviceaccounts.yaml
+          kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
+          kubectl apply -f infra/kubernetes/payments-test/payment-api.yaml
+          kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
+
+      - name: Wait for rollouts
+        run: |
+          kubectl rollout status deployment/agentify-backend  -n agentify --timeout=300s
+
+          # Agent rollout: give K8s 60s to roll out normally, then repair any
+          # zombie ReplicaSets from prior failed deploys.
+          #
+          # Root cause: old RSes can be left with spec.replicas=1 if a prior
+          # deploy failed mid-rollout. Force-deleting their pods doesn't help
+          # because the RS controller immediately recreates them. We must scale
+          # the RS to 0 first, THEN delete the pod.
+          echo "=== agentify-agent rollout ==="
+          kubectl rollout status deployment/agentify-agent -n agentify --timeout=60s || true
+
+          # Identify the current RS by revision annotation (same mechanism K8s uses internally).
+          # We use the pod-template-hash label — not creation time — to distinguish
+          # current pods from stale ones. Creation time is unreliable: the zombie RS
+          # recreates its pod after each force-delete, so its pod can be newer than
+          # the current RS's pod, causing us to delete the wrong one.
+          CURRENT_REV=$(kubectl get deployment agentify-agent -n agentify -o json | \
+            jq -r '.metadata.annotations["deployment.kubernetes.io/revision"] // empty')
+
+          if [ -n "$CURRENT_REV" ]; then
+            CURRENT_HASH=$(kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
+              jq -r --arg rev "$CURRENT_REV" \
+              '.items[] | select(.metadata.annotations["deployment.kubernetes.io/revision"] == $rev)
+               | .metadata.labels["pod-template-hash"]')
+            echo "Current RS hash: $CURRENT_HASH (revision $CURRENT_REV)"
+
+            # Scale all non-current RSes to 0 so deleted pods are not recreated
+            kubectl get replicasets -n agentify -l app=agentify-agent -o json | \
+              jq -r --arg rev "$CURRENT_REV" \
+              '.items[] | select(
+                .metadata.annotations["deployment.kubernetes.io/revision"] != $rev
+                and .spec.replicas > 0
+              ) | .metadata.name' | \
+            while read rs; do
+              [ -z "$rs" ] && continue
+              echo "Scaling zombie RS to 0: $rs"
+              kubectl scale replicaset "$rs" -n agentify --replicas=0
+            done
+
+            # Force-delete pods not belonging to the current RS (matched by hash, not age)
+            if [ -n "$CURRENT_HASH" ]; then
+              kubectl get pods -n agentify -l app=agentify-agent -o json | \
+                jq -r --arg hash "$CURRENT_HASH" \
+                '.items[] | select(.metadata.labels["pod-template-hash"] != $hash) | .metadata.name' | \
+              while read pod; do
+                [ -z "$pod" ] && continue
+                echo "Force-deleting stale pod: $pod"
+                kubectl delete pod "$pod" -n agentify --grace-period=0 --force
+              done
+              sleep 5
+            fi
+          fi
+
+          kubectl rollout status deployment/agentify-agent -n agentify --timeout=300s
+
+          kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
+          kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
+
+      - name: Seed namespace cache (post-deploy sync)
+        # Port-forward the backend and call /admin/sync so discovered namespaces/services
+        # are written into current_state immediately — without this the search autocomplete
+        # stays empty after a scale-up until the adapter re-emits all ingestion events.
+        run: |
+          kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+          PF_PID=$!
+          SYNCED=false
+          for i in 1 2 3 4 5 6; do
+            sleep 5
+            if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
+              echo "Namespace sync succeeded on attempt $i"
+              SYNCED=true
+              break
+            fi
+            echo "Attempt $i: backend not ready yet, retrying..."
+          done
+          kill $PF_PID 2>/dev/null || true
+          $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until the adapter re-emits events"
+
+      - name: Run eval regression suite
+        # Runs the k8fy-regression Langfuse dataset against the freshly deployed
+        # backend. Scores each item (intent routing, tier, status, required fields,
+        # latency) and fails the deploy if the mean score drops below 0.85.
+        # Skip when Langfuse credentials are not configured (opt-in per environment).
+        run: |
+          if [ -z "$LANGFUSE_PUBLIC_KEY" ] || [ -z "$LANGFUSE_SECRET_KEY" ]; then
+            echo "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set — skipping evals"
+            exit 0
+          fi
+
+          # Port-forward the backend so the script can reach it from the runner
+          kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+          PF_PID=$!
+          # Wait up to 20s for the port-forward to be ready
+          for i in $(seq 1 4); do
+            sleep 5
+            curl -sf http://localhost:18080/health > /dev/null 2>&1 && break
+            echo "Waiting for port-forward... ($i/4)"
+          done
+
+          pip install -q "langfuse>=2.0.0,<3.0.0" requests
+
+          # Seed the dataset (idempotent — safe to run on every deploy;
+          # uses stable item IDs so existing items are updated, not duplicated).
+          python scripts/seed_eval_dataset.py
+
+          python scripts/run_evals.py \
+            --backend-url http://localhost:18080 \
+            --run-name "ci-${{ env.IMAGE_TAG }}" \
+            --pass-threshold 0.85
+          EVAL_EXIT=$?
+
+          kill $PF_PID 2>/dev/null || true
+
+          if [ $EVAL_EXIT -ne 0 ]; then
+            echo "Eval gate FAILED — see Langfuse UI for per-item breakdown"
+            exit 1
+          fi
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+
+      - name: Validate Voyage AI + semantic memory
+        # Smoke-tests the full P8 pipeline: embed endpoint availability,
+        # a Tier-2 diagnose query, and confirmation that an embedding row
+        # was written to incident_embeddings within 10 seconds.
+        # Non-fatal warning if VOYAGE_API_KEY is not set (recency fallback active).
+        run: |
+          kubectl port-forward -n agentify svc/agentify-agent 18081:8001 &
+          PF_PID=$!
+          sleep 5
+
+          echo "=== Voyage AI embed endpoint check ==="
+          EMBED=$(curl -sf -X POST http://localhost:18081/embed \
+            -H "Content-Type: application/json" \
+            -d '{"text": "payment-worker CrashLoopBackOff"}' 2>/dev/null || echo '{}')
+          AVAILABLE=$(echo "$EMBED" | python3 -c "import sys,json; print(json.load(sys.stdin).get('available', False))" 2>/dev/null || echo false)
+          DIM=$(echo "$EMBED"        | python3 -c "import sys,json; print(json.load(sys.stdin).get('dim', 0))"       2>/dev/null || echo 0)
+
+          if [ "$AVAILABLE" = "True" ]; then
+            echo "OK  Voyage AI active — dim=$DIM"
+          else
+            echo "WARN Voyage AI not available (VOYAGE_API_KEY may not be set) — recency fallback active"
+          fi
+
+          echo "=== Tier-1 health check (fast path) ==="
+          HEALTH=$(curl -sf --max-time 10 http://localhost:18080/api/query \
+            -H "Content-Type: application/json" \
+            -d '{"question":"is payment-api healthy?","context":{"namespace":"payments","service":"payment-api"}}' \
+            2>/dev/null || echo '{}')
+          TIER=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
+          echo "tier=$TIER (want tier1)"
+          [ "$TIER" = "tier1" ] && echo "OK  Tier-1 fast path working" || echo "WARN Tier-1 returned tier=$TIER"
+
+          echo "=== Tier-2 diagnose + embed goroutine check ==="
+          DIAGNOSE=$(curl -sf --max-time 120 http://localhost:18080/api/query \
+            -H "Content-Type: application/json" \
+            -d '{"question":"why is payment-worker crashing?","context":{"namespace":"payments","service":"payment-worker"}}' \
+            2>/dev/null || echo '{}')
+          DTIER=$(echo "$DIAGNOSE"    | python3 -c "import sys,json; print(json.load(sys.stdin).get('tier','?'))" 2>/dev/null || echo ?)
+          DTRACE=$(echo "$DIAGNOSE"   | python3 -c "import sys,json; print(json.load(sys.stdin).get('trace_id',''))" 2>/dev/null || echo "")
+          echo "tier=$DTIER trace_id=$DTRACE"
+          [ "$DTIER" = "tier2" ] && echo "OK  Tier-2 diagnose returned" || echo "WARN Tier-2 returned tier=$DTIER"
+
+          # Give the async embed goroutine time to write to incident_embeddings
+          sleep 10
+          AGENT_LOGS=$(kubectl logs -n agentify deploy/agentify-backend --tail=30 2>/dev/null || echo "")
+          if echo "$AGENT_LOGS" | grep -q "incident embedding seeded"; then
+            echo "OK  incident_embeddings row written (Voyage AI vector stored)"
+          elif [ "$AVAILABLE" = "True" ]; then
+            echo "WARN embed goroutine log not found — check backend logs manually"
+          fi
+
+          kill $PF_PID 2>/dev/null || true
+          echo "=== Semantic memory validation complete ==="
+
+      - name: Debug pod state (always runs — helps diagnose failures)
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n agentify -o wide
+          echo ""
+          echo "=== Recent events ==="
+          kubectl get events -n agentify --sort-by='.lastTimestamp' | tail -20
+          echo ""
+          echo "=== Backend pod logs (last 30 lines) ==="
+          kubectl logs -n agentify -l app=agentify-backend --tail=30 2>/dev/null || echo "(no logs yet)"
+          echo ""
+          echo "=== Agent pod logs (last 20 lines) ==="
+          kubectl logs -n agentify -l app=agentify-agent --tail=20 2>/dev/null || echo "(no logs yet)"
+
+      - name: Job summary
+        if: always()
+        run: |
+          ALB=$(kubectl get ingress agentify -n agentify \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+
+          # ── Pod status table ──────────────────────────────────────────────────
+          POD_TABLE=$(kubectl get pods -n agentify \
+            -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[0].ready,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount' \
+            2>/dev/null || echo "(unavailable)")
+
+          # ── Write GitHub job summary (shown on the Actions run page) ──────────
+          {
+            echo "## Deployment — \`${{ env.IMAGE_TAG }}\` — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+
+            if [ -n "$ALB" ]; then
+              echo "### URLs"
+              echo "| | URL |"
+              echo "|---|---|"
+              echo "| **Frontend** | http://${ALB}/ |"
+              echo "| **Health** | http://${ALB}/health |"
+              echo "| **API** | http://${ALB}/api/query |"
+              echo "| **Metrics** | http://${ALB}/metrics |"
+              echo "| **Admin pods** | http://${ALB}/admin/pods |"
+            else
+              echo "> ⚠️ ALB address not yet assigned — check again in 2–3 min."
+            fi
+
+            echo ""
+            echo "### Pod status"
+            echo '```'
+            echo "$POD_TABLE"
+            echo '```'
+
+            echo ""
+            echo "### Images"
+            echo "| Service | Image |"
+            echo "|---|---|"
+            echo "| backend  | \`agentify/backend:${{ env.IMAGE_TAG }}\` |"
+            echo "| agent    | \`agentify/agent:${{ env.IMAGE_TAG }}\` |"
+            echo "| adapter  | \`agentify/k8fy-adapter:${{ env.IMAGE_TAG }}\` |"
+            echo "| frontend | \`agentify/frontend:${{ env.IMAGE_TAG }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Also print to log for quick terminal access ───────────────────────
+          echo "=== URLs ==="
+          [ -n "$ALB" ] && echo "  Frontend : http://${ALB}/" || echo "  ALB not assigned yet"
+          echo "  Health   : http://${ALB}/health"
+          echo "  API      : http://${ALB}/api/query"

@@ -1,3 +1,4 @@
+---
 # Resume: start RDS + scale EKS nodes back up after a pause.
 # Takes ~5-10 min: RDS startup is the slow part (~5 min).
 
@@ -24,139 +25,139 @@ jobs:
     name: Start RDS + scale nodes up
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-        aws-region: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    - name: Start RDS instance
-      run: |
-        STATUS=$(aws rds describe-db-instances \
-          --db-instance-identifier agentify-dev \
-          --query 'DBInstances[0].DBInstanceStatus' \
-          --output text --region ${{ secrets.AWS_REGION }} 2>/dev/null || echo "not-found")
-        if [ "$STATUS" = "stopped" ]; then
-          aws rds start-db-instance \
-            --db-instance-identifier agentify-dev \
-            --region ${{ secrets.AWS_REGION }}
-          echo "RDS start requested"
-        else
-          echo "RDS status: $STATUS — skipping start"
-        fi
-
-    - name: Scale EKS nodes up
-      run: |
-        NODE_COUNT=${{ github.event.inputs.node_count }}
-        # Look up the actual node group name — Terraform appends a unique suffix.
-        NG=$(aws eks list-nodegroups \
-          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --region ${{ secrets.AWS_REGION }} \
-          --query 'nodegroups[0]' --output text)
-        echo "Node group: $NG"
-        aws eks update-nodegroup-config \
-          --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --nodegroup-name "$NG" \
-          --scaling-config minSize=1,maxSize=3,desiredSize=${NODE_COUNT} \
-          --region ${{ secrets.AWS_REGION }}
-        echo "$NG" > /tmp/ng_name
-        echo "Node group scaling to ${NODE_COUNT} requested"
-
-    - name: Wait for RDS to be available
-      run: |
-        echo "Waiting up to 10 min for RDS to become available..."
-        for i in $(seq 1 40); do
+      - name: Start RDS instance
+        run: |
           STATUS=$(aws rds describe-db-instances \
             --db-instance-identifier agentify-dev \
             --query 'DBInstances[0].DBInstanceStatus' \
-            --output text --region ${{ secrets.AWS_REGION }})
-          if [ "$STATUS" = "available" ]; then
-            echo "RDS available ✅"; break
+            --output text --region ${{ secrets.AWS_REGION }} 2>/dev/null || echo "not-found")
+          if [ "$STATUS" = "stopped" ]; then
+            aws rds start-db-instance \
+              --db-instance-identifier agentify-dev \
+              --region ${{ secrets.AWS_REGION }}
+            echo "RDS start requested"
+          else
+            echo "RDS status: $STATUS — skipping start"
           fi
-          echo "RDS status: $STATUS ($i/40)"
-          sleep 15
-        done
 
-    - name: Wait for nodes to be ready
-      run: |
-        NG=$(cat /tmp/ng_name)
-        NODE_COUNT=${{ github.event.inputs.node_count }}
-        echo "Waiting up to 5 min for nodes..."
-        for i in $(seq 1 30); do
-          COUNT=$(aws eks describe-nodegroup \
+      - name: Scale EKS nodes up
+        run: |
+          NODE_COUNT=${{ github.event.inputs.node_count }}
+          # Look up the actual node group name — Terraform appends a unique suffix.
+          NG=$(aws eks list-nodegroups \
+            --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query 'nodegroups[0]' --output text)
+          echo "Node group: $NG"
+          aws eks update-nodegroup-config \
             --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
             --nodegroup-name "$NG" \
-            --query 'nodegroup.scalingConfig.desiredSize' \
-            --output text --region ${{ secrets.AWS_REGION }})
-          if [ "$COUNT" = "$NODE_COUNT" ]; then
-            echo "Nodes at $COUNT ✅"; break
+            --scaling-config minSize=1,maxSize=3,desiredSize=${NODE_COUNT} \
+            --region ${{ secrets.AWS_REGION }}
+          echo "$NG" > /tmp/ng_name
+          echo "Node group scaling to ${NODE_COUNT} requested"
+
+      - name: Wait for RDS to be available
+        run: |
+          echo "Waiting up to 10 min for RDS to become available..."
+          for i in $(seq 1 40); do
+            STATUS=$(aws rds describe-db-instances \
+              --db-instance-identifier agentify-dev \
+              --query 'DBInstances[0].DBInstanceStatus' \
+              --output text --region ${{ secrets.AWS_REGION }})
+            if [ "$STATUS" = "available" ]; then
+              echo "RDS available ✅"; break
+            fi
+            echo "RDS status: $STATUS ($i/40)"
+            sleep 15
+          done
+
+      - name: Wait for nodes to be ready
+        run: |
+          NG=$(cat /tmp/ng_name)
+          NODE_COUNT=${{ github.event.inputs.node_count }}
+          echo "Waiting up to 5 min for nodes..."
+          for i in $(seq 1 30); do
+            COUNT=$(aws eks describe-nodegroup \
+              --cluster-name ${{ secrets.EKS_CLUSTER_NAME }} \
+              --nodegroup-name "$NG" \
+              --query 'nodegroup.scalingConfig.desiredSize' \
+              --output text --region ${{ secrets.AWS_REGION }})
+            if [ "$COUNT" = "$NODE_COUNT" ]; then
+              echo "Nodes at $COUNT ✅"; break
+            fi
+            sleep 10
+          done
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ secrets.EKS_CLUSTER_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Re-apply CronJob manifest
+        run: |
+          kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml 2>/dev/null \
+            || echo "CronJob apply skipped (cluster may not be fully ready)"
+
+      - name: Seed namespace cache
+        # After pods reschedule the backend runs SeedNamespaceCache automatically,
+        # but this step provides an immediate fallback in case the adapter isn't
+        # ready yet when the backend first starts. Non-fatal if it fails.
+        run: |
+          echo "Waiting for backend pod to be ready..."
+          kubectl rollout status deployment/agentify-backend -n agentify --timeout=300s \
+            2>/dev/null || echo "Backend not ready (may need a deploy first)"
+
+          kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
+          PF_PID=$!
+          SYNCED=false
+          for i in 1 2 3 4 5 6; do
+            sleep 5
+            if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
+              echo "Namespace sync succeeded"
+              SYNCED=true
+              break
+            fi
+            echo "Attempt $i: backend not ready yet..."
+          done
+          kill $PF_PID 2>/dev/null || true
+          $SYNCED || echo "Warning: sync did not complete — autocomplete will populate once adapter emits events"
+
+      - name: Verify payment test services (optional)
+        if: github.event.inputs.verify_test_services == 'yes'
+        run: |
+          echo "Waiting for payment test pods to reschedule in 'payments' namespace..."
+          # Kubernetes auto-reschedules pods from existing Deployments.
+          # We just wait until they're Running.
+          for deploy in payment payment-api payment-worker; do
+            if kubectl get deployment $deploy -n payments &>/dev/null; then
+              echo "Waiting for $deploy..."
+              kubectl rollout status deployment/$deploy -n payments --timeout=180s \
+                2>/dev/null || echo "$deploy not ready yet (may still be scheduling)"
+            fi
+          done
+          echo ""
+          echo "=== Payment namespace pods ==="
+          kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
+
+      - name: Summary
+        run: |
+          echo "✅ Resumed. Trigger a deploy to push workloads back to the cluster."
+          echo "Running cost: ~\$123/month."
+          echo ""
+          echo "Note: Payment test pods (if they existed before pause) are"
+          echo "automatically rescheduled by Kubernetes — no manual action needed."
+          if [ "${{ github.event.inputs.verify_test_services }}" = "yes" ]; then
+            echo "Payment pod status verified above."
+          else
+            echo "Set 'Verify test services?' to 'yes' to wait for payment pods."
           fi
-          sleep 10
-        done
-
-    - name: Update kubeconfig
-      run: |
-        aws eks update-kubeconfig \
-          --name ${{ secrets.EKS_CLUSTER_NAME }} \
-          --region ${{ secrets.AWS_REGION }}
-
-    - name: Re-apply CronJob manifest
-      run: |
-        kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml 2>/dev/null \
-          || echo "CronJob apply skipped (cluster may not be fully ready)"
-
-    - name: Seed namespace cache
-      # After pods reschedule the backend runs SeedNamespaceCache automatically,
-      # but this step provides an immediate fallback in case the adapter isn't
-      # ready yet when the backend first starts. Non-fatal if it fails.
-      run: |
-        echo "Waiting for backend pod to be ready..."
-        kubectl rollout status deployment/agentify-backend -n agentify --timeout=300s \
-          2>/dev/null || echo "Backend not ready (may need a deploy first)"
-
-        kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
-        PF_PID=$!
-        SYNCED=false
-        for i in 1 2 3 4 5 6; do
-          sleep 5
-          if curl -sf -X POST http://localhost:18080/admin/sync > /dev/null 2>&1; then
-            echo "Namespace sync succeeded"
-            SYNCED=true
-            break
-          fi
-          echo "Attempt $i: backend not ready yet..."
-        done
-        kill $PF_PID 2>/dev/null || true
-        $SYNCED || echo "Warning: sync did not complete — autocomplete will populate once adapter emits events"
-
-    - name: Verify payment test services (optional)
-      if: github.event.inputs.verify_test_services == 'yes'
-      run: |
-        echo "Waiting for payment test pods to reschedule in 'payments' namespace..."
-        # Kubernetes auto-reschedules pods from existing Deployments.
-        # We just wait until they're Running.
-        for deploy in payment payment-api payment-worker; do
-          if kubectl get deployment $deploy -n payments &>/dev/null; then
-            echo "Waiting for $deploy..."
-            kubectl rollout status deployment/$deploy -n payments --timeout=180s \
-              2>/dev/null || echo "$deploy not ready yet (may still be scheduling)"
-          fi
-        done
-        echo ""
-        echo "=== Payment namespace pods ==="
-        kubectl get pods -n payments -o wide 2>/dev/null || echo "(payments namespace not found)"
-
-    - name: Summary
-      run: |
-        echo "✅ Resumed. Trigger a deploy to push workloads back to the cluster."
-        echo "Running cost: ~\$123/month."
-        echo ""
-        echo "Note: Payment test pods (if they existed before pause) are"
-        echo "automatically rescheduled by Kubernetes — no manual action needed."
-        if [ "${{ github.event.inputs.verify_test_services }}" = "yes" ]; then
-          echo "Payment pod status verified above."
-        else
-          echo "Set 'Verify test services?' to 'yes' to wait for payment pods."
-        fi
