@@ -118,6 +118,22 @@ resource "aws_security_group" "log_test_endpoints" {
     security_groups = [module.eks.cluster_primary_security_group_id]
   }
 
+  ingress {
+    # private_dns_enabled = true on the ECR endpoints below overrides ECR DNS
+    # resolution for the WHOLE VPC, not just Fargate — confirmed live
+    # 2026-07-24 via `getent hosts` from a running EC2-node-group pod, which
+    # resolved ECR to this endpoint's private IP. Without this rule, every
+    # EC2-node-group workload (backend/agent/frontend/adapter — everything
+    # outside the payments Fargate profile) loses ECR access entirely on its
+    # next image pull, since DNS no longer has any path back to the public
+    # ECR endpoint to fall back on.
+    description     = "HTTPS from the EC2 node group (private DNS override affects the whole VPC, not just Fargate)"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [module.eks.node_security_group_id]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
