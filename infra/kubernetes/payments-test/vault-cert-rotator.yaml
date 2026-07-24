@@ -41,28 +41,27 @@ spec:
 
               # 2. Check current cert expiry in the K8s Secret via Vault agent fetch
               #    (rotator reads the existing secret to decide whether rotation is needed)
-              DAYS_REMAINING=0
               CURRENT_CERT=$(curl -sf \
                 "https://kubernetes.default.svc/api/v1/namespaces/$SECRET_NAMESPACE/secrets/$SECRET_NAME" \
                 --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
                 -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
                 2>/dev/null | jq -r '.data["tls.crt"] // empty' | base64 -d 2>/dev/null)
 
+              # 3. Skip rotation if the cert is still valid past the renewal threshold.
+              # Uses `openssl x509 -checkend` instead of manually diffing dates —
+              # Alpine ships BusyBox `date`, which can't parse OpenSSL's `-enddate`
+              # output format (neither GNU `date -d` nor the BSD/macOS `date -j -f`
+              # fallback work on it), confirmed live 2026-07-24.
               if [ -n "$CURRENT_CERT" ]; then
                 echo "$CURRENT_CERT" > /tmp/current.crt
                 EXPIRY=$(openssl x509 -enddate -noout -in /tmp/current.crt | cut -d= -f2)
-                EXPIRY_TS=$(date -d "$EXPIRY" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$EXPIRY" +%s 2>/dev/null)
-                NOW_TS=$(date +%s)
-                DAYS_REMAINING=$(( (EXPIRY_TS - NOW_TS) / 86400 ))
-                echo "Current cert expires: $EXPIRY ($DAYS_REMAINING days remaining)"
+                if openssl x509 -checkend $(( RENEW_THRESHOLD_DAYS * 86400 )) -noout -in /tmp/current.crt >/dev/null 2>&1; then
+                  echo "Cert healthy (expires $EXPIRY, beyond ${RENEW_THRESHOLD_DAYS}d threshold). No rotation needed."
+                  exit 0
+                fi
+                echo "Cert needs rotation (expires $EXPIRY, within ${RENEW_THRESHOLD_DAYS}d threshold)."
               else
                 echo "No existing cert found — will issue fresh cert."
-              fi
-
-              # 3. Skip rotation if cert is healthy
-              if [ "$DAYS_REMAINING" -ge "$RENEW_THRESHOLD_DAYS" ]; then
-                echo "Cert healthy ($DAYS_REMAINING days remaining, threshold ${RENEW_THRESHOLD_DAYS}d). No rotation needed."
-                exit 0
               fi
 
               # 4. Issue new cert from Vault PKI
