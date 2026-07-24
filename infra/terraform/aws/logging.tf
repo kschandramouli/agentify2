@@ -104,11 +104,18 @@ resource "aws_security_group" "log_test_endpoints" {
   vpc_id      = module.vpc.vpc_id
 
   ingress {
-    description     = "HTTPS from Fargate pods (cluster security group)"
+    # AWS attaches EKS's auto-created PRIMARY cluster security group to every
+    # Fargate pod ENI — neither module.eks.cluster_security_group_id (a
+    # separate, module-managed SG) nor module.eks.node_security_group_id (the
+    # shared *node* SG, used by EC2 nodes) match it. Confirmed live 2026-07-24
+    # via `aws ec2 describe-network-interfaces` on a stuck Fargate pod's ENI,
+    # after ECR pulls timed out despite a seemingly-correct SG rule using the
+    # wrong one of those two.
+    description     = "HTTPS from Fargate pods (EKS primary cluster security group)"
     from_port       = 443
     to_port         = 443
     protocol        = "tcp"
-    security_groups = [module.eks.cluster_security_group_id]
+    security_groups = [module.eks.cluster_primary_security_group_id]
   }
 
   egress {
@@ -117,6 +124,46 @@ resource "aws_security_group" "log_test_endpoints" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
+
+# ── Fargate → EC2 node group connectivity gaps ───────────────────────────────
+# The vault-cert-init initContainer runs on Fargate but needs to reach CoreDNS
+# and Vault, both on the EC2 node group. The module's node security group only
+# allows CoreDNS/inter-node traffic from itself (node-to-node) — it has no
+# rule for the separate SG Fargate pods use (module.eks.cluster_primary_security_group_id).
+# Added as standalone rules (not editing the vendored module) — confirmed live
+# 2026-07-24 via a `curl` exit code 6 (COULDNT_RESOLVE_HOST) on a Fargate pod.
+resource "aws_security_group_rule" "fargate_to_coredns_udp" {
+  count                    = var.enable_log_platform_test ? 1 : 0
+  type                     = "ingress"
+  from_port                = 53
+  to_port                  = 53
+  protocol                 = "udp"
+  security_group_id        = module.eks.node_security_group_id
+  source_security_group_id = module.eks.cluster_primary_security_group_id
+  description              = "CoreDNS UDP from Fargate pods (P15 test harness, ADR 0021)"
+}
+
+resource "aws_security_group_rule" "fargate_to_coredns_tcp" {
+  count                    = var.enable_log_platform_test ? 1 : 0
+  type                     = "ingress"
+  from_port                = 53
+  to_port                  = 53
+  protocol                 = "tcp"
+  security_group_id        = module.eks.node_security_group_id
+  source_security_group_id = module.eks.cluster_primary_security_group_id
+  description              = "CoreDNS TCP from Fargate pods (P15 test harness, ADR 0021)"
+}
+
+resource "aws_security_group_rule" "fargate_to_vault" {
+  count                    = var.enable_log_platform_test ? 1 : 0
+  type                     = "ingress"
+  from_port                = 8200
+  to_port                  = 8200
+  protocol                 = "tcp"
+  security_group_id        = module.eks.node_security_group_id
+  source_security_group_id = module.eks.cluster_primary_security_group_id
+  description              = "Vault API from Fargate pods - vault-cert-init initContainer (ADR 0021)"
 }
 
 resource "aws_vpc_endpoint" "log_test" {
