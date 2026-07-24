@@ -42,6 +42,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
+| **P17** | Multi-cluster access for the live-diagnostics tools — IAM-assumed-role per cluster, replacing the in-cluster SA token (which only works for the cluster the agent pod happens to run in) | Proposed (2026-07-25) — see below | `src/agent/k8fy/k8s_client.py`, `src/agent/k8fy/live_diagnostics.py`, `infra/kubernetes/payments-test/serviceaccounts.yaml` |
 
 ---
 
@@ -832,6 +833,39 @@ tenant per deployment, no `tenant_id`/RLS) stays as-is. If this ever needs to
 serve multiple *customers* (not just multiple clusters for one operator),
 that's a separate, larger decision revisiting ADR 0009 — don't let tenant-
 isolation machinery creep in under cover of this item.
+
+---
+
+## P17 — Multi-cluster access for the live-diagnostics tools (proposed 2026-07-25)
+
+**Context:** the chat live-diagnostics console (`live_list_pods`,
+`live_get_pod_logs`, `live_get_events`, `live_describe_pod` —
+`src/agent/k8fy/live_diagnostics.py`) authenticates to the Kubernetes API via
+the pod's own mounted ServiceAccount token (`src/agent/k8fy/k8s_client.py`),
+calling `https://kubernetes.default.svc` directly. This is topologically
+single-cluster by construction — it only works because the agent pod is
+physically running inside the cluster it's querying, via RBAC
+(`agent-live-diagnostics` Role, `infra/kubernetes/payments-test/serviceaccounts.yaml`)
+scoped to read-only pods/logs/events in that one cluster. There is no
+"in-cluster" shortcut once a second cluster is in play.
+
+**Recommendation:** don't centralize long-lived credentials for every cluster
+in one agent. Given this stack is all-EKS/AWS already (IRSA everywhere, OIDC
+trust for GitHub Actions), the fitting extension is: one base IAM role for
+the agent, allowed to `sts:AssumeRole` into a separate, per-cluster IAM role —
+one per onboarded cluster, added the same way P15's log-platform work already
+onboards clusters (a `clusters` map/registry, "add one entry," not a new
+Terraform module per cluster). Each per-cluster IAM role maps via EKS access
+entries to the same narrowly-scoped `agent-live-diagnostics`-style RBAC Role
+already built, in that cluster. This gets AWS-native short-lived tokens (STS,
+~1hr, auto-rotating) instead of static SA tokens, and a central, auditable
+place (CloudTrail `AssumeRole` events) to see and revoke per-cluster access —
+without inventing a bespoke token broker.
+
+**Tradeoff:** this is EKS-specific. If a non-EKS or non-AWS cluster ever
+joins the fleet, it needs its own onboarding path, not this one.
+
+**Not started** — this is a design recommendation, not yet a plan or code.
 
 ---
 
