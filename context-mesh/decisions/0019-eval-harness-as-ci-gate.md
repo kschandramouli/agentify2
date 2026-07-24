@@ -84,7 +84,7 @@ scripts/run_evals.py
 
 **CI integration:**
 ```yaml
-# .github/workflows/deploy.yml (new step, post-rollout)
+# .github/workflows/02-deploy.yml (new step, post-rollout)
 - name: Run eval regression suite
   run: |
     python scripts/run_evals.py \

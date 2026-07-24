@@ -5,7 +5,7 @@
 # connections are static in HCL; see scripts/onboard_cluster_logging.sh).
 #
 # Run once per cluster (or after the ConfigMap template changes) from:
-#   Actions → Onboard cluster logging → Run workflow
+#   Actions → 06 · Onboard Cluster Logging → Run workflow
 #
 # Prerequisites:
 #   terraform apply -var enable_log_platform_test=true already run
@@ -16,7 +16,7 @@
 # three, and the existing agentify-dev-ci role already has both an EKS access
 # entry (AmazonEKSClusterAdminPolicy) and OIDC trust covering this repo.
 
-name: Onboard cluster logging
+name: "06 · Onboard Cluster Logging"
 
 on:
   workflow_dispatch:
@@ -67,3 +67,8 @@ jobs:
         run: |
           echo "=== payments namespace pods (look for a fargate-* node) ==="
           kubectl get pods -n payments -o wide
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Applied the Fargate logging ConfigMap for cluster '${{ github.event.inputs.cluster_key }}' — see the Verify step above for pod placement." >> "$GITHUB_STEP_SUMMARY"

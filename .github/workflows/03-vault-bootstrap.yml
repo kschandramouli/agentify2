@@ -14,7 +14,7 @@
 #   - workflow_dispatch: run manually from GitHub Actions UI
 #   - After a successful Deploy run (workflow_run)
 
-name: Vault Bootstrap
+name: "03 · Vault Bootstrap"
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
         required: false
         default: "false"
   workflow_run:
-    workflows: ["Deploy"]
+    workflows: ["02 · Deploy"]
     types: [completed]
 
 permissions:

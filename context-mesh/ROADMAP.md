@@ -32,7 +32,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P5** | Pattern A standardisation across all skill classes (deterministic pre-fetch + single Claude call per intent) | **✅ Done (2026-06-11: all 5 skills on Pattern A; DiagnoseSkill advisor/executor removed; [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md))** | [spec 010](specs/010-skill-router.md), [ADR 0017](decisions/0017-pattern-a-skills-standardisation.md) |
 | **P5+** | Supporting tooling: AI gateway (semantic cache/budgets), eval harness + tool-call budgets, agent tracing | Later | ops/spec |
 | **P6** | HashiCorp Vault integration — cert management + autonomous rotation | **✅ Scaffold done (2026-06-17)** — open items: Vault HA, Terraform provider, dynamic secrets |
-| **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **✅ Done (2026-06-25)** — `scripts/seed_eval_dataset.py` + `scripts/run_evals.py` + deploy.yml gate; `intent`+`tier` added to QueryResponse | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
+| **P7** | **Eval harness as CI gate** — Langfuse dataset + CI eval step | **✅ Done (2026-06-25)** — `scripts/seed_eval_dataset.py` + `scripts/run_evals.py` + 02-deploy.yml gate; `intent`+`tier` added to QueryResponse | [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md) |
 | **P8** | RAG + pgvector + semantic memory (third memory layer) | After P7 | [ADR 0018](decisions/0018-three-layer-memory-architecture.md) |
 | **P9** | PR review agent — second domain use case proving two-tier generalises | **Not started. Architecture decision (2026-07-20): build as its own deployable agent, not a `SkillRouter` entry in `src/agent`** — see below | — |
 | **P10** | Context management at scale — budget-aware truncation, summarisation | Alongside P9 | — |
@@ -397,7 +397,7 @@ piece is the test dataset and CI step.
 - `scripts/run_evals.py` — POSTs each query to `/api/query`, scores against ground
   truth (intent, tier, status, required fields, latency), records score against
   `trace_id` in Langfuse
-- CI step in `deploy.yml` that runs the eval post-rollout and blocks on score < 0.85
+- CI step in `02-deploy.yml` that runs the eval post-rollout and blocks on score < 0.85
 - Scores visible in Langfuse UI alongside production traces
 
 **Architecture:** See [ADR 0019](decisions/0019-eval-harness-as-ci-gate.md).

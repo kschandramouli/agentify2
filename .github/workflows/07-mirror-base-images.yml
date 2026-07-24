@@ -6,7 +6,7 @@
 # ECR/Firehose, so Docker Hub pulls from those pods time out — ADR 0021).
 #
 # Run once (or whenever the pinned base image tags change) from:
-#   Actions → Mirror base images to ECR → Run workflow
+#   Actions → 07 · Mirror Base Images to ECR → Run workflow
 #
 # Prerequisites:
 #   terraform apply -var enable_log_platform_test=true already run
@@ -17,7 +17,7 @@
 # unrestricted internet access to Docker Hub — unlike a machine behind a
 # corporate proxy that corrupts/truncates large binary pulls.
 
-name: Mirror base images to ECR
+name: "07 · Mirror Base Images to ECR"
 
 on:
   workflow_dispatch: {}
@@ -67,3 +67,8 @@ jobs:
             aws ecr describe-images --repository-name "agentify/log-test-base/${repo}" \
               --query 'imageDetails[].imageTags' --output table
           done
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Mirrored alpine/nginx base images into ECR for the 'payments' namespace's Fargate profile — see the Verify step above for tags." >> "$GITHUB_STEP_SUMMARY"

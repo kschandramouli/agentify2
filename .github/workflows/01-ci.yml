@@ -2,7 +2,7 @@
 # CI: run tests on every push/PR.
 # Keeps fast: no Docker build, no AWS calls. Tests run with in-memory/embedded backends.
 
-name: CI
+name: "01 · CI"
 
 on:
   push:
@@ -28,6 +28,10 @@ jobs:
       - run: go test ./... -timeout 120s
         env:
           REGISTRY_BACKEND: memory
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Backend (Go) — build + vet + \`go test\` with an in-memory registry, no Docker/AWS." >> "$GITHUB_STEP_SUMMARY"
 
   agent:
     name: Agent (Python)
@@ -44,6 +48,10 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m py_compile $(find . -name "*.py" -not -path "./.venv/*")
       - run: python -m pytest tests/ -q
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Agent (Python) — compiles the FastAPI/Claude reasoning layer and runs its pytest suite." >> "$GITHUB_STEP_SUMMARY"
 
   adapter:
     name: Adapter (Python)
@@ -58,6 +66,10 @@ jobs:
           python-version: "3.11"
       - run: pip install kubernetes requests cryptography
       - run: python -m py_compile $(find k8fy -name "*.py")
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Adapter (Python) — compiles the k8fy adapter that watches the cluster and emits events." >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     name: Frontend (TypeScript)
@@ -75,3 +87,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Frontend (TypeScript) — typechecks and builds the Ops/Admin UI (React + Vite)." >> "$GITHUB_STEP_SUMMARY"

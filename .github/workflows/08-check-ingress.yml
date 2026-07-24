@@ -2,7 +2,7 @@
 # One-shot workflow to check ALB ingress status and controller health.
 # Trigger manually from Actions when the ALB address is missing after deploy.
 
-name: Check Ingress / ALB status
+name: "08 · Check Ingress / ALB Status"
 
 on:
   workflow_dispatch:
@@ -199,3 +199,8 @@ jobs:
                 "entity_key": "test-pod",
                 "tags": ["k8fy","payments"]
               }' 2>&1 || echo "(test failed)"
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Diagnostic sweep of ALB/ingress, pod health, agent reachability, and an end-to-end query — see the individual steps above for pass/fail detail." >> "$GITHUB_STEP_SUMMARY"

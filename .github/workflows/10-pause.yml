@@ -9,7 +9,7 @@
 #
 # Restore with the 'resume' workflow (~5 min).
 
-name: Pause (scale down)
+name: "10 · Pause (Scale Down)"
 
 on:
   workflow_dispatch:
@@ -103,9 +103,19 @@ jobs:
         run: |
           echo "✅ Paused. Running cost: ~\$73/month (EKS control plane only)."
           echo ""
-          echo "Note: ALL pods across ALL namespaces have been evicted (nodes=0)."
-          echo "This includes any payment test pods in the 'payments' namespace."
+          echo "Note: pods on the EC2 managed node group have been evicted (nodes=0)."
           echo "Kubernetes will automatically reschedule them when nodes come back."
+          echo "Fargate-scheduled pods (payments namespace, ADR 0021) are NOT affected"
+          echo "by this — they keep running and billing independently of the node group."
           echo ""
           echo "Restore with the 'resume' workflow."
           echo "  → Set 'Verify test services?' to 'yes' to wait for payment pods."
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "Paused — EKS node group scaled to 0, RDS stopped. Running cost ~\$73/month (EKS control plane only)."
+            echo ""
+            echo "Fargate-scheduled pods (payments namespace) are NOT stopped by this and keep billing independently."
+          } >> "$GITHUB_STEP_SUMMARY"

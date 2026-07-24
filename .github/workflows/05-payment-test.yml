@@ -8,7 +8,7 @@
 #  Phase 4 — Expiring TLS cert   → k8fy.certs      (cert check, latent risk)
 #  Phase 5 — Full diagnose       → Tier-2 Opus     (correlation, all signals)
 
-name: "🧪 Payment Test (Full P1–P4c)"
+name: "05 · Payment Test (Full P1-P4c)"
 
 on:
   workflow_dispatch:
@@ -248,3 +248,15 @@ jobs:
           echo "4      k8fy.certificates   cert expiry in 5d"
           echo "5      ALL                 correlated diagnose (Tier-2 Opus)"
           echo "=================================================="
+
+          {
+            echo "### Payment Test — P1-P4c signal coverage"
+            echo ""
+            echo "| Phase | Signal | Expected outcome |"
+            echo "|---|---|---|"
+            echo "| 1 | k8fy.live-state | health_check (Tier-1, <5ms) |"
+            echo "| 2 | k8fy.events | deploy event (nginx rollout) |"
+            echo "| 3 | k8fy.metrics | restart trend (CrashLoopBackOff) |"
+            echo "| 4 | k8fy.certificates | cert expiry in 5d |"
+            echo "| 5 | ALL | correlated diagnose (Tier-2 Opus) |"
+          } >> "$GITHUB_STEP_SUMMARY"

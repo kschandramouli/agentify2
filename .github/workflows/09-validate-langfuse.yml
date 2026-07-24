@@ -1,9 +1,9 @@
 ---
 # Validate Langfuse credentials stored in GitHub secrets.
-# Run manually from Actions → validate-langfuse → Run workflow.
+# Run manually from Actions → 09 · Validate Langfuse Secrets → Run workflow.
 # Reports whether the connection succeeds and whether the eval dataset exists.
 
-name: Validate Langfuse secrets
+name: "09 · Validate Langfuse Secrets"
 
 on:
   workflow_dispatch:
@@ -76,3 +76,8 @@ jobs:
           lf.flush()
           print("\nValidation complete.")
           EOF
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Checked Langfuse credentials and the k8fy-regression eval dataset — see the step above for OK/WARN/FAIL detail." >> "$GITHUB_STEP_SUMMARY"

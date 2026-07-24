@@ -12,7 +12,7 @@
 #   export VAULT_TOKEN=root
 #   bash scripts/vault-bootstrap.sh
 #
-# Usage (CI — called by vault-bootstrap.yml):
+# Usage (CI — called by 03-vault-bootstrap.yml):
 #   Kubeconfig and port-forward are set up by the workflow before this runs.
 
 set -euo pipefail

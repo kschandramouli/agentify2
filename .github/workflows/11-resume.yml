@@ -2,7 +2,7 @@
 # Resume: start RDS + scale EKS nodes back up after a pause.
 # Takes ~5-10 min: RDS startup is the slow part (~5 min).
 
-name: Resume (scale up)
+name: "11 · Resume (Scale Up)"
 
 on:
   workflow_dispatch:
@@ -161,3 +161,8 @@ jobs:
           else
             echo "Set 'Verify test services?' to 'yes' to wait for payment pods."
           fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "Resumed — RDS started, EKS node group scaled to ${{ github.event.inputs.node_count }} node(s). Running cost ~\$123/month." >> "$GITHUB_STEP_SUMMARY"
