@@ -194,7 +194,7 @@ resource "aws_iam_role_policy" "ci" {
       {
         Effect = "Allow"
         Action = [
-          "ecr:DescribeRepositories",
+          "ecr:DescribeRepositories", "ecr:DescribeImages",
           "ecr:CreateRepository",
           "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
