@@ -48,6 +48,16 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python -m py_compile $(find . -name "*.py" -not -path "./.venv/*")
       - run: python -m pytest tests/ -q
+        env:
+          # test_live_tool_call_endpoint.py imports app.py, which pulls in
+          # config.settings.get_settings() at module load — without these,
+          # its "not set in environment" fallback tries AWS Secrets Manager,
+          # which this job has no credentials for (correctly — see this
+          # file's header comment: CI makes no AWS calls). Dummy values only;
+          # nothing here talks to Anthropic or Langfuse in these tests.
+          ANTHROPIC_API_KEY: sk-ant-test-placeholder
+          LANGFUSE_PUBLIC_KEY: test-placeholder
+          LANGFUSE_SECRET_KEY: test-placeholder
       - name: Job summary
         if: always()
         run: |
