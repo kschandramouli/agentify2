@@ -9,10 +9,10 @@
 # tags this namespace pins is cheaper than a NAT gateway and, since these
 # tags never change, needs no ongoing sync.
 #
-# The alpine image also gets tool-baked variants (curl+jq as `3.18-tools`;
-# curl+jq+openssl as `3.18-tools-openssl` for vault-cert-rotator.yaml),
-# because `apk add` at runtime has exactly the same problem — Alpine's
-# package CDN isn't reachable from Fargate either.
+# The alpine image also gets curl+jq baked in here (as tag `3.18-tools`),
+# because the vault-cert-init initContainer's `apk add --no-cache curl jq`
+# has exactly the same problem — apk's CDN isn't reachable from Fargate
+# either. Baking the tools in at mirror time removes that second dependency.
 #
 # Run from AWS CloudShell (has Docker + unrestricted internet) — this script
 # intentionally avoids depending on any tool a corporate proxy might corrupt
@@ -89,7 +89,6 @@ mirror_plain() {
 }
 
 build_and_push "$ALPINE_REPO" "3.18-tools" "alpine:3.18" "curl jq"
-build_and_push "$ALPINE_REPO" "3.18-tools-openssl" "alpine:3.18" "curl jq openssl"
 
 echo "Mirroring plain base images (no build needed)..."
 mirror_plain "alpine:3.19" "${ALPINE_REPO}:3.19"
@@ -98,8 +97,7 @@ mirror_plain "nginx:1.26-alpine" "${NGINX_REPO}:1.26-alpine"
 
 echo ""
 echo "Done. Mirrored images:"
-echo "  ${ALPINE_REPO}:3.18-tools           (vault-cert-init, all 3 payments-test deployments)"
-echo "  ${ALPINE_REPO}:3.18-tools-openssl   (vault-cert-rotator CronJob)"
-echo "  ${ALPINE_REPO}:3.19                  (payment-worker main container)"
-echo "  ${NGINX_REPO}:1.25-alpine            (payment-api / payment main container)"
-echo "  ${NGINX_REPO}:1.26-alpine            (payment-test.yml Phase 2 rollout trigger)"
+echo "  ${ALPINE_REPO}:3.18-tools   (vault-cert-init, all 3 payments-test deployments)"
+echo "  ${ALPINE_REPO}:3.19          (payment-worker main container)"
+echo "  ${NGINX_REPO}:1.25-alpine    (payment-api / payment main container)"
+echo "  ${NGINX_REPO}:1.26-alpine    (payment-test.yml Phase 2 rollout trigger)"

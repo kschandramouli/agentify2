@@ -130,6 +130,16 @@ jobs:
         # ServiceAccounts (also created by bootstrap script, idempotent)
         kubectl apply -f infra/kubernetes/payments-test/serviceaccounts.yaml
 
+        # payment-service/worker/api.yaml pull base images from the log-test
+        # ECR mirror (see infra/terraform/aws/logging.tf) — the 'payments'
+        # namespace's Fargate profile has no NAT/internet route, so Docker Hub
+        # pulls there time out (ADR 0021).
+        REGISTRY=${{ secrets.ECR_REGISTRY }}
+        sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" \
+          infra/kubernetes/payments-test/payment-service.yaml \
+          infra/kubernetes/payments-test/payment-worker.yaml \
+          infra/kubernetes/payments-test/payment-api.yaml
+
         # Deployments with Vault Agent Injector annotations
         kubectl apply -f infra/kubernetes/payments-test/payment-service.yaml
         kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml

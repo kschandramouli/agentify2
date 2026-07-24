@@ -137,7 +137,7 @@ jobs:
         echo "Waiting for payment test pods to reschedule in 'payments' namespace..."
         # Kubernetes auto-reschedules pods from existing Deployments.
         # We just wait until they're Running.
-        for deploy in payment payment-worker; do
+        for deploy in payment payment-api payment-worker; do
           if kubectl get deployment $deploy -n payments &>/dev/null; then
             echo "Waiting for $deploy..."
             kubectl rollout status deployment/$deploy -n payments --timeout=180s \
