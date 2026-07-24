@@ -22,12 +22,12 @@ import (
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	orch             *orchestrator.Router
-	ingester         *ingestion.Ingester
-	queryExec        *orchestrator.QueryExecutor
-	agentClient      *AgentClient
-	adapterClient    *AdapterClient
-	redactor         *governance.Redactor
+	orch              *orchestrator.Router
+	ingester          *ingestion.Ingester
+	queryExec         *orchestrator.QueryExecutor
+	agentClient       *AgentClient
+	adapterClient     *AdapterClient
+	redactor          *governance.Redactor
 	integrationStore  IntegrationStore // nil when postgres is not provisioned
 	traceStore        TraceStore       // nil when postgres is not provisioned
 	pricingStore      PricingStore     // nil when postgres is not provisioned
@@ -194,8 +194,8 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// agent when the intent needs synthesis or there's no data to evaluate.
 	if resp, handled := tryDeterministic(intent, podData, req.Context); handled {
 		resp.TraceID = traceID
-		resp.Intent  = intent
-		resp.Tier    = "tier1"
+		resp.Intent = intent
+		resp.Tier = "tier1"
 		h.logger.Info("answered via deterministic fast-path", "intent", intent, "pods", len(pods))
 		telemetry.QueriesTotal.WithLabelValues(intent, "tier1", "ok").Inc()
 		telemetry.QueryDuration.WithLabelValues("tier1").Observe(time.Since(start).Seconds())
@@ -704,11 +704,11 @@ func (h *Handler) logTrace(traceID, question, intent, namespace, tier, status st
 	var inTok, outTok, cacheWriteTok, cacheReadTok int64
 	var cost float64
 	if agentResp != nil {
-		inTok          = agentResp.InputTokens
-		outTok         = agentResp.OutputTokens
-		cacheWriteTok  = agentResp.CacheCreationInputTokens
-		cacheReadTok   = agentResp.CacheReadInputTokens
-		cost           = agentResp.EstimatedCostUSD
+		inTok = agentResp.InputTokens
+		outTok = agentResp.OutputTokens
+		cacheWriteTok = agentResp.CacheCreationInputTokens
+		cacheReadTok = agentResp.CacheReadInputTokens
+		cost = agentResp.EstimatedCostUSD
 	}
 	h.logger.Info("query.trace",
 		"trace_id", traceID,
@@ -771,7 +771,7 @@ func (h *Handler) embedAndStoreIncident(rowID, traceID, namespace, intent string
 	// Build a compact summary from the structured diagnosis fields.
 	details := agentResp.Details
 	headline, _ := details["headline"].(string)
-	cause, _    := details["likely_cause"].(string)
+	cause, _ := details["likely_cause"].(string)
 	if headline == "" {
 		headline = agentResp.Answer
 	}
@@ -1210,8 +1210,8 @@ func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) 
 // vec=<comma-separated floats> for vector search (falls back to recency).
 func (h *Handler) HandleSimilarIncidents(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
-	service   := r.URL.Query().Get("service")
-	limit     := 3
+	service := r.URL.Query().Get("service")
+	limit := 3
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
@@ -1414,7 +1414,11 @@ func (h *Handler) HandleSendChatMessage(w http.ResponseWriter, r *http.Request) 
 		assistantContent = agentResp.Answer
 	}
 
-	assistantMsg := pgstore.ChatMessage{Role: "assistant", Content: assistantContent, CreatedAt: time.Now()}
+	var assistantDetails map[string]interface{}
+	if agentErr == nil && agentResp != nil {
+		assistantDetails = agentResp.Details
+	}
+	assistantMsg := pgstore.ChatMessage{Role: "assistant", Content: assistantContent, CreatedAt: time.Now(), Details: assistantDetails}
 	s.Messages = append(s.Messages, assistantMsg)
 	s.LastActive = time.Now()
 	s.ExpiresAt = time.Now().Add(24 * time.Hour)
@@ -1452,6 +1456,46 @@ func (h *Handler) HandleDeleteChatSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// liveDiagnosticTools mirrors the agent's LIVE_DIAGNOSTIC_TOOLS allow-list
+// (src/agent/k8fy/live_diagnostics.py) — validated here too so obviously bad
+// input never leaves the backend, even though the agent enforces the same
+// allow-list authoritatively.
+var liveDiagnosticTools = map[string]bool{
+	"live_list_pods":    true,
+	"live_get_pod_logs": true,
+	"live_get_events":   true,
+	"live_describe_pod": true,
+}
+
+// HandleLiveToolCall handles POST /api/live-query — the Chat UI's "Run"
+// buttons on a recommended action. Forwards directly to the agent's
+// /live-tool-call endpoint (no LLM call involved) and returns its output.
+func (h *Handler) HandleLiveToolCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Tool      string                 `json:"tool"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if !liveDiagnosticTools[req.Tool] {
+		http.Error(w, "unknown or disallowed tool", http.StatusBadRequest)
+		return
+	}
+	resp, err := h.agentClient.LiveToolCall(req.Tool, req.Arguments)
+	if err != nil {
+		h.logger.Warn("live tool call failed", "tool", req.Tool, "error", err)
+		http.Error(w, "live tool call failed", http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // HandleUpsertPricing inserts or updates a single model pricing row.

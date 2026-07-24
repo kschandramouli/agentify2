@@ -12,6 +12,7 @@ from config.claude_client import get_claude_client
 from config.settings import get_settings
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT
+from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
 from k8fy.tools import TOOLS, process_tool_call
 from models.response import AgentResponse, ReasoningOutput, ToolCall
 
@@ -246,6 +247,71 @@ REMEDIATION_REASONING_SCHEMA: Dict[str, Any] = {
     "required": [
         "answer", "status", "confidence", "degraded", "proposed_action",
         "target_deployment", "target_replicas", "blast_radius", "evidence", "reasoning",
+    ],
+    "additionalProperties": False,
+}
+
+
+# Schema for reason_chat()'s second, structuring-only call (no tools attached
+# — see _structure_chat_answer). Restructures the free-form prose answer the
+# unconstrained tool-calling loop already produced into the same sectioned
+# shape the dedicated diagnose skill uses, so the Chat UI can render distinct
+# sections instead of a wall of markdown text. `recommended_actions` items use
+# a nested, explicitly-keyed `arguments` object (rather than a free-form dict)
+# because structured outputs require additionalProperties: false at every
+# level — same constraint REMEDIATION_REASONING_SCHEMA above works around by
+# flattening action_params into named fields.
+CHAT_REASONING_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["healthy", "degraded", "unhealthy", "unknown"]},
+        "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+        "confidence": {"type": "number"},
+        "incident_summary": {"type": "string", "description": "One-sentence headline summarizing the current state."},
+        "timeline": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Chronological evidence trail — key events with timestamps where known.",
+        },
+        "findings": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Key facts supporting the answer, one per bullet.",
+        },
+        "likely_cause": {"type": ["string", "null"]},
+        "recommendations": {"type": "array", "items": {"type": "string"}, "description": "Plain-text next steps."},
+        "recommended_actions": {
+            "type": "array",
+            "description": (
+                "Runnable live-diagnostic commands the UI can execute directly. "
+                "Only suggest these when a live (not cached) look would help."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "Human-readable action description."},
+                    "tool": {"type": "string", "enum": sorted(LIVE_DIAGNOSTIC_TOOLS)},
+                    "arguments": {
+                        "type": "object",
+                        "properties": {
+                            "namespace": {"type": ["string", "null"]},
+                            "pod": {"type": ["string", "null"]},
+                            "container": {"type": ["string", "null"]},
+                            "tail_lines": {"type": ["number", "null"]},
+                            "previous": {"type": ["boolean", "null"]},
+                        },
+                        "required": ["namespace", "pod", "container", "tail_lines", "previous"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["label", "tool", "arguments"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "status", "severity", "confidence", "incident_summary",
+        "timeline", "findings", "likely_cause", "recommendations", "recommended_actions",
     ],
     "additionalProperties": False,
 }
@@ -671,15 +737,22 @@ class K8fyAgent:
                 final_text = next((b.text for b in response.content if b.type == "text"), "")
                 metrics.record_request("ok")
                 metrics.record_tool_iterations(iterations)
+
+                details, structure_usage = await self._structure_chat_answer(final_text, context)
+                total_in_tok      += structure_usage[0]
+                total_out_tok     += structure_usage[1]
+                total_cache_write += structure_usage[2]
+                total_cache_read  += structure_usage[3]
                 cost = _estimate_cost(
                     self.model, total_in_tok, total_out_tok, total_cache_write, total_cache_read,
                 )
                 return AgentResponse(
                     answer=final_text,
-                    status="ok",
+                    status=details.get("status", "ok") if details else "ok",
                     confidence=1.0,
                     sources=_sources_from(context),
                     tool_calls=tool_calls_made,
+                    details=details,
                     input_tokens=total_in_tok,
                     output_tokens=total_out_tok,
                     cache_creation_input_tokens=total_cache_write,
@@ -700,6 +773,71 @@ class K8fyAgent:
             logger.error("chat reasoning failed: %s", e)
             metrics.record_request("error")
             return AgentResponse(answer=_user_error_message(e), status="error", confidence=0.0)
+
+    async def _structure_chat_answer(
+        self, answer_text: str, context: Dict[str, Any]
+    ) -> "tuple[Dict[str, Any], tuple[int, int, int, int]]":
+        """Restructure reason_chat()'s free-form answer into sectioned fields.
+
+        A second, schema-constrained call (not squeezed into the same call as
+        the tool loop — this codebase's Pattern A convention never combines
+        `tools` and a strict `output_config` schema in one call). Best-effort:
+        on any failure this returns an empty dict, and the caller falls back
+        to plain-text-only rendering — never breaks the chat response itself.
+        """
+        usage = (0, 0, 0, 0)
+        if not answer_text.strip():
+            return {}, usage
+        try:
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=[{
+                    "type": "text",
+                    "text": (
+                        "Restructure the operator-facing answer below into the required schema. "
+                        "Derive timeline/findings/likely_cause from the answer's own content — do "
+                        "not invent evidence beyond what it already states. Only populate "
+                        "recommended_actions with live-diagnostic tool calls (namespace/pod must "
+                        "be real values already discussed above, e.g. from context); leave it "
+                        "empty if nothing there would help."
+                        f"\n\nContext: {json.dumps(context)}"
+                        f"\n\nAnswer to restructure:\n{answer_text}"
+                    ),
+                }],
+                output_config={"format": {"type": "json_schema", "schema": CHAT_REASONING_SCHEMA}},
+                messages=[{"role": "user", "content": "Restructure the answer as instructed."}],
+            )
+            u = getattr(response, "usage", None)
+            if u:
+                usage = (
+                    getattr(u, "input_tokens", 0) or 0,
+                    getattr(u, "output_tokens", 0) or 0,
+                    getattr(u, "cache_creation_input_tokens", 0) or 0,
+                    getattr(u, "cache_read_input_tokens", 0) or 0,
+                )
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            parsed = ReasoningOutput.model_validate_json(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("chat answer structuring failed, falling back to plain text: %s", e)
+            return {}, usage
+
+        details: Dict[str, Any] = {
+            "severity": parsed.severity,
+            "incident_summary": parsed.incident_summary,
+            "timeline": parsed.timeline,
+            "findings": parsed.findings,
+            "likely_cause": parsed.likely_cause,
+            "recommendations": parsed.recommendations,
+            "status": parsed.status,
+        }
+        if parsed.recommended_actions:
+            actions = []
+            for a in parsed.recommended_actions:
+                args = {k: v for k, v in a.arguments.items() if v is not None}
+                actions.append({"label": a.label, "tool": a.tool, "arguments": args})
+            details["recommended_actions"] = actions
+        return details, usage
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -747,6 +885,8 @@ class K8fyAgent:
             "likely_cause": parsed.likely_cause,
             "severity": parsed.severity,
         }
+        if parsed.recommended_actions:
+            details["recommended_actions"] = [a.model_dump() for a in parsed.recommended_actions]
         if parsed.headline:
             details["headline"] = parsed.headline
         if parsed.summary:

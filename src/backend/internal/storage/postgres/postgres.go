@@ -269,7 +269,6 @@ func (c *Client) CurrentStateStore() *CurrentState {
 	return &CurrentState{db: c.db, logger: c.logger}
 }
 
-
 // --- Relational (append-only) store: Client itself ---
 
 // Store inserts an event row (append-only).
@@ -385,7 +384,7 @@ func (c *Client) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, e
 		cutoff time.Time
 	}
 	windows := []podWindow{
-		{"k8fy.metrics",      time.Now().Add(-7 * 24 * time.Hour)},
+		{"k8fy.metrics", time.Now().Add(-7 * 24 * time.Hour)},
 		{"k8fy.certificates", time.Now().Add(-7 * 24 * time.Hour)},
 	}
 	for _, w := range windows {
@@ -557,7 +556,8 @@ func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
 	if err == nil {
 		defer tierRows.Close()
 		for tierRows.Next() {
-			var k string; var v int64
+			var k string
+			var v int64
 			if tierRows.Scan(&k, &v) == nil {
 				s.QueriesByTier[k] = v
 			}
@@ -569,7 +569,8 @@ func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
 	if err == nil {
 		defer statusRows.Close()
 		for statusRows.Next() {
-			var k string; var v int64
+			var k string
+			var v int64
 			if statusRows.Scan(&k, &v) == nil {
 				s.QueriesByStatus[k] = v
 			}
@@ -581,7 +582,8 @@ func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
 	if err == nil {
 		defer intentRows.Close()
 		for intentRows.Next() {
-			var k string; var v int64
+			var k string
+			var v int64
 			if intentRows.Scan(&k, &v) == nil {
 				s.QueriesByIntent[k] = v
 			}
@@ -743,8 +745,9 @@ func (s *CurrentState) Store(ctx context.Context, podID string, data map[string]
 //
 // "key"     — exact entity_key match (use for known full pod names)
 // "service" — matches the K8s Service row exactly OR any pod replica whose
-//             entity_key starts with "{service}-" (covers Deployment-only
-//             workloads that have no K8s Service object)
+//
+//	entity_key starts with "{service}-" (covers Deployment-only
+//	workloads that have no K8s Service object)
 func (s *CurrentState) Query(ctx context.Context, podID string, queryParams map[string]interface{}) ([]map[string]interface{}, error) {
 	var (
 		rows *sql.Rows
@@ -924,23 +927,24 @@ func decodePayload(b []byte) interface{} {
 
 // ChatMessage is one turn in a multi-turn conversation.
 type ChatMessage struct {
-	Role      string    `json:"role"`       // "user" | "assistant"
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	Role      string                 `json:"role"` // "user" | "assistant"
+	Content   string                 `json:"content"`
+	CreatedAt time.Time              `json:"created_at"`
+	Details   map[string]interface{} `json:"details,omitempty"` // structured sections for the Chat UI (severity, timeline, findings, recommended_actions, ...); nil for user messages and old assistant messages
 }
 
 // ChatSession holds the full state of one multi-turn conversation.
 type ChatSession struct {
-	ID               string            `json:"id"`
-	Title            string            `json:"title"`
-	Namespace        string            `json:"namespace"`
-	Service          string            `json:"service"`
-	Messages         []ChatMessage     `json:"messages"`
-	ContextCache     map[string]any    `json:"context_cache"`
-	ContextFetchedAt *time.Time        `json:"context_fetched_at,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	LastActive       time.Time         `json:"last_active"`
-	ExpiresAt        time.Time         `json:"expires_at"`
+	ID               string         `json:"id"`
+	Title            string         `json:"title"`
+	Namespace        string         `json:"namespace"`
+	Service          string         `json:"service"`
+	Messages         []ChatMessage  `json:"messages"`
+	ContextCache     map[string]any `json:"context_cache"`
+	ContextFetchedAt *time.Time     `json:"context_fetched_at,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	LastActive       time.Time      `json:"last_active"`
+	ExpiresAt        time.Time      `json:"expires_at"`
 }
 
 // CreateChatSession inserts a new session and returns it.
@@ -1137,23 +1141,23 @@ func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service st
 // Phase-3 write action (spec 011 Use Cases 1+2). Producing a proposal makes
 // no infrastructure calls; only an approved proposal is executed.
 type RemediationProposal struct {
-	ID              string
-	TraceID         string
-	UseCase         string // incident_responder | deployment_guardian
-	Namespace       string
-	Service         string
-	ProposedAction  string // restart_deployment | scale_deployment | rollback_deployment | rotate_cert | human_escalation
-	ActionParams    map[string]interface{}
-	Analysis        map[string]interface{}
-	Status          string // pending | approved | rejected | executed | failed | expired
-	SourceEventID   string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	DecidedAt       *time.Time
-	DecidedBy       string
-	ExecutedAt      *time.Time
-	Result          map[string]interface{}
-	Error           string
+	ID             string
+	TraceID        string
+	UseCase        string // incident_responder | deployment_guardian
+	Namespace      string
+	Service        string
+	ProposedAction string // restart_deployment | scale_deployment | rollback_deployment | rotate_cert | human_escalation
+	ActionParams   map[string]interface{}
+	Analysis       map[string]interface{}
+	Status         string // pending | approved | rejected | executed | failed | expired
+	SourceEventID  string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	DecidedAt      *time.Time
+	DecidedBy      string
+	ExecutedAt     *time.Time
+	Result         map[string]interface{}
+	Error          string
 }
 
 // CreateRemediationProposal inserts a new pending proposal. p.ID must be set by the caller.

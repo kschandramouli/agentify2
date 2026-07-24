@@ -54,6 +54,19 @@ class ServiceHealthDetail(BaseModel):
     endpoints: int = 0
 
 
+class RecommendedAction(BaseModel):
+    """A recommended next step the UI can render as a runnable action.
+
+    `tool` must be one of the live-diagnostics tool names (validated
+    server-side against an explicit allow-list — see app.py's
+    /live-tool-call endpoint); this is never a free-text command string.
+    """
+
+    label: str
+    tool: str
+    arguments: Dict[str, Any] = {}
+
+
 class ReasoningOutput(BaseModel):
     """Structured output the model is constrained to emit (via output_config.format).
 
@@ -86,6 +99,10 @@ class ReasoningOutput(BaseModel):
     findings: List[Any] = []
     likely_cause: Optional[str] = None
     severity: str = "info"  # info | warning | critical
+
+    # Structured, runnable recommendations (chat's "Recommended actions" —
+    # distinct from the plain-text `recommendations` above).
+    recommended_actions: List[RecommendedAction] = []
 
     # New remediation-proposal fields (ADR 0020 / spec 011 Use Cases 1+2).
     # Empty/None for every other prompt. This call NEVER executes anything —

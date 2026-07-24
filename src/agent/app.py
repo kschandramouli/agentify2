@@ -9,7 +9,9 @@ from pydantic import BaseModel
 import metrics
 from config.settings import get_settings
 from k8fy.agent import get_chat_agent, refresh_pricing_from_backend
+from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
 from k8fy.skills.router import get_skill_router
+from k8fy.tools import process_tool_call
 from models.response import AgentResponse, QueryRequest
 
 # Setup logging
@@ -100,6 +102,30 @@ async def reason_chat(request: ChatRequest) -> AgentResponse:
     except Exception as e:
         logger.error("Chat reasoning error (trace_id=%s): %s", request.trace_id, e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class LiveToolCallRequest(BaseModel):
+    """Request body for /live-tool-call — direct (non-LLM) invocation of one
+    of the live-diagnostics read-only tools, used by the Chat UI's "Run"
+    buttons on a recommended action."""
+    tool: str
+    arguments: Dict[str, Any] = {}
+
+
+@app.post("/live-tool-call")
+async def live_tool_call(request: LiveToolCallRequest) -> Dict[str, Any]:
+    """Directly execute one live-diagnostics tool call — no LLM in the loop.
+
+    Deliberately validates `tool` against LIVE_DIAGNOSTIC_TOOLS only (not the
+    full TOOLS list) so this passthrough can never reach a mutating tool
+    (e.g. rotate_vault_cert) even by accident — see live_diagnostics.py's
+    module docstring for the full security rationale.
+    """
+    if request.tool not in LIVE_DIAGNOSTIC_TOOLS:
+        raise HTTPException(status_code=400, detail=f"tool must be one of {sorted(LIVE_DIAGNOSTIC_TOOLS)}")
+    logger.info("live tool call", extra={"tool": request.tool})
+    result = await process_tool_call(request.tool, request.arguments, settings.backend_url)
+    return {"tool": request.tool, "data": result}
 
 
 class EmbedRequest(BaseModel):

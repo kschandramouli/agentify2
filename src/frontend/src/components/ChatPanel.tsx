@@ -5,6 +5,7 @@ import {
   sendChatMessage, deleteChatSession,
   type ChatSession, type ChatMessage,
 } from "../api";
+import { DiagnosisReport } from "./DiagnosisReport";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -20,10 +21,16 @@ function relTime(iso: string) {
 
 function Bubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === "user";
+  const hasStructuredDetails =
+    !isUser && msg.details && Object.keys(msg.details).length > 0;
   return (
     <div className={`chat-bubble chat-bubble--${isUser ? "user" : "assistant"}`}>
       <div className="chat-bubble__role">{isUser ? "You" : "K8fy"}</div>
-      <div className="chat-bubble__content">{msg.content}</div>
+      {hasStructuredDetails ? (
+        <DiagnosisReport details={msg.details!} />
+      ) : (
+        <div className="chat-bubble__content">{msg.content}</div>
+      )}
     </div>
   );
 }

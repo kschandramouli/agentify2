@@ -90,10 +90,28 @@ export interface Pod {
 
 // ── Chat ─────────────────────────────────────────────────────────────────────
 
+export interface RecommendedAction {
+  label: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ChatMessageDetails {
+  status?: string;
+  severity?: string;
+  incident_summary?: string;
+  timeline?: string[];
+  findings?: unknown[];
+  likely_cause?: string | null;
+  recommendations?: string[];
+  recommended_actions?: RecommendedAction[];
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  details?: ChatMessageDetails;
 }
 
 export interface ChatSession {
@@ -139,6 +157,22 @@ export async function sendChatMessage(
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<{ message: ChatMessage; session: ChatSession }>;
+}
+
+// Directly invokes one of the agent's live-diagnostics tools (no LLM call) —
+// used by a recommended action's "Run" button. `tool` must be one of the
+// live-diagnostics tool names; the backend rejects anything else.
+export async function runLiveTool(
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ tool: string; data: Record<string, unknown> }> {
+  const res = await fetch("/api/live-query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tool, arguments: args }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<{ tool: string; data: Record<string, unknown> }>;
 }
 
 export async function deleteChatSession(id: string): Promise<void> {

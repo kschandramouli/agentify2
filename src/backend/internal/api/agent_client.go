@@ -41,18 +41,18 @@ type AgentToolCall struct {
 
 // AgentResponse is returned from the agent service.
 type AgentResponse struct {
-	Answer           string                 `json:"answer"`
-	Status           string                 `json:"status"` // "healthy","degraded","unhealthy","error","unknown"
-	Reasoning        string                 `json:"reasoning"`
-	Confidence       float64                `json:"confidence"`
-	Sources          []string               `json:"sources"`
-	ToolCalls        []AgentToolCall        `json:"tool_calls"`
-	Details          map[string]interface{} `json:"details"` // severity, likely_cause, recommendations, findings (spec 005)
-	InputTokens                int64   `json:"input_tokens"`
-	OutputTokens               int64   `json:"output_tokens"`
-	CacheCreationInputTokens   int64   `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens       int64   `json:"cache_read_input_tokens"`
-	EstimatedCostUSD           float64 `json:"estimated_cost_usd"`
+	Answer                   string                 `json:"answer"`
+	Status                   string                 `json:"status"` // "healthy","degraded","unhealthy","error","unknown"
+	Reasoning                string                 `json:"reasoning"`
+	Confidence               float64                `json:"confidence"`
+	Sources                  []string               `json:"sources"`
+	ToolCalls                []AgentToolCall        `json:"tool_calls"`
+	Details                  map[string]interface{} `json:"details"` // severity, likely_cause, recommendations, findings (spec 005)
+	InputTokens              int64                  `json:"input_tokens"`
+	OutputTokens             int64                  `json:"output_tokens"`
+	CacheCreationInputTokens int64                  `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64                  `json:"cache_read_input_tokens"`
+	EstimatedCostUSD         float64                `json:"estimated_cost_usd"`
 }
 
 // ChatRequest is sent to the agent's /reason-chat endpoint for multi-turn conversation.
@@ -89,6 +89,46 @@ func (ac *AgentClient) Chat(messages []map[string]string, context map[string]int
 		return nil, fmt.Errorf("failed to decode chat response: %w", err)
 	}
 	return &agentResp, nil
+}
+
+// LiveToolCallRequest is sent to the agent's /live-tool-call endpoint.
+type LiveToolCallRequest struct {
+	Tool      string                 `json:"tool"`
+	Arguments map[string]interface{} `json:"arguments"`
+}
+
+// LiveToolCallResponse is returned from /live-tool-call.
+type LiveToolCallResponse struct {
+	Tool string                 `json:"tool"`
+	Data map[string]interface{} `json:"data"`
+}
+
+// LiveToolCall directly invokes one of the agent's live-diagnostics tools —
+// no LLM call, used by the Chat UI's "Run" buttons on a recommended action.
+func (ac *AgentClient) LiveToolCall(tool string, arguments map[string]interface{}) (*LiveToolCallResponse, error) {
+	body, err := json.Marshal(LiveToolCallRequest{Tool: tool, Arguments: arguments})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal live tool call request: %w", err)
+	}
+	httpReq, err := http.NewRequest("POST", ac.baseURL+"/live-tool-call", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create live tool call request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := ac.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("live tool call request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	var out LiveToolCallResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode live tool call response: %w", err)
+	}
+	return &out, nil
 }
 
 // Reason calls the agent service to reason about the data.

@@ -6,6 +6,9 @@ from typing import Any, Dict
 
 import httpx
 
+from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
+from k8fy import live_diagnostics
+
 logger = logging.getLogger(__name__)
 
 # Vault connectivity (injected via env vars in the agent deployment).
@@ -188,6 +191,66 @@ TOOLS = [
                 },
             },
             "required": ["pki_role", "common_name"],
+        },
+    },
+    # ── Live diagnostics tools (read-only, calls the live K8s API — not the
+    #    ingested/cached store the tools above read from) ──────────────────
+    {
+        "name": "live_list_pods",
+        "description": (
+            "List pods in a namespace with a LIVE status snapshot (phase, ready, "
+            "restart count, node) fetched from the Kubernetes API right now — use "
+            "when cached data might be stale and you need the current state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+            },
+            "required": ["namespace"],
+        },
+    },
+    {
+        "name": "live_get_pod_logs",
+        "description": (
+            "Fetch a LIVE, bounded, redacted tail of a pod's current logs directly "
+            "from the Kubernetes API. Set previous=true for the last crashed "
+            "container instance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "pod": {"type": "string", "description": "Pod name"},
+                "container": {"type": "string", "description": "Container name (optional)."},
+                "tail_lines": {"type": "integer", "description": "Lines from the end (default 200, capped at 1000)."},
+                "previous": {"type": "boolean", "description": "Read the previous (crashed) container instance."},
+            },
+            "required": ["namespace", "pod"],
+        },
+    },
+    {
+        "name": "live_get_events",
+        "description": "List recent LIVE Kubernetes events in a namespace, optionally filtered to one pod.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "pod": {"type": "string", "description": "Pod name to filter events to (optional)."},
+            },
+            "required": ["namespace"],
+        },
+    },
+    {
+        "name": "live_describe_pod",
+        "description": "LIVE equivalent of `kubectl describe pod` — spec/status summary plus recent events.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "pod": {"type": "string", "description": "Pod name"},
+            },
+            "required": ["namespace", "pod"],
         },
     },
     # ── Semantic memory tool (P8) ─────────────────────────────────────────────
@@ -430,6 +493,31 @@ async def _get_similar_incidents(
         return {"similar_incidents": [], "error": str(exc)}
 
 
+async def _dispatch_live_diagnostic(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Dispatch to the live_diagnostics function matching a LIVE_DIAGNOSTIC_TOOLS name."""
+    if tool_name == "live_list_pods":
+        return await live_diagnostics.live_list_pods(namespace=arguments.get("namespace", ""))
+    if tool_name == "live_get_pod_logs":
+        return await live_diagnostics.live_get_pod_logs(
+            namespace=arguments.get("namespace", ""),
+            pod=arguments.get("pod", ""),
+            container=arguments.get("container"),
+            tail_lines=int(arguments.get("tail_lines", 200)),
+            previous=bool(arguments.get("previous", False)),
+        )
+    if tool_name == "live_get_events":
+        return await live_diagnostics.live_get_events(
+            namespace=arguments.get("namespace", ""),
+            pod=arguments.get("pod"),
+        )
+    if tool_name == "live_describe_pod":
+        return await live_diagnostics.live_describe_pod(
+            namespace=arguments.get("namespace", ""),
+            pod=arguments.get("pod", ""),
+        )
+    return {"error": f"Unknown live diagnostic tool: {tool_name}"}
+
+
 async def process_tool_call(
     tool_name: str, arguments: Dict[str, Any], backend_url: str, timeout: float = 10.0
 ) -> Dict[str, Any]:
@@ -468,6 +556,10 @@ async def process_tool_call(
             description=arguments.get("description", ""),
             limit=int(arguments.get("limit", 3)),
         )
+
+    # Live diagnostics: calls the live K8s API directly, never the backend store.
+    if tool_name in LIVE_DIAGNOSTIC_TOOLS:
+        return await _dispatch_live_diagnostic(tool_name, arguments)
 
     url = f"{backend_url.rstrip('/')}/api/agent/fetch"
     payload = {"tool": tool_name, "args": arguments}

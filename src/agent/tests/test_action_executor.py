@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from k8fy import action_executor as ae
+from k8fy import k8s_client
 
 
 _RealAsyncClient = httpx.AsyncClient
@@ -31,12 +32,12 @@ def _client_factory(transport: httpx.MockTransport):
 def sa_token(tmp_path, monkeypatch):
     token_file = tmp_path / "token"
     token_file.write_text("test-token")
-    monkeypatch.setattr(ae, "_SA_TOKEN_PATH", str(token_file))
+    monkeypatch.setattr(k8s_client, "_SA_TOKEN_PATH", str(token_file))
 
 
 @pytest.mark.asyncio
 async def test_restart_deployment_missing_token(monkeypatch):
-    monkeypatch.setattr(ae, "_SA_TOKEN_PATH", "/nonexistent/path/token")
+    monkeypatch.setattr(k8s_client, "_SA_TOKEN_PATH", "/nonexistent/path/token")
     result = await ae.restart_deployment("payments", "payment-worker")
     assert "error" in result
 

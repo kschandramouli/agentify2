@@ -18,19 +18,10 @@ from typing import Any, Dict
 
 import httpx
 
+from k8fy.k8s_client import K8S_API as _K8S_API
+from k8fy.k8s_client import k8s_headers as _k8s_headers
+
 logger = logging.getLogger(__name__)
-
-_SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-_K8S_API = "https://kubernetes.default.svc"
-
-
-def _k8s_headers(content_type: str) -> Dict[str, str]:
-    try:
-        with open(_SA_TOKEN_PATH) as f:
-            token = f.read()
-    except OSError:
-        return {}
-    return {"Authorization": f"Bearer {token}", "Content-Type": content_type}
 
 
 async def restart_deployment(namespace: str, deployment: str) -> Dict[str, Any]:
