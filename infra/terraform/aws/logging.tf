@@ -348,29 +348,23 @@ resource "aws_glue_catalog_table" "logs" {
 
     ser_de_info {
       serialization_library = "org.openx.data.jsonserde.JsonSerDe"
-      parameters = {
-        "mapping.timestamp" = "@timestamp"
-      }
     }
 
-    columns {
-      name = "timestamp"
-      type = "string"
-    }
+    # Schema corrected 2026-07-25 against a real captured record — the
+    # original columns (timestamp/message/stream as top-level fields, log as
+    # a struct) were an assumption about a structured-JSON app log format.
+    # Fargate's built-in Fluent Bit router instead emits the raw CRI log line
+    # (RFC3339 timestamp + stream + tag + message, e.g.
+    # "2026-07-24T22:22:26Z stdout F <app log line>") as one plain string in
+    # `log` — there is no top-level @timestamp/message/stream key at all, and
+    # `kubernetes.labels`/`annotations` have per-pod-variable keys, so those
+    # are maps, not fixed structs. See ADR 0021.
     columns {
       name = "kubernetes"
-      type = "struct<cluster_name:string,namespace_name:string,pod_name:string,container_name:string,labels:struct<app:string>>"
+      type = "struct<annotations:map<string,string>,container_hash:string,container_image:string,container_name:string,docker_id:string,host:string,labels:map<string,string>,namespace_name:string,pod_id:string,pod_ip:string,pod_name:string>"
     }
     columns {
       name = "log"
-      type = "struct<level:string>"
-    }
-    columns {
-      name = "message"
-      type = "string"
-    }
-    columns {
-      name = "stream"
       type = "string"
     }
   }
