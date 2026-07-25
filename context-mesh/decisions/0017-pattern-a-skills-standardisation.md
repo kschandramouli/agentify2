@@ -60,8 +60,10 @@ Pre-fetch (all parallel via `asyncio.gather`):
 2. `get_pod_events(pod_id, namespace)` — for every pod in initial `data`.
 3. `get_metrics_history(namespace, service_name, order=asc)` — always.
 4. `get_change_history(namespace, service_name)` — always.
-5. `get_pod_logs(pod_id, namespace, previous=True)` — only for pods with
-   `restarts >= 3` or `phase in {Failed, Unknown, CrashLoopBackOff}`.
+5. `get_logs(namespace, pod, previous=True)` — only for pods with
+   `restarts >= 3` or `phase in {Failed, Unknown, CrashLoopBackOff}`. Routes
+   to the Glue/Athena log platform first when configured (ADR 0021), else
+   the live cluster — see `log_router.py`.
 Result keys: `service_health`, `events.<pod-id>`, `metrics_history`, `change_history`,
 `logs.<pod-id>`.
 Claude model: overridden to `ADVISOR_MODEL` (`claude-opus-4-8`) — diagnosis warrants

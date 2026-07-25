@@ -3,7 +3,8 @@
 ## Status
 
 Accepted   ·   (date: 2026-07-21   ·   revised: 2026-07-22 — OpenSearch destination
-replaced with S3 + Athena; see "Revision" below)
+replaced with S3 + Athena; revised again 2026-07-25 — test harness now also
+serves as an interim production log source; see "Revision" sections below)
 
 ## Context
 
@@ -115,20 +116,58 @@ destination. Reconsidered because:
   Athena/Glue/S3 read permissions instead of an OpenSearch `es:*` access
   policy statement.
 
+## Revision (2026-07-25): test harness graduates to an interim production log source
+
+**Reconsidered.** The agent-side connector (`src/agent/k8fy/log_router.py`,
+`log_platform.py`) was built to validate the read-connector discipline
+against this harness — and, once built and validated, there was no reason to
+gate it behind "test only" any further. `log_router.get_logs()` now tries
+this harness first for every namespace whenever it's configured
+(`ATHENA_WORKGROUP`/`DATABASE`/`TABLE` on the agent pod), falling back to the
+live cluster on empty results or errors — no per-namespace registry, no
+manual toggle. This is genuinely in production code paths now: the chat
+tool-calling loop and `DiagnoseSkill`'s deterministic prefetch both call it.
+
+**This does not replace the Splunk/Elasticsearch/OpenSearch connector
+priority** ([ROADMAP P15](../ROADMAP.md#p15--pull-based-log-platform-connector-proposed-2026-07-21)).
+Those remain the target for onboarding a **customer's own, already-populated**
+log platform — this harness is agentify's own test data (the `payments`
+Fargate profile shipping its own logs), not a stand-in for a customer's
+Splunk/ES. Practically: Athena fills the gap between "no log-platform
+connector at all" and "the real Splunk/ES connector is built," using the
+same fetch-redact-discard discipline (ADR 0014) and the same tool contract
+shape P15 designed — it just isn't yet the Go-side `LogSource` interface
+P15 specified (see "consequences" below).
+
+**Also corrects a stale claim from the original ADR:** the Glue table
+schema described below as "not yet validated against a real ingested
+record" *was* validated this session — the real Fargate/Fluent-Bit output
+turned out not to match the original assumption (`log` is a plain string,
+the raw CRI log line, not `struct<level:string>`; no top-level `@timestamp`/
+`message`/`stream` keys exist; `kubernetes.labels`/`annotations` need
+`map<string,string>`, not fixed structs). Fixed directly against a
+downloaded, inspected S3 object and confirmed live via real Athena query
+results.
+
 ## Consequences
 
 - **Positive:** a real, near-zero-cost, isolated log source to validate P15's
   connector interface against; a clean, low-friction path to onboard
   additional clusters later (P16) without rearchitecting; the Firehose/S3/
   Athena pipeline is shared/centralized across every onboarded cluster
-  rather than duplicated per cluster.
-- **Negative / cost accepted:** the Glue table's JSON SerDe column mapping is
-  designed against the expected Fargate log router output shape, not yet
-  validated against a real ingested record — flagged as "validate, don't
-  assume" in the implementation, worth confirming before relying on it.
-  Fargate-in-public-subnets connectivity (reaching ECR/Firehose without NAT)
-  is likewise assumed to behave like the existing EC2 node group's
-  public-subnet setup, not yet confirmed live.
+  rather than duplicated per cluster; as of the 2026-07-25 revision, an
+  actual interim log source for diagnosis rather than pure test scaffolding.
+- **Negative / architecture debt accepted (2026-07-25):** the routing
+  decision lives in the Python agent (`log_router.py`, calling Athena
+  directly via boto3), not behind the Go `LogSource` interface P15 actually
+  designed (`internal/api/adapter_client.go`, `LOG_SOURCE=k8s_adapter|
+  opensearch` config selection). Acceptable short-term — it works, it's
+  tested, it's isolated to one function — but a real Splunk/Elasticsearch
+  connector should land behind that interface properly rather than growing
+  a second bespoke agent-side connector alongside this one.
+- **Negative / cost accepted:** Fargate-in-public-subnets connectivity
+  (reaching ECR/Firehose without NAT) is assumed to behave like the existing
+  EC2 node group's public-subnet setup, not yet confirmed live.
 - **Negative / cost accepted:** the onboarding script (not pure Terraform)
   for the one K8s-native artifact is a deliberate compromise forced by a real
   Terraform limitation (static provider connections), not a preference —
@@ -138,4 +177,6 @@ destination. Reconsidered because:
   expectations once real usage is measured; a second cluster is actually
   onboarded (exercises the `for_each` design for the first time); or building
   the real Splunk/Elasticsearch connectors reveals the greenfield schema
-  needs revision before this test harness's schema is locked in further.
+  needs revision, or makes it worth moving this Athena path behind the same
+  Go-side `LogSource` interface instead of leaving it as a separate
+  agent-side connector.

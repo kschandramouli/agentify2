@@ -59,7 +59,7 @@ Trace persisted (POST /api/query → Tier-2 answer stored)
   → INSERT INTO incident_embeddings (trace_id, namespace, service, embedding, summary)
 
 DiagnoseSkill._prefetch() [Pattern A]
-  existing:  get_service_health, get_pod_events, get_metrics_history, get_change_history, get_pod_logs
+  existing:  get_service_health, get_pod_events, get_metrics_history, get_change_history, get_logs
   new:       get_similar_incidents(service, namespace, description)
                → SELECT ... ORDER BY embedding <-> $query_embedding LIMIT 3
                → returns: [{summary, date, likely_cause, resolution}]

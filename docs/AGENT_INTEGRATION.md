@@ -168,7 +168,9 @@ The system currently recognises these intents:
 
 ## Tools
 
-The agent has access to 7 tools that fetch live data from the backend via `POST /api/agent/fetch`:
+The agent has access to tools that fetch live data from the backend via `POST /api/agent/fetch`
+(the core set below; `src/agent/k8fy/tools.py` is the source of truth for the full current list,
+which has since grown to include semantic-memory, live-diagnostics, and Vault tools not detailed here):
 
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
@@ -176,7 +178,8 @@ The agent has access to 7 tools that fetch live data from the backend via `POST 
 | `query_pod` | Phase, ready status, restart count for a specific pod | `pod_id`, `namespace` |
 | `get_pod_events` | Recent warning/crash events for a pod | `pod_id`, `namespace`, `limit` |
 | `get_certificates` | Certificate list, expiry dates, renewal needs | `namespace` (optional) |
-| `get_pod_logs` | Bounded redacted log tail — use `previous=true` for the crashed container | `pod_id`, `namespace`, `previous`, `tail_lines` |
+| `get_logs` | **Preferred** bounded redacted log tail — tries the Glue/Athena log platform first when configured (ADR 0021), else the live cluster; `previous=true` for the crashed container | `namespace`, `pod`, `previous`, `tail_lines` |
+| `get_pod_logs` | Same, but always reads the adapter's cached store specifically — use `get_logs` unless you need this cached snapshot in particular | `pod_id`, `namespace`, `previous`, `tail_lines` |
 | `get_metrics_history` | Restart-count time-series over a window | `pod_id`, `namespace`, `since`, `until`, `order` |
 | `get_change_history` | Deployment/rollout events over a time window | `deployment`, `namespace`, `since`, `until` |
 

@@ -44,7 +44,7 @@ No tools are declared to Claude; the data is injected directly into the user mes
 | `cert_check` | `CertAuditSkill` | `get_certificates(namespace)` | `certificates` | `settings.claude_model` |
 | `change_history` | `ChangeHistorySkill` | `get_change_history(namespace, service_name)` | `change_history` | `settings.claude_model` |
 | `metrics_history` | `RestartTrendSkill` | `get_metrics_history(namespace, service_name, asc)` | `metrics_history` | `settings.claude_model` |
-| `diagnose` | `DiagnoseSkill` | `get_service_health` + `get_pod_events` (all pods) + `get_metrics_history` + `get_change_history` + `get_pod_logs` (crashing pods only) | `service_health`, `events.<pod-id>`, `metrics_history`, `change_history`, `logs.<pod-id>` | `ADVISOR_MODEL` (Opus 4.8) |
+| `diagnose` | `DiagnoseSkill` | `get_service_health` + `get_pod_events` (all pods) + `get_metrics_history` + `get_change_history` + `get_logs` (crashing pods only — routes to the Glue/Athena log platform first when configured, ADR 0021, else the live cluster) | `service_health`, `events.<pod-id>`, `metrics_history`, `change_history`, `logs.<pod-id>` | `ADVISOR_MODEL` (Opus 4.8) |
 | anything else | `K8fyAgent` (fallback) | none (agentic loop) | — | `settings.claude_model` |
 
 ### Pattern A — all five skill classes
@@ -90,8 +90,10 @@ Cost per request: **N parallel backend fetches + exactly 1 Claude call** (predic
 - `get_pod_events(pod_id, namespace)` — for every pod in initial `data`.
 - `get_metrics_history(namespace, service_name, order=asc)` — always.
 - `get_change_history(namespace, service_name)` — always.
-- `get_pod_logs(pod_id, namespace, previous=True)` — only for crashing pods
-  (`restarts >= 3` or `phase in {Failed, Unknown, CrashLoopBackOff}`).
+- `get_logs(namespace, pod, previous=True)` — only for crashing pods
+  (`restarts >= 3` or `phase in {Failed, Unknown, CrashLoopBackOff}`). Routes
+  to the Glue/Athena log platform first when configured (ADR 0021), else the
+  live cluster — see `log_router.py`.
 - `DiagnoseSkill` overrides `self.model = ADVISOR_MODEL` (`claude-opus-4-8`) after
   `super().__init__()` — diagnosis warrants the most capable model.
 

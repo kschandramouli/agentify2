@@ -31,7 +31,7 @@ Anomaly sweep detects degradation
          │  Tool sequence (Pattern A, deterministic):  │
          │  1. get_similar_incidents   ← semantic mem  │
          │  2. get_change_history      ← last deploy?  │
-         │  3. get_pod_logs            ← crash reason  │
+         │  3. get_logs                ← crash reason  │
          └──────┬──────────────────────────────────────┘
                 │
                 ▼ One Claude call

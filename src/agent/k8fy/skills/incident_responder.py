@@ -66,10 +66,14 @@ class IncidentResponderSkill(K8fyAgent):
                 {"namespace": namespace, "deployment": service_name},
             )
 
+        # get_logs (not get_pod_logs directly) so this reads the Glue/Athena
+        # test harness first when configured, falling back to the live
+        # cluster — still a deterministic function call, not an LLM decision
+        # (log_router.py).
         for pod_id in _crashing_pod_ids(data):
             tasks[f"logs.{pod_id}"] = self._fetch(
-                "get_pod_logs",
-                {"pod_id": pod_id, "namespace": namespace, "previous": True},
+                "get_logs",
+                {"namespace": namespace, "pod": pod_id, "previous": True},
             )
 
         if not tasks:

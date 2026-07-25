@@ -796,13 +796,25 @@ stood up separately:**
 
 **Test harness built 2026-07-21/22 ([ADR 0021](decisions/0021-log-platform-test-infra.md)):**
 Fargate profile (`payments` namespace) → Kinesis Firehose → **S3 (Hive-partitioned)
-+ Athena** — not OpenSearch. This is scaffolding to validate the `LogSource`
-interface cheaply (Athena has zero idle cost, unlike a continuously-billed
-search-engine instance); it is explicitly not a production connector target —
-real customers' source of truth is Splunk or Elasticsearch/OpenSearch, per the
-priority above, and those connectors are what actually ship. See ADR 0021 for
-the full infra design (Fargate/cluster-onboarding registry, Glue partition
-projection, IRSA-based query access reusing the existing backend/agent roles).
++ Athena** — not OpenSearch. Originally scaffolding to validate the
+`LogSource` interface cheaply (Athena has zero idle cost, unlike a
+continuously-billed search-engine instance). See ADR 0021 for the full infra
+design (Fargate/cluster-onboarding registry, Glue partition projection,
+IRSA-based query access reusing the existing backend/agent roles).
+
+**Athena path shipped as an interim connector (2026-07-25, revises ADR
+0021):** `src/agent/k8fy/log_router.py`'s `get_logs()` tries this harness
+first for every namespace when configured, falling back to the live cluster
+on empty/error — no per-namespace registry or manual toggle, wired into both
+the chat tool loop and `DiagnoseSkill`'s prefetch. **This is not the
+Splunk/Elasticsearch connector above** — it targets agentify's own test
+harness, not a customer's existing log platform, and it lives in the Python
+agent rather than behind the Go `LogSource` interface this item specifies
+(`internal/api/adapter_client.go`, `LOG_SOURCE=k8s_adapter|opensearch`).
+Splunk/Elasticsearch/OpenSearch, built properly behind that interface, remain
+the priority for onboarding a real customer's log platform — see ADR 0021's
+2026-07-25 revision for the full reasoning and the accepted architecture
+debt.
 
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 
