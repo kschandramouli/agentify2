@@ -40,6 +40,24 @@ spec:
           value: "ap-southeast-2"
         - name: BACKEND_URL
           value: "http://agentify-backend:8080"
+        # Log platform (Glue/Athena test harness, ADR 0021) — get_logs()
+        # (k8fy/log_router.py) tries this first for every namespace, falling
+        # back to the live cluster on empty results or errors; no per-namespace
+        # registry, just this connection config. These names follow a fully
+        # deterministic convention set by infra/terraform/aws/logging.tf
+        # (local.name-log-test / local.glue_db_name / "payments_logs") rather
+        # than an account-specific value like an IRSA ARN, so they're literal
+        # here rather than substituted at deploy time — confirm against
+        # `terraform output log_platform_athena_workgroup` /
+        # `log_platform_glue_database` / `log_platform_glue_table_name` if
+        # logging.tf's naming ever changes. Leave empty (or omit) if the test
+        # harness isn't deployed — get_logs() then always uses the live cluster.
+        - name: ATHENA_WORKGROUP
+          value: "agentify-dev-log-test"
+        - name: ATHENA_DATABASE
+          value: "agentify_dev_logs"
+        - name: ATHENA_TABLE
+          value: "payments_logs"
         # ANTHROPIC_API_KEY from Secrets Manager secret agentify/dev/anthropic
         - name: ANTHROPIC_API_KEY
           valueFrom:

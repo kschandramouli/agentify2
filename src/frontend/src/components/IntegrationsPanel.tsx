@@ -47,24 +47,80 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
   );
 }
 
+// ── Namespaces field (checkboxes over discovered + manual add) ───────────────
+
+function NamespacesField({
+  value,
+  discovered,
+  onChange,
+}: {
+  value: string[];
+  discovered: string[];
+  onChange: (namespaces: string[]) => void;
+}) {
+  const [manualEntry, setManualEntry] = useState("");
+  const known = [...new Set([...discovered, ...value])].sort();
+
+  function toggle(ns: string) {
+    onChange(value.includes(ns) ? value.filter(n => n !== ns) : [...value, ns]);
+  }
+
+  function addManual() {
+    const ns = manualEntry.trim();
+    if (ns && !value.includes(ns)) onChange([...value, ns]);
+    setManualEntry("");
+  }
+
+  return (
+    <label className="int-field">
+      <span>Namespaces</span>
+      <div className="int-ns-checkboxes">
+        {known.length === 0 && <em>No namespaces discovered yet — add one manually below.</em>}
+        {known.map(ns => (
+          <label key={ns} className="int-ns-checkbox">
+            <input type="checkbox" checked={value.includes(ns)} onChange={() => toggle(ns)} />
+            {ns}
+          </label>
+        ))}
+      </div>
+      <div className="int-ns-manual">
+        <input
+          type="text"
+          value={manualEntry}
+          onChange={e => setManualEntry(e.target.value)}
+          placeholder="add namespace not yet discovered"
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addManual(); } }}
+        />
+        <button type="button" className="int-btn int-btn--sm" onClick={addManual}>Add</button>
+      </div>
+      <em>Namespaces this integration is responsible for.</em>
+    </label>
+  );
+}
+
 // ── Integration form (create + edit) ─────────────────────────────────────────
 
 const BLANK: IntegrationInput = { name: "", adapter_url: "", namespaces: [], token: "", status: "inactive" };
 
 function IntegrationForm({
   initial,
+  discoveredNamespaces,
   onSave,
   onCancel,
   saving,
 }: {
   initial?: Integration;
+  discoveredNamespaces: string[];
   onSave: (input: IntegrationInput) => void;
   onCancel: () => void;
   saving: boolean;
 }) {
   const [form, setForm] = useState<IntegrationInput>(
     initial
-      ? { name: initial.name, adapter_url: initial.adapter_url, namespaces: [], token: "", status: initial.status }
+      ? {
+          name: initial.name, adapter_url: initial.adapter_url, namespaces: initial.namespaces, token: "",
+          status: initial.status,
+        }
       : BLANK
   );
 
@@ -99,6 +155,11 @@ function IntegrationForm({
           required
         />
       </label>
+      <NamespacesField
+        value={form.namespaces}
+        discovered={discoveredNamespaces}
+        onChange={ns => set("namespaces", ns)}
+      />
       <label className="int-field">
         <span>Bearer token {initial?.has_token && <em>(leave blank to keep existing)</em>}</span>
         <input
@@ -156,12 +217,20 @@ function IntegrationRow({
       <div className="int-row__url">{integration.adapter_url}</div>
       <div className="int-row__watching">
         <span className="int-row__watching-label">
-          {discoveredNamespaces.length > 0 ? "Watching:" : "No namespaces discovered yet"}
+          {integration.namespaces.length > 0 ? "Namespaces:" : "No namespaces assigned yet"}
         </span>
-        {discoveredNamespaces.map(ns => (
+        {integration.namespaces.map(ns => (
           <code key={ns} className="int-ns-chip">{ns}</code>
         ))}
       </div>
+      {discoveredNamespaces.length > 0 && (
+        <div className="int-row__watching int-row__watching--discovered">
+          <span className="int-row__watching-label">Discovered by adapter:</span>
+          {discoveredNamespaces.map(ns => (
+            <code key={ns} className="int-ns-chip int-ns-chip--muted">{ns}</code>
+          ))}
+        </div>
+      )}
       <div className="int-row__actions">
         <button className="int-btn int-btn--sm" onClick={() => onEdit(integration)}>Edit</button>
         <button className="int-btn int-btn--sm int-btn--danger" onClick={() => onDelete(integration.id)}>Delete</button>
@@ -231,8 +300,9 @@ export function IntegrationsPanel() {
       <div className="int-panel__header">
         <h2>Integrations</h2>
         <p className="int-panel__desc">
-          Each integration connects agentify to a K8fy adapter.
-          Namespaces are discovered automatically from the adapter — no manual configuration needed.
+          Each integration connects agentify to a K8fy adapter. Namespaces watched by the
+          adapter are discovered automatically — assign the ones this integration is
+          responsible for below.
         </p>
         {mode === "list" && (
           <button className="int-btn int-btn--primary" onClick={() => setMode("create")}>
@@ -248,6 +318,7 @@ export function IntegrationsPanel() {
           <h3>{mode === "create" ? "New integration" : `Edit: ${(mode as { editing: Integration }).editing.name}`}</h3>
           <IntegrationForm
             initial={typeof mode === "object" ? mode.editing : undefined}
+            discoveredNamespaces={discoveredNamespaces}
             onSave={handleSave}
             onCancel={() => setMode("list")}
             saving={saving}

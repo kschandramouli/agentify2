@@ -1929,6 +1929,29 @@ code {
   margin: 0;
   font-weight: 500;
 }
+.int-ns-chip--muted { background: rgba(255,255,255,0.05); color: var(--muted); }
+.int-row__watching--discovered { margin-top: 2px; }
+
+.int-ns-checkboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 4px 0;
+}
+.int-ns-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  cursor: pointer;
+}
+.int-ns-manual {
+  display: flex;
+  gap: 6px;
+}
+.int-ns-manual input { flex: 1; }
 
 .int-badge {
   font-size: 11px;

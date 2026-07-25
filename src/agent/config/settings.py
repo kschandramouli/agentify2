@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # Backend service (for the agent's tool callbacks)
     backend_url: str = "http://localhost:8080"
 
+    # Log platform (Glue/Athena test harness, ADR 0021) — empty means unconfigured,
+    # log_router.get_logs() then always uses the live cluster. See infra/kubernetes/agent.yaml.
+    athena_workgroup: str = Field(default="", validation_alias=AliasChoices("ATHENA_WORKGROUP"))
+    athena_database: str = Field(default="", validation_alias=AliasChoices("ATHENA_DATABASE"))
+    athena_table: str = Field(default="", validation_alias=AliasChoices("ATHENA_TABLE"))
+
     # Langfuse prompt management (optional — falls back to local strings if not set)
     # Keys are resolved from LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY env vars,
     # or fetched from AWS Secrets Manager using langfuse_secret_name below.

@@ -111,11 +111,15 @@ class DiagnoseSkill(K8fyAgent):
         #    snapshot in `data` can be up to 30 s stale after a rollout, causing 404s.
         #    service_health is fetched above and reflects the current K8s state.
         #    Fall back to pod IDs from `data` if service_health hasn't landed yet.
+        #    get_logs (not get_pod_logs directly) so this reads the Glue/Athena
+        #    test harness first when configured, falling back to the live
+        #    cluster — still a deterministic function call, not an LLM
+        #    decision (log_router.py).
         log_pod_ids = _crashing_pod_ids(data)
         for pod_id in log_pod_ids:
             tasks[f"logs.{pod_id}"] = self._fetch(
-                "get_pod_logs",
-                {"pod_id": pod_id, "namespace": namespace, "previous": True},
+                "get_logs",
+                {"namespace": namespace, "pod": pod_id, "previous": True},
             )
 
         # 6. Semantic memory: similar past incidents (P8).

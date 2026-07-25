@@ -8,6 +8,7 @@ import httpx
 
 from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
 from k8fy import live_diagnostics
+from k8fy.log_router import get_logs as _get_logs
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +89,39 @@ TOOLS = [
         },
     },
     {
+        "name": "get_logs",
+        "description": (
+            "PREFERRED way to fetch logs for a pod to find the CRASH REASON "
+            "(OOMKilled, panic/stack trace, connection refused, failing probe). "
+            "Automatically tries the log platform (Glue/Athena) first when configured "
+            "and falls back to the live cluster — you never need to decide which; call "
+            "this instead of get_pod_logs/live_get_pod_logs unless you specifically need "
+            "the cached store or a live snapshot. Set previous=true to read the last "
+            "crashed container instance when the live cluster answers (ignored when the "
+            "log platform answers, which retains history itself). Logs are best-effort "
+            "redacted and not stored."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "pod": {"type": "string", "description": "Pod name"},
+                "container": {"type": "string", "description": "Container name (optional; live-cluster path only)."},
+                "previous": {"type": "boolean", "description": "Read the previous (crashed) container instance (live-cluster path only)."},
+                "tail_lines": {"type": "integer", "description": "Lines from the end (default 200, capped server-side)."},
+            },
+            "required": ["namespace", "pod"],
+        },
+    },
+    {
         "name": "get_pod_logs",
         "description": (
-            "Fetch a bounded, redacted tail of a pod's logs to find the CRASH REASON "
-            "(OOMKilled, panic/stack trace, connection refused, failing probe). Set "
-            "previous=true to read the last crashed container instance — that is where "
-            "a CrashLoopBackOff reason usually is. Logs are best-effort redacted and "
-            "not stored; quote the relevant failure line in your answer."
+            "Fetch a bounded, redacted tail of a pod's logs from the k8fy-adapter's "
+            "cached store specifically — prefer get_logs unless you need this cached "
+            "snapshot in particular. Set previous=true to read the last crashed "
+            "container instance — that is where a CrashLoopBackOff reason usually is. "
+            "Logs are best-effort redacted and not stored; quote the relevant failure "
+            "line in your answer."
         ),
         "input_schema": {
             "type": "object",
@@ -560,6 +587,17 @@ async def process_tool_call(
     # Live diagnostics: calls the live K8s API directly, never the backend store.
     if tool_name in LIVE_DIAGNOSTIC_TOOLS:
         return await _dispatch_live_diagnostic(tool_name, arguments)
+
+    # get_logs: tries the log platform (Glue/Athena) first when configured,
+    # falls back to the live cluster — see log_router.py.
+    if tool_name == "get_logs":
+        return await _get_logs(
+            namespace=arguments.get("namespace", ""),
+            pod=arguments.get("pod", ""),
+            container=arguments.get("container"),
+            tail_lines=int(arguments.get("tail_lines", 200)),
+            previous=bool(arguments.get("previous", False)),
+        )
 
     url = f"{backend_url.rstrip('/')}/api/agent/fetch"
     payload = {"tool": tool_name, "args": arguments}

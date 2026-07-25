@@ -153,7 +153,6 @@ func (c *Client) initSchema(ctx context.Context) error {
 		created_at TIMESTAMP DEFAULT NOW(),
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
-
 	-- Multi-turn chat sessions: persists conversation history across pod restarts.
 	CREATE TABLE IF NOT EXISTS chat_sessions (
 		id                 TEXT PRIMARY KEY,

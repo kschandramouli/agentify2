@@ -23,13 +23,13 @@ Role "agent-live-diagnostics" — get/list pods, get pods/log, get/list events.
 """
 
 import logging
-import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
 
 from k8fy.k8s_client import K8S_API, k8s_headers
+from k8fy.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,30 +42,6 @@ LIVE_DIAGNOSTIC_TOOLS = frozenset({
     "live_get_events",
     "live_describe_pod",
 })
-
-_MAX_LOG_CHARS = 16384
-
-# Mirrors governance.RedactText (src/backend/internal/governance/redact.go) —
-# this path never touches the Go backend's egress redaction, so live log text
-# gets the same best-effort scrubbing applied here instead.
-_LOG_SCRUBBERS = [
-    (re.compile(r"(?i)(authorization\s*[:=]\s*)(bearer\s+)?[A-Za-z0-9._\-]{12,}"), r"\1\2***"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "***"),
-    (re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"), "***"),
-    (re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)(\"?\s*[:=]\s*\"?)[^\s\"',;}]+"), r"\1\2***"),
-    (re.compile(r"(://[^:/\s]+:)[^@/\s]+(@)"), r"\1***\2"),
-    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), "***"),
-    (re.compile(r"\b[A-Fa-f0-9]{32,}\b"), "***"),
-    (re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"), "***"),
-]
-
-
-def _redact_log_text(s: str) -> str:
-    for pattern, replacement in _LOG_SCRUBBERS:
-        s = pattern.sub(replacement, s)
-    if len(s) > _MAX_LOG_CHARS:
-        s = s[:_MAX_LOG_CHARS] + "\n…[truncated]"
-    return s
 
 
 async def _k8s_get(path: str, params: Optional[Dict[str, str]] = None) -> httpx.Response:
@@ -128,7 +104,7 @@ async def live_get_pod_logs(
         "pod": pod,
         "container": container,
         "previous": previous,
-        "logs": _redact_log_text(resp.text),
+        "logs": redact_log_text(resp.text),
     }
 
 
