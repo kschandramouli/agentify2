@@ -3,8 +3,10 @@
 ## Status
 
 Accepted   ·   (date: 2026-07-21   ·   revised: 2026-07-22 — OpenSearch destination
-replaced with S3 + Athena; revised again 2026-07-25 — test harness now also
-serves as an interim production log source; see "Revision" sections below)
+replaced with S3 + Athena; revised again 2026-07-25 — test harness graduates to
+a first-class production log source; revised again 2026-07-27 — Splunk/
+Elasticsearch/OpenSearch reframed as additional connector options alongside
+Athena, not a replacement priority above it; see "Revision" sections below)
 
 ## Context
 
@@ -31,6 +33,11 @@ This ADR is the first case where it's realized by something else.
 
 ## Important distinction: this ADR is a test harness, not the production connector
 
+*(Original 2026-07-21 framing — superseded by the 2026-07-25 and 2026-07-27
+revisions below, which promote this harness from test-only scaffolding to a
+first-class, always-available data source. Kept here for the historical
+reasoning; read the revisions for the current decision.)*
+
 In production, agentify never owns the log-ingest pipeline — the customer's
 own logging pipeline (their Fluent Bit/Logstash/vendor agents) already feeds
 their existing Splunk/Elasticsearch/OpenSearch, and P15's job is only to
@@ -39,12 +46,15 @@ related in this ADR is scaffolding **we** stand up, purely to generate
 realistic, queryable test data to build and validate the read connector
 against — it is not what ships to a customer.
 
-**Production connector priority (confirmed 2026-07-22): Splunk first,
-Elasticsearch/OpenSearch second.** Splunk is its own implementation (SPL via
-the REST search-jobs API, Splunk token auth). Elasticsearch and OpenSearch
-share the same `_search` Query DSL closely enough that one connector
-implementation covers both. Both sit behind the same `LogSource` interface
-already designed in the P15 roadmap entry.
+**Connector lineup (reframed 2026-07-27 — see the 2026-07-27 revision below):**
+Athena/Glue is the first live data source (shipped 2026-07-25). Splunk and
+Elasticsearch/OpenSearch are **additional** connectors to broaden integration
+options — for customers whose own log platform is already Splunk or an ES/
+OpenSearch index — not a replacement for Athena. Splunk is its own
+implementation (SPL via the REST search-jobs API, Splunk token auth).
+Elasticsearch and OpenSearch share the same `_search` Query DSL closely
+enough that one connector implementation covers both. All three sit behind
+the same `LogSource` interface already designed in the P15 roadmap entry.
 
 ## Decision
 
@@ -128,17 +138,6 @@ live cluster on empty results or errors — no per-namespace registry, no
 manual toggle. This is genuinely in production code paths now: the chat
 tool-calling loop and `DiagnoseSkill`'s deterministic prefetch both call it.
 
-**This does not replace the Splunk/Elasticsearch/OpenSearch connector
-priority** ([ROADMAP P15](../ROADMAP.md#p15--pull-based-log-platform-connector-proposed-2026-07-21)).
-Those remain the target for onboarding a **customer's own, already-populated**
-log platform — this harness is agentify's own test data (the `payments`
-Fargate profile shipping its own logs), not a stand-in for a customer's
-Splunk/ES. Practically: Athena fills the gap between "no log-platform
-connector at all" and "the real Splunk/ES connector is built," using the
-same fetch-redact-discard discipline (ADR 0014) and the same tool contract
-shape P15 designed — it just isn't yet the Go-side `LogSource` interface
-P15 specified (see "consequences" below).
-
 **Also corrects a stale claim from the original ADR:** the Glue table
 schema described below as "not yet validated against a real ingested
 record" *was* validated this session — the real Fargate/Fluent-Bit output
@@ -149,22 +148,54 @@ the raw CRI log line, not `struct<level:string>`; no top-level `@timestamp`/
 downloaded, inspected S3 object and confirmed live via real Athena query
 results.
 
+## Revision (2026-07-27): Splunk/Elasticsearch/OpenSearch reframed as additional connectors, not a replacement priority
+
+**Reconsidered again.** The 2026-07-25 revision still framed Athena as a
+stopgap "filling the gap" until "the real Splunk/ES connector is built" —
+implying Splunk/ES would eventually supersede it. That hierarchy is dropped.
+Athena/Glue is now one of potentially several **peer** data sources behind
+the `LogSource` abstraction: it's shipped, validated against real data, and
+zero idle cost — there's no reason to treat it as disposable once a second
+connector exists.
+
+**Splunk and Elasticsearch/OpenSearch remain valuable, but as *additional*
+integration options**, not the priority Athena is measured against. They
+matter for a specific case Athena doesn't cover — a customer whose logs
+already live in their own, already-populated Splunk/ES/OpenSearch instance,
+where agentify should read from that existing platform rather than ask them
+to stand up a second pipeline. Building them **broadens** which log
+platforms agentify can plug into; it doesn't **replace** the Athena path.
+The goal going forward: a flexible, multi-connector `get_logs()` that can be
+configured toward whichever platform(s) a given deployment actually has —
+Athena, Splunk, ES/OpenSearch, or more than one at once — rather than a
+single hardcoded destination.
+
+This makes the Go-side `LogSource` interface (see "consequences" below) more
+valuable, not less: with Athena as a peer connector rather than a stopgap,
+a real pluggable abstraction (vs. one bespoke agent-side function per
+backend) is worth doing sooner rather than only "when Splunk/ES land."
+
 ## Consequences
 
 - **Positive:** a real, near-zero-cost, isolated log source to validate P15's
   connector interface against; a clean, low-friction path to onboard
   additional clusters later (P16) without rearchitecting; the Firehose/S3/
   Athena pipeline is shared/centralized across every onboarded cluster
-  rather than duplicated per cluster; as of the 2026-07-25 revision, an
-  actual interim log source for diagnosis rather than pure test scaffolding.
-- **Negative / architecture debt accepted (2026-07-25):** the routing
-  decision lives in the Python agent (`log_router.py`, calling Athena
-  directly via boto3), not behind the Go `LogSource` interface P15 actually
-  designed (`internal/api/adapter_client.go`, `LOG_SOURCE=k8s_adapter|
-  opensearch` config selection). Acceptable short-term — it works, it's
-  tested, it's isolated to one function — but a real Splunk/Elasticsearch
-  connector should land behind that interface properly rather than growing
-  a second bespoke agent-side connector alongside this one.
+  rather than duplicated per cluster; as of the 2026-07-25 revision, a real
+  first-class log source for diagnosis rather than pure test scaffolding; as
+  of the 2026-07-27 revision, the first of what's meant to be several peer
+  connectors, not a placeholder that Splunk/ES are expected to replace.
+- **Negative / architecture debt accepted (2026-07-25, sharpened
+  2026-07-27):** the routing decision lives in the Python agent
+  (`log_router.py`, calling Athena directly via boto3), not behind the Go
+  `LogSource` interface P15 actually designed (`internal/api/adapter_client.go`,
+  `LOG_SOURCE=k8s_adapter|opensearch` config selection). Acceptable
+  short-term — it works, it's tested, it's isolated to one function — but
+  now that Athena is a peer connector rather than a stopgap, adding Splunk
+  or Elasticsearch/OpenSearch as a second bespoke agent-side function instead
+  of building the real pluggable interface would compound this debt rather
+  than pay it down; the interface is worth building before (or as part of)
+  whichever connector comes next.
 - **Negative / cost accepted:** Fargate-in-public-subnets connectivity
   (reaching ECR/Firehose without NAT) is assumed to behave like the existing
   EC2 node group's public-subnet setup, not yet confirmed live.

@@ -716,18 +716,22 @@ justified by a proactive/pattern-mining use case that doesn't exist yet. ADR
 future decision if a concrete use case (e.g. extending the P4c investigation
 loop) demands it — don't bundle it into this item.
 
-**Connector priority (confirmed 2026-07-22): Splunk first, Elasticsearch/
-OpenSearch second.** Splunk is its own implementation (SPL via the REST
+**Connector lineup (reframed 2026-07-27, see ADR 0021's 2026-07-27
+revision):** Athena/Glue (shipped 2026-07-25) is the first live `LogSource`
+implementation. Splunk and Elasticsearch/OpenSearch are **additional**
+connectors planned next to broaden integration options — for customers whose
+own log platform is already Splunk or an ES/OpenSearch index — not a
+replacement for Athena. Splunk is its own implementation (SPL via the REST
 search-jobs API, Splunk token auth). Elasticsearch and OpenSearch share
 close enough to the same `_search` Query DSL that one connector covers both —
 the design below (query construction, schema) was written against that
-shared API and still applies once it's built as the second connector.
+shared API and still applies once it's built as the next connector.
 
 **Shape:** a pluggable log-backend abstraction — direct K8s fetch (existing)
-becomes one implementation; OpenSearch becomes a second. Both sit behind the
-same `get_pod_logs`-equivalent tool contract (bounded tail/window, entity
-filter, redact-before-the-agent-sees-it). No new Postgres tables, no new
-retention janitor.
+is one implementation, Athena/Glue (shipped 2026-07-25) is a second, OpenSearch/
+Splunk are next. All sit behind the same `get_pod_logs`/`get_logs`-equivalent
+tool contract (bounded tail/window, entity filter, redact-before-the-agent-
+sees-it). No new Postgres tables, no new retention janitor.
 
 **Design refined 2026-07-21 (brainstorm), scope confirmed as read-connector
 only — the ingest pipeline (Fluent Bit/Firehose + OpenSearch domain + index
@@ -802,19 +806,20 @@ continuously-billed search-engine instance). See ADR 0021 for the full infra
 design (Fargate/cluster-onboarding registry, Glue partition projection,
 IRSA-based query access reusing the existing backend/agent roles).
 
-**Athena path shipped as an interim connector (2026-07-25, revises ADR
-0021):** `src/agent/k8fy/log_router.py`'s `get_logs()` tries this harness
-first for every namespace when configured, falling back to the live cluster
-on empty/error — no per-namespace registry or manual toggle, wired into both
-the chat tool loop and `DiagnoseSkill`'s prefetch. **This is not the
-Splunk/Elasticsearch connector above** — it targets agentify's own test
-harness, not a customer's existing log platform, and it lives in the Python
-agent rather than behind the Go `LogSource` interface this item specifies
-(`internal/api/adapter_client.go`, `LOG_SOURCE=k8s_adapter|opensearch`).
-Splunk/Elasticsearch/OpenSearch, built properly behind that interface, remain
-the priority for onboarding a real customer's log platform — see ADR 0021's
-2026-07-25 revision for the full reasoning and the accepted architecture
-debt.
+**Athena path shipped as the first live connector (2026-07-25, reframed
+2026-07-27 — revises ADR 0021):** `src/agent/k8fy/log_router.py`'s
+`get_logs()` tries this data source first for every namespace when
+configured, falling back to the live cluster on empty/error — no
+per-namespace registry or manual toggle, wired into both the chat tool loop
+and `DiagnoseSkill`'s prefetch. It currently lives in the Python agent
+rather than behind the Go `LogSource` interface this item specifies
+(`internal/api/adapter_client.go`, `LOG_SOURCE=k8s_adapter|opensearch`) —
+accepted architecture debt, see ADR 0021. **Splunk and Elasticsearch/
+OpenSearch remain the next connectors to add** — for onboarding a customer's
+own, already-populated log platform — as *additional* integration options
+alongside Athena, not a replacement for it. The goal is a flexible,
+multi-connector `get_logs()` that supports whichever platform(s) a
+deployment actually has.
 
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 

@@ -1,9 +1,15 @@
 # Log source routing: frontend → backend → agent → Athena/cluster
 
 How a question about a service turns into the right log source being read,
-with no manual configuration (ADR 0021 / P15 connector, phase 1). Covers both
-paths that fetch logs: the free-form **Chat** path and the deterministic
-**Diagnose** (Tier-2) path.
+with no manual configuration (ADR 0021 / P15 connector, phase 1). Covers all
+three paths that fetch logs: the free-form **Chat** path, the deterministic
+**Diagnose** (Tier-2) path, and the **Incident-response** path.
+
+Athena/Glue is the first live connector behind `get_logs()` (shipped
+2026-07-25); the design is meant to grow into a flexible, multi-connector
+router — Splunk and Elasticsearch/OpenSearch are planned as **additional**
+connectors for customers whose logs already live in one of those platforms,
+not a replacement for the Athena path (see ADR 0021's 2026-07-27 revision).
 
 ## Component interaction
 
@@ -24,14 +30,17 @@ flowchart TD
         PTC["process_tool_call()<br/>tools.py"]
         GL["get_logs() router<br/>log_router.py"]
         DS["DiagnoseSkill._prefetch()<br/>skills/diagnose.py — Tier-2 only"]
+        IR["IncidentResponderSkill._prefetch()<br/>skills/incident_responder.py"]
         RC -- "model calls get_logs tool" --> PTC
         PTC --> GL
         DS -- "direct call, no model in the loop" --> GL
+        IR -- "direct call, no model in the loop" --> GL
     end
 
     subgraph SRC["Log sources"]
-        ATH["Glue/Athena test harness<br/>log_platform.py (boto3)"]
+        ATH["Glue/Athena<br/>log_platform.py (boto3)<br/>— first live connector"]
         K8S["Live Kubernetes API<br/>live_diagnostics.py (in-cluster SA token)"]
+        FUT["Splunk / Elasticsearch / OpenSearch<br/>— planned additional connectors,<br/>not a replacement for Athena"]
     end
 
     UI -->|"sendChatMessage()"| API
@@ -123,6 +132,7 @@ sequenceDiagram
 | Backend | `src/backend/internal/api/agent_client.go` | `AgentClient.Chat()` → `POST /reason-chat` |
 | Agent | `src/agent/k8fy/agent.py` | `reason_chat()` — free-form tool loop |
 | Agent | `src/agent/k8fy/skills/diagnose.py` | `DiagnoseSkill._prefetch()` — Tier-2 deterministic prefetch |
+| Agent | `src/agent/k8fy/skills/incident_responder.py` | `IncidentResponderSkill._prefetch()` — Phase-3 remediation proposal prefetch |
 | Agent | `src/agent/k8fy/tools.py` | `get_logs` tool registration + dispatch |
 | Agent | `src/agent/k8fy/log_router.py` | **the routing decision** — Athena first, cluster fallback |
 | Agent | `src/agent/k8fy/log_platform.py` | Athena/Glue query (boto3) |
