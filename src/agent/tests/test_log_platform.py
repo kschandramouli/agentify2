@@ -58,7 +58,7 @@ async def test_query_athena_logs_success(monkeypatch):
 
     result = await lp.query_athena_logs(
         "payments", "payment-worker-abc",
-        {"workgroup": "agentify-dev-log-test", "database": "agentify_dev_logs", "table": "payments_logs"},
+        {"workgroup": "agentify-dev-log-test", "database": "agentify_dev_logs", "table": "pod_logs"},
     )
 
     assert result["namespace"] == "payments"

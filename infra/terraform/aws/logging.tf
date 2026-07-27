@@ -12,7 +12,12 @@ locals {
   # Single source of truth for every cluster onboarded to this log pipeline.
   # The cluster this root module manages is always included; var.clusters
   # (default {}) is purely for additional clusters onboarded later — add one
-  # entry there, not new HCL, per ADR 0021.
+  # entry there, not new HCL, per ADR 0021. `namespaces` is a list: every
+  # namespace/service listed here gets its own Fargate profile selector, but
+  # all of them stream into the SAME shared Firehose -> S3 -> Glue
+  # destination below — one common database/table for every onboarded
+  # service, not one per namespace. Add a service = add a namespace to this
+  # list, not new pipeline infrastructure.
   log_platform_clusters = merge(
     {
       agentify_dev = {
@@ -24,15 +29,31 @@ locals {
         # subnet the internet-equivalent access Fargate pods need without a
         # NAT gateway.
         subnet_ids = [module.vpc.private_subnets[0]]
-        namespace  = "payments"
+        namespaces = ["payments"]
       }
     },
     var.clusters
   )
 
-  active_clusters = var.enable_log_platform_test ? local.log_platform_clusters : {}
+  # One (cluster, namespace) pair per Fargate profile selector — flattened so
+  # `for_each` below can address each pair individually. A cluster with
+  # multiple onboarded namespaces gets one profile per namespace (EKS Fargate
+  # profiles support up to 5 selectors each, but one selector per profile
+  # keeps onboarding/removal of a single namespace a clean add/remove instead
+  # of an in-place edit of a shared profile).
+  log_platform_cluster_namespaces = merge([
+    for cluster_key, cluster in(var.enable_log_platform_test ? local.log_platform_clusters : {}) : {
+      for ns in cluster.namespaces : "${cluster_key}-${ns}" => {
+        cluster_name = cluster.cluster_name
+        subnet_ids   = cluster.subnet_ids
+        namespace    = ns
+      }
+    }
+  ]...)
+
   log_bucket_name = "${local.name}-log-test"
   glue_db_name    = replace("${local.name}_logs", "-", "_")
+  glue_table_name = "pod_logs"
 }
 
 # ── Fargate profile(s) — one per onboarded cluster, for_each over the registry ─
@@ -75,7 +96,12 @@ resource "aws_iam_role_policy" "fargate_log_router_firehose" {
 }
 
 resource "aws_eks_fargate_profile" "log_test" {
-  for_each = local.active_clusters
+  # One profile per (cluster, namespace) pair — see
+  # local.log_platform_cluster_namespaces. Onboarding an additional
+  # namespace/service on an already-onboarded cluster adds one profile here;
+  # all of them still feed the single shared Firehose/S3/Glue destination
+  # below.
+  for_each = local.log_platform_cluster_namespaces
 
   cluster_name           = each.value.cluster_name
   fargate_profile_name   = "log-test-${each.key}"
@@ -124,7 +150,7 @@ resource "aws_security_group" "log_test_endpoints" {
     # 2026-07-24 via `getent hosts` from a running EC2-node-group pod, which
     # resolved ECR to this endpoint's private IP. Without this rule, every
     # EC2-node-group workload (backend/agent/frontend/adapter — everything
-    # outside the payments Fargate profile) loses ECR access entirely on its
+    # outside the log-test Fargate profiles) loses ECR access entirely on its
     # next image pull, since DNS no longer has any path back to the public
     # ECR endpoint to fall back on.
     description     = "HTTPS from the EC2 node group (private DNS override affects the whole VPC, not just Fargate)"
@@ -287,14 +313,13 @@ resource "aws_kinesis_firehose_delivery_stream" "logs" {
 }
 
 # ── Glue Data Catalog + Athena — the query surface for this test harness ────
+# One database + one table, shared across every onboarded namespace/service
+# (see local.log_platform_cluster_namespaces above) — rows are distinguished
+# by the kubernetes.namespace_name/pod_name columns, not by separate tables.
 # Partition projection (not MSCK REPAIR / a Glue crawler) so partitions never
 # need a separate sync step — Athena computes them from the query's time
 # range directly, matching the "bounded time window" query discipline P15
 # is designed around.
-#
-# NOTE: validate the JSON SerDe column mapping and types against a real
-# ingested record before relying on this — the Fargate log router's exact
-# output shape hasn't been confirmed against a live pipeline yet.
 
 resource "aws_glue_catalog_database" "logs" {
   count = var.enable_log_platform_test ? 1 : 0
@@ -303,7 +328,7 @@ resource "aws_glue_catalog_database" "logs" {
 
 resource "aws_glue_catalog_table" "logs" {
   count         = var.enable_log_platform_test ? 1 : 0
-  name          = "payments_logs"
+  name          = local.glue_table_name
   database_name = aws_glue_catalog_database.logs[0].name
   table_type    = "EXTERNAL_TABLE"
 

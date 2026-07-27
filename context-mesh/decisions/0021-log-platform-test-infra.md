@@ -6,7 +6,10 @@ Accepted   ·   (date: 2026-07-21   ·   revised: 2026-07-22 — OpenSearch dest
 replaced with S3 + Athena; revised again 2026-07-25 — test harness graduates to
 a first-class production log source; revised again 2026-07-27 — Splunk/
 Elasticsearch/OpenSearch reframed as additional connector options alongside
-Athena, not a replacement priority above it; see "Revision" sections below)
+Athena, not a replacement priority above it; revised again 2026-07-27 —
+generalized from one hardcoded namespace to a list of onboarded namespaces per
+cluster, all sharing one common Glue database/table (renamed `payments_logs`
+→ `pod_logs`); see "Revision" sections below)
 
 ## Context
 
@@ -76,12 +79,16 @@ the same `LogSource` interface already designed in the P15 roadmap entry.
    touching the Fargate/ingest side.
 3. **Destination: S3 (Hive-partitioned by hour) + Athena, not an OpenSearch
    domain.** Revised 2026-07-22 — see "Revision" below.
-4. **Multi-cluster onboarding is registry + `for_each`, not a Terraform
-   module per cluster.** A Fargate profile is a pure EKS/AWS-API resource
+4. **Multi-cluster (and, since 2026-07-27, multi-namespace) onboarding is
+   registry + `for_each`, not a Terraform module per cluster or per
+   namespace.** A Fargate profile is a pure EKS/AWS-API resource
    (`aws_eks_fargate_profile`) — it needs no live connection to the target
-   cluster's Kubernetes API, so every cluster's profile + IAM permissions are
-   driven by one `for_each` over a `variable "clusters"` map. Onboarding a
-   new cluster is one map entry, not new HCL. The **one piece that can't work
+   cluster's Kubernetes API, so every (cluster, namespace) pair's profile +
+   IAM permissions are driven by one `for_each` over a flattened
+   `variable "clusters"` map (each cluster now lists `namespaces`, not a
+   single `namespace`). Onboarding a new cluster, or a new namespace/service
+   on an existing cluster, is one map entry, not new HCL. The **one piece
+   that can't work
    this way** is the `aws-observability` ConfigMap itself: `kubernetes`/`helm`
    provider *connections* are static in HCL, and Terraform has no supported
    way to loop a provider connection across N clusters' API servers the way
@@ -174,6 +181,42 @@ This makes the Go-side `LogSource` interface (see "consequences" below) more
 valuable, not less: with Athena as a peer connector rather than a stopgap,
 a real pluggable abstraction (vs. one bespoke agent-side function per
 backend) is worth doing sooner rather than only "when Splunk/ES land."
+
+## Revision (2026-07-27): generalized to multiple namespaces/services per cluster
+
+**Reconsidered again.** The pipeline shipped onboarding exactly one namespace
+(`payments`) per cluster — `var.clusters`' `namespace` field was a single
+string, and the Fargate profile's selector was tied to it directly. That
+was an accident of "only one test workload existed yet," not an intentional
+constraint, and it doesn't match the "common Glue database/table shared
+across services" framing above: the Firehose → S3 → Glue destination was
+already architecturally shared (one bucket, one database, one table, `count`
+not `for_each`); only the *namespace onboarding* step was artificially
+single-namespace.
+
+**Generalized:** `var.clusters`' `namespace: string` field is now
+`namespaces: list(string)`. `local.log_platform_cluster_namespaces` flattens
+every (cluster, namespace) pair from that list into its own map entry, and
+`aws_eks_fargate_profile.log_test` now does `for_each` over that flattened
+map — one Fargate profile per onboarded namespace, each with its own
+selector, all still feeding the single shared Firehose/S3/Athena/Glue
+resources below (still `count`, not `for_each` — there is exactly one
+pipeline, not one per namespace). Onboarding an additional service on an
+already-onboarded cluster is now "add a namespace to that cluster's list,"
+not new pipeline infrastructure.
+
+**Also renamed the Glue table** from `payments_logs` to `pod_logs`
+(`local.glue_table_name`) — the old name implied a payments-specific table
+when the table has always held (and now explicitly is designed to hold)
+every onboarded namespace's logs, distinguished per-row by the
+`kubernetes.namespace_name`/`pod_name` columns, not by table name. Backend
+config (`infra/kubernetes/agent.yaml`'s `ATHENA_TABLE`) updated to match.
+
+**Not yet applied live** — this is a Terraform code change only. Applying it
+will force-replace the existing `payments` Fargate profile, since EKS
+Fargate profile selectors are immutable (any selector change requires
+destroy + recreate, not an in-place update). Plan carefully before applying
+against the live `agentify-dev` cluster.
 
 ## Consequences
 

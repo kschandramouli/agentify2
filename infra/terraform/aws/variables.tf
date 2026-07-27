@@ -107,17 +107,22 @@ variable "enable_log_platform_test" {
   description = "Provisions the Fargate profile + Firehose + OpenSearch test log pipeline (ADR 0021). Keep false except during an active test session."
 }
 
-# Single source of truth for every cluster onboarded to the test log
-# pipeline. Onboarding a new cluster = add one entry here (see ADR 0021 for
-# why the Fargate profile scales via for_each but the aws-observability
-# ConfigMap does not).
+# Single source of truth for every cluster onboarded to the shared log
+# pipeline. Onboarding a new cluster = add one entry here; onboarding an
+# additional service/namespace on an already-onboarded cluster = add one
+# entry to that cluster's `namespaces` list (see ADR 0021 for why the Fargate
+# profile scales via for_each but the aws-observability ConfigMap does not).
+# Every namespace listed, across every cluster, streams into the SAME shared
+# Firehose -> S3 -> Glue destination (one database/table for the whole
+# pipeline) — namespace/pod identity is preserved per-row via the
+# kubernetes.namespace_name/pod_name columns, not a separate table per service.
 variable "clusters" {
   type = map(object({
     cluster_name = string
     subnet_ids   = list(string)
-    namespace    = string
+    namespaces   = list(string)
   }))
   default     = {}
-  description = "Clusters onboarded to the shared Firehose/OpenSearch log pipeline. Populated in main.tf for the cluster this root module manages; add entries for additional clusters here."
+  description = "Clusters onboarded to the shared Firehose/Glue log pipeline. Populated in main.tf for the cluster this root module manages; add entries for additional clusters, or additional namespaces on an existing cluster, here."
 }
 

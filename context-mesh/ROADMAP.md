@@ -799,12 +799,12 @@ stood up separately:**
   the diagnose call).
 
 **Test harness built 2026-07-21/22 ([ADR 0021](decisions/0021-log-platform-test-infra.md)):**
-Fargate profile (`payments` namespace) → Kinesis Firehose → **S3 (Hive-partitioned)
-+ Athena** — not OpenSearch. Originally scaffolding to validate the
-`LogSource` interface cheaply (Athena has zero idle cost, unlike a
-continuously-billed search-engine instance). See ADR 0021 for the full infra
-design (Fargate/cluster-onboarding registry, Glue partition projection,
-IRSA-based query access reusing the existing backend/agent roles).
+Fargate profile(s) → Kinesis Firehose → **S3 (Hive-partitioned) + Athena** —
+not OpenSearch. Originally scaffolding to validate the `LogSource` interface
+cheaply (Athena has zero idle cost, unlike a continuously-billed
+search-engine instance). See ADR 0021 for the full infra design
+(Fargate/cluster-onboarding registry, Glue partition projection, IRSA-based
+query access reusing the existing backend/agent roles).
 
 **Athena path shipped as the first live connector (2026-07-25, reframed
 2026-07-27 — revises ADR 0021):** `src/agent/k8fy/log_router.py`'s
@@ -820,6 +820,21 @@ own, already-populated log platform — as *additional* integration options
 alongside Athena, not a replacement for it. The goal is a flexible,
 multi-connector `get_logs()` that supports whichever platform(s) a
 deployment actually has.
+
+**Generalized to multiple namespaces/services per cluster (2026-07-27,
+revises ADR 0021):** onboarding was originally hardcoded to one namespace
+(`payments`) per cluster; the Firehose→S3→Glue destination was always meant
+to be shared across services (one bucket, one Glue database/table), only the
+namespace-onboarding step wasn't. `var.clusters`' `namespace: string` became
+`namespaces: list(string)`; each namespace gets its own `aws_eks_fargate_profile`
+selector via a flattened `for_each`, all still feeding the single shared
+Athena/Glue resources. The Glue table was also renamed `payments_logs` →
+`pod_logs` to stop implying a payments-specific table — rows are already
+distinguished per-service via the `kubernetes.namespace_name`/`pod_name`
+columns, not by table name. Onboarding an additional service is now "add a
+namespace to the cluster's list," not new pipeline infrastructure. **Not yet
+applied live** — Fargate profile selectors are immutable in EKS, so applying
+this will force-replace the existing `payments` profile.
 
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 
