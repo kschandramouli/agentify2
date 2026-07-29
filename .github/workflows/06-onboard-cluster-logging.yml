@@ -64,9 +64,21 @@ jobs:
           TF_VAR_github_token: "unused"
 
       - name: Verify
+        # Reads the same `clusters` Terraform output the onboarding script used
+        # (namespaces is a list — a cluster can have more than one onboarded
+        # namespace/service since ADR 0021's 2026-07-27 generalization), so
+        # this doesn't silently miss anything onboarded beyond 'payments'.
+        working-directory: infra/terraform/aws
         run: |
-          echo "=== payments namespace pods (look for a fargate-* node) ==="
-          kubectl get pods -n payments -o wide
+          NAMESPACES=$(terraform output -json clusters | jq -r ".\"${{ github.event.inputs.cluster_key }}\".namespaces[]")
+          if [ -z "$NAMESPACES" ]; then
+            echo "No namespaces found for cluster '${{ github.event.inputs.cluster_key }}' in the clusters output." >&2
+            exit 1
+          fi
+          for ns in $NAMESPACES; do
+            echo "=== namespace '$ns' pods (look for a fargate-* node) ==="
+            kubectl get pods -n "$ns" -o wide
+          done
 
       - name: Job summary
         if: always()
