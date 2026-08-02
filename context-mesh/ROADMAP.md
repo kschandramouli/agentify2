@@ -22,7 +22,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P2a** | Egress / redaction / data-governance gate | **✅ v1 done (2026-06-01: allowlist redaction live; in-region client = follow-up)** | [ADR 0007](decisions/0007-egress-data-governance.md) + [policy](policies/data-governance.md) |
 | **P2b** | Collapse storage to a single **Postgres** store (Redis removed; pgvector deferred) | **✅ v1 done (2026-06-02: current_state+events tables; validated on real PG via embedded-postgres)** | [ADR 0010](decisions/0010-postgres-single-store.md) + [storage-strategy](policies/storage-strategy.md) |
 | **P2c** | Multi-provider / per-tenant model routing (in-region: Bedrock/Vertex/Foundry) | Proposed — **deferred until a client requires it** | [ADR 0008](decisions/0008-multi-provider-model-routing.md); now per-**deployment** (P3a resolved) |
-| **P3a** | Multi-tenancy / isolation model | **✅ Resolved (ADR 0009): single-tenant per deployment — no in-app multi-tenancy** | [ADR 0009](decisions/0009-tenancy-single-tenant-per-deployment.md) |
+| **P3a** | Multi-tenancy / isolation model | **Superseded 2026-08-02 — ADR 0009's single-tenant-per-deployment call reversed by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md): row-level `tenant_id` + Postgres RLS** | [ADR 0009](decisions/0009-tenancy-single-tenant-per-deployment.md) (superseded), [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md) |
 | **P3b** | Audit / answer provenance (trace_id + structured `query.trace`) | **✅ v1 done (2026-06-03: trace_id returned + propagated; retrieval API deferred)** | [spec 004](specs/004-query-provenance.md) |
 | **P3c** | Self-observability (instrument the pipeline) | **✅ v1 done (2026-06-03: Prometheus /metrics — tier split, LLM, ingest, HTTP)** | [ADR 0011](decisions/0011-self-observability-metrics.md) |
 | **P4a** | Agentic root-cause correlation (deepen Tier 2) | **✅ v1 done (2026-06-04: `diagnose` intent + multi-signal fan-out → Tier-2 correlation; findings/likely_cause/severity; live-validated)** | [spec 005](specs/005-root-cause-correlation.md), [correlation](policies/correlation.md) |
@@ -41,8 +41,9 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P13** | Agentic use cases expansion | **Use Cases 1+2 done (2026-07-20)** — see below; 3/4/5 not started | [spec 011](specs/011-agentic-use-cases.md), [ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md) |
 | **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
-| **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
-| **P17** | Multi-cluster access for the live-diagnostics tools — IAM-assumed-role per cluster, replacing the in-cluster SA token (which only works for the cluster the agent pod happens to run in) | Proposed (2026-07-25) — see below | `src/agent/k8fy/k8s_client.py`, `src/agent/k8fy/live_diagnostics.py`, `infra/kubernetes/payments-test/serviceaccounts.yaml` |
+| **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
+| **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
+| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/agent/k8fy/service_topology.py` |
 
 ---
 
@@ -859,18 +860,33 @@ platform credentials (Splunk API tokens, Kafka SASL, Kinesis IAM) are more
 sensitive than the single dev-cluster bearer token this shortcut was written
 for.
 
-**Explicitly not in scope:** this is multi-**cluster**, not multi-**tenant** —
-[ADR 0009](decisions/0009-tenancy-single-tenant-per-deployment.md) (single-
-tenant per deployment, no `tenant_id`/RLS) stays as-is. If this ever needs to
-serve multiple *customers* (not just multiple clusters for one operator),
-that's a separate, larger decision revisiting ADR 0009 — don't let tenant-
-isolation machinery creep in under cover of this item.
+**Revised (2026-08-02):** the "separate, larger decision" flagged below has
+now been made — [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)
+supersedes ADR 0009 and adopts genuine multi-tenancy (`tenant_id` + Postgres
+RLS). `Integration` now also gains `tenant_id`, nested *above* `Namespaces` —
+a tenant (customer/org) can own a fleet of multiple clusters, each still
+represented by its own `Integration` row. The namespace→cluster routing work
+below is unchanged in shape, just additionally scoped by tenant.
+
+**Original framing (2026-07-21), preserved for context — since superseded by
+ADR 0022:** this was multi-**cluster**, not multi-**tenant** — ADR 0009
+(single-tenant per deployment, no `tenant_id`/RLS) stayed as-is, and serving
+multiple *customers* (not just multiple clusters for one operator) was
+explicitly called out as a separate, larger decision revisiting ADR 0009 —
+"don't let tenant-isolation machinery creep in under cover of this item."
 
 ---
 
-## P17 — Multi-cluster access for the live-diagnostics tools (proposed 2026-07-25)
+## P17 — Multi-cluster access for the live-diagnostics tools (proposed 2026-07-25, superseded 2026-08-02)
 
-**Context:** the chat live-diagnostics console (`live_list_pods`,
+**Superseded by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md).** The
+recommendation below (one central agent, `sts:AssumeRole` into a per-cluster
+IAM role) was never built ("not started") and is now replaced rather than
+implemented — see [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17) for
+the design that replaces it. Kept below, unmodified, for context on why the
+centralized-pull shape was rejected.
+
+**Context (2026-07-25):** the chat live-diagnostics console (`live_list_pods`,
 `live_get_pod_logs`, `live_get_events`, `live_describe_pod` —
 `src/agent/k8fy/live_diagnostics.py`) authenticates to the Kubernetes API via
 the pod's own mounted ServiceAccount token (`src/agent/k8fy/k8s_client.py`),
@@ -881,23 +897,139 @@ physically running inside the cluster it's querying, via RBAC
 scoped to read-only pods/logs/events in that one cluster. There is no
 "in-cluster" shortcut once a second cluster is in play.
 
-**Recommendation:** don't centralize long-lived credentials for every cluster
-in one agent. Given this stack is all-EKS/AWS already (IRSA everywhere, OIDC
-trust for GitHub Actions), the fitting extension is: one base IAM role for
-the agent, allowed to `sts:AssumeRole` into a separate, per-cluster IAM role —
-one per onboarded cluster, added the same way P15's log-platform work already
-onboards clusters (a `clusters` map/registry, "add one entry," not a new
-Terraform module per cluster). Each per-cluster IAM role maps via EKS access
-entries to the same narrowly-scoped `agent-live-diagnostics`-style RBAC Role
-already built, in that cluster. This gets AWS-native short-lived tokens (STS,
-~1hr, auto-rotating) instead of static SA tokens, and a central, auditable
-place (CloudTrail `AssumeRole` events) to see and revoke per-cluster access —
-without inventing a bespoke token broker.
+**Recommendation (2026-07-25, superseded):** don't centralize long-lived
+credentials for every cluster in one agent. Given this stack is all-EKS/AWS
+already (IRSA everywhere, OIDC trust for GitHub Actions), the fitting
+extension is: one base IAM role for the agent, allowed to `sts:AssumeRole`
+into a separate, per-cluster IAM role — one per onboarded cluster, added the
+same way P15's log-platform work already onboards clusters (a `clusters`
+map/registry, "add one entry," not a new Terraform module per cluster). Each
+per-cluster IAM role maps via EKS access entries to the same narrowly-scoped
+`agent-live-diagnostics`-style RBAC Role already built, in that cluster.
+This gets AWS-native short-lived tokens (STS, ~1hr, auto-rotating) instead of
+static SA tokens, and a central, auditable place (CloudTrail `AssumeRole`
+events) to see and revoke per-cluster access — without inventing a bespoke
+token broker.
 
-**Tradeoff:** this is EKS-specific. If a non-EKS or non-AWS cluster ever
-joins the fleet, it needs its own onboarding path, not this one.
+**Why superseded, not just extended:** this design still requires the central
+agent to hold *some* standing credential (a base IAM role able to assume into
+every onboarded cluster's role) — a large blast radius if that base role or
+the agent process is ever compromised, and it doesn't change once multiple
+*tenants'* clusters are in the fleet (a compromised central agent could
+`AssumeRole` into ANY tenant's cluster role). P18's deterministic per-cluster
+collector needs no such standing credential at all: each cluster only trusts
+its own local RBAC and one narrow, tenant-scoped push/callback credential —
+compromising one collector exposes only that one cluster, never the fleet.
 
-**Not started** — this is a design recommendation, not yet a plan or code.
+**Tradeoff (still true under P18):** this stack's per-cluster piece is
+EKS-specific. A non-EKS or non-AWS cluster joining the fleet still needs its
+own collector variant, not the one described here — this tradeoff doesn't go
+away with the redesign, it just moves from "the central agent's IAM role"
+to "the collector's own auth mechanism."
+
+---
+
+## P18 — Deterministic per-cluster fleet collector + multi-tenant Hub ingest (proposed 2026-08-02, revised 2026-08-02, replaces P17)
+
+**Context:** [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md) decided
+*that* the fleet model inverts to push-based, multi-tenant reporting, and
+that the collector must genuinely work across every K8s distribution, not
+just EKS. This item is the concrete *what to build*.
+
+**Shape:**
+- **Collector (per cluster, deterministic, not agentic, one long-running
+  Deployment):** no Claude/LLM calls, one process per onboarded cluster —
+  not split into a separate CronJob + API server, so there's one manifest,
+  one RBAC ServiceAccount, one thing to upgrade and monitor per cluster. An
+  internal ticker drives periodic mining+push; the same process holds the
+  outbound persistent connection (below) for on-demand requests. A
+  CronJob-only variant (periodic push, no live drill-down) is a valid
+  simpler phase-1 if drill-down isn't needed yet.
+  - **Log source: the standard K8s pod-logs API by default** (portable
+    across every distribution), **not** Athena/Glue — Athena stays an
+    *optional* per-cluster enhancement for fleet members that happen to
+    have it, never the required path (ADR 0022 Decision #6).
+  - Reuses `service_topology.py`'s existing extraction logic
+    (`extract_service_mentions`) as-is against whichever log source this
+    particular cluster actually has — the mining logic doesn't get
+    rebuilt, just re-hosted with a portable default input.
+  - Authenticates to its own cluster only via the existing
+    `agent-live-diagnostics`-style RBAC Role (already built, read-only
+    pods/logs/events) — no new in-cluster permissions needed, and no
+    cloud-specific IAM assumption for local reads (ADR 0022 Decision #6's
+    portability checklist).
+- **Ingest API (Hub, tenant *and cluster* scoped):** extends the
+  `POST`/`GET /api/service-dependencies` endpoints already built (P15
+  connector phase, service-topology mining) to require and filter by both
+  `tenant_id` and `cluster_id` (ADR 0022 Decision #1/#2/#3) — same
+  handlers, now behind the shared tenant-resolution middleware instead of
+  open namespace-only scoping. Natural next signals to add to the same
+  ingest shape: namespace/service/deployment inventory, ingress/entry-point
+  mapping, health/cert/metrics summaries, RBAC/NetworkPolicy posture — see
+  "Use cases unlocked" below.
+- **Connectivity: outbound-only from the collector, always** (ADR 0022
+  Decision #7, corrected from an earlier inbound-callback draft). The
+  collector dials out to the Hub and holds the connection open; the Hub
+  never dials into a cluster. Both periodic push and on-demand "fetch X
+  now" requests multiplex over that one connection.
+- **Credential model:** one bearer credential (or mTLS cert) per (tenant,
+  cluster) pair — extends `Integration.Token`'s existing shape. The
+  mechanism is cloud-agnostic (works identically on any distribution); how
+  the Hub stores/rotates its own copy is a Hub-side detail (ADR 0022
+  Decision #5), not a collector requirement.
+
+**Use cases unlocked, roughly in build order:**
+1. **Namespace/Service/Deployment inventory** — portable via the core K8s
+   API (`Services`, `Deployments`/`StatefulSets`/`DaemonSets` list calls).
+   Feeds `Integration.Namespaces` automatically — auto-discovery instead of
+   the manual entry `IntegrationsPanel.tsx` currently requires, closing the
+   gap flagged when that form's namespace field was made editable earlier.
+2. **Service-dependency mining** — already built (`service_topology.py`),
+   now also runnable standalone off the portable pod-logs API per-cluster,
+   not just from inside the monolithic agent process.
+3. **Ingress/entry-point mapping** — `Ingress`/`Gateway`+`HTTPRoute`/
+   OpenShift `Route`, whichever exists — "where does traffic into this
+   cluster actually originate," directly relevant to the traffic-flow
+   question that started this whole thread.
+4. **Cross-cluster dependency edges** — once `service_dependencies` carries
+   `cluster_id`, the *existing* `get_service_dependencies` chat tool and
+   `DiagnoseSkill` prefetch need **no code change** to start surfacing
+   cross-cluster edges — they just start appearing in the same query once
+   more than one of a tenant's clusters has pushed data. `DiagnoseSkill`'s
+   prompt guidance (already written to consider upstream/downstream
+   services) extends naturally to "downstream service lives in a different
+   cluster," not just a different namespace in the same one.
+5. **Fleet-wide health/capacity/version snapshots** — extends P3c
+   (self-observability) from one pipeline to the whole fleet; feeds a
+   future fleet dashboard without the Hub needing live per-cluster access
+   for routine polling.
+6. **Local anomaly pre-filtering for P4c** — the investigation-on-anomaly
+   loop's deterministic sweep logic can run *in* the collector (cheap, no
+   LLM), pushing only genuine candidates to the Hub, which then runs the
+   existing LLM-backed diagnose/webhook flow centrally. Distributes the
+   polling load across the fleet instead of one central process polling
+   every cluster's metrics on a timer.
+7. **Cross-cluster blast-radius checks for P13** — Deployment Guardian can
+   ask "does anything in another of this tenant's clusters depend on this
+   service" before approving a risky rollout, using the same cross-cluster
+   edges from use case #4 — again, no new tool, just richer data reaching
+   an existing one.
+8. **Config/RBAC/NetworkPolicy posture** — a lightweight compliance/
+   assessment signal (does this cluster have NetworkPolicies at all, what
+   does its RBAC surface look like) — a bigger scope increase than the
+   others (new signal category), tracked here but not assumed to ship with
+   the first version of the collector.
+9. **On-demand live drill-down** — via the corrected outbound-connection
+   mechanism above; "show me live state in cluster B right now" from a
+   chat session, without a standing central credential for the fleet.
+
+**Explicitly out of scope for this item:** ADR 0008/0007's coupled-decision
+follow-ups (per-tenant model routing/BYOK, per-tenant redaction policy) —
+tracked separately per ADR 0022 Decision #8; the k8fy-adapter/collector
+consolidation — tracked separately per ADR 0022 Decision #9. Neither is
+solved here.
+
+**Not started** — this is a design item, not yet a plan or code.
 
 ---
 

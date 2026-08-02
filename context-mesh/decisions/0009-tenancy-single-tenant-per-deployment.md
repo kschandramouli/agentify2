@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted · 2026-06-02
+Superseded by [ADR 0022](0022-multi-tenant-fleet-hub.md) · (date: 2026-06-02,
+superseded: 2026-08-02) — the go-to-market shifted to a shared multi-tenant
+Fleet Hub, exactly the trigger condition named below in "Revisit if." Kept
+here, unmodified, as the historical record of why single-tenant was the
+right call at the time — read ADR 0022 for the current decision.
 
 ## Context
 

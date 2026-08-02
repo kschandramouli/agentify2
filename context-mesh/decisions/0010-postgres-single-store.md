@@ -2,7 +2,18 @@
 
 ## Status
 
-Accepted · 2026-06-02
+Accepted · 2026-06-02 · Amended 2026-08-02 — see note below; the single-store
+decision itself stands, but one of its two supporting facts no longer holds.
+
+## Context
+
+**Amendment (2026-08-02):** the "single-tenant" fact below was reversed by
+[ADR 0022](0022-multi-tenant-fleet-hub.md) — the store is now multi-tenant
+(`tenant_id` + Postgres RLS on the per-customer tables). That does not
+reopen *this* ADR's actual decision (still one Postgres instance, no
+multi-store split) — it only means "a plain single-tenant schema suffices"
+is no longer true; the schema now carries tenant-scoping on top of the same
+single store. Kept below unmodified for the historical rationale.
 
 ## Context
 
