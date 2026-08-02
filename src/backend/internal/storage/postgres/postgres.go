@@ -18,6 +18,12 @@ import (
 // Stripping them recovers the deployment name (e.g. payment-worker-68795899ff-kngf7 → payment-worker).
 var k8sPodSuffix = regexp.MustCompile(`-[a-z0-9]{6,12}-[a-z0-9]{5}$`)
 
+// DefaultTenantID is the tenant every row created before multi-tenancy
+// (ADR 0022) existed is migrated onto — today's single deployment becomes
+// "tenant #1". Referenced by both the ALTER TABLE ... DEFAULT migrations in
+// initSchema and anything that needs to compare against "the legacy tenant."
+const DefaultTenantID = "00000000-0000-0000-0000-000000000001"
+
 // Client wraps a PostgreSQL connection. A single Client (one connection pool)
 // backs both store families for the MVP (see ADR 0010):
 //   - the append-only "relational" store (events/certs) — Client itself,
@@ -249,6 +255,33 @@ func (c *Client) initSchema(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_service_deps_namespace ON service_dependencies(namespace);
 
+	-- Multi-tenancy (ADR 0022, reverses ADR 0009): tenant_id + cluster_id on
+	-- every table holding per-customer operational data. Existing rows
+	-- migrate onto DefaultTenantID ("tenant #1") automatically via the
+	-- column default; cluster_id has no default (NULL) — unlike tenant,
+	-- there's no obvious "default cluster" for today's single deployment to
+	-- collapse onto. model_pricing is deliberately excluded — shared
+	-- reference data, identical for every tenant. current_state/events are
+	-- deliberately NOT touched here — they're generic map-based stores with
+	-- no per-row Go struct; giving them tenant_id is a query-retrofit-phase
+	-- decision, not a schema-only one.
+	ALTER TABLE IF EXISTS integrations          ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS integrations          ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS chat_sessions         ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS chat_sessions         ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS remediation_proposals ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS remediation_proposals ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS incident_embeddings   ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS incident_embeddings   ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS traces                ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS traces                ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS current_state         ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS current_state         ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS events                ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS events                ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+	ALTER TABLE IF EXISTS service_dependencies  ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+	ALTER TABLE IF EXISTS service_dependencies  ADD COLUMN IF NOT EXISTS cluster_id TEXT;
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -456,6 +489,8 @@ type TraceRecord struct {
 	CacheCreationInputTokens int64
 	CacheReadInputTokens     int64
 	EstimatedCostUSD         float64
+	TenantID                 string
+	ClusterID                string
 }
 
 // TracesSummary holds aggregated statistics derived from the traces table.
@@ -498,7 +533,8 @@ const traceSelectCols = `
 	       COALESCE(started_at, created_at) AS started_at, created_at,
 	       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
 	       COALESCE(cache_creation_input_tokens, 0), COALESCE(cache_read_input_tokens, 0),
-	       COALESCE(estimated_cost_usd, 0)
+	       COALESCE(estimated_cost_usd, 0),
+	       tenant_id, COALESCE(cluster_id, '')
 	FROM traces`
 
 func scanTrace(row interface{ Scan(...any) error }) (TraceRecord, error) {
@@ -510,7 +546,8 @@ func scanTrace(row interface{ Scan(...any) error }) (TraceRecord, error) {
 		&t.StartedAt, &t.CreatedAt,
 		&t.InputTokens, &t.OutputTokens,
 		&t.CacheCreationInputTokens, &t.CacheReadInputTokens,
-		&t.EstimatedCostUSD)
+		&t.EstimatedCostUSD,
+		&t.TenantID, &t.ClusterID)
 	if err != nil {
 		return t, err
 	}
@@ -628,6 +665,8 @@ type Integration struct {
 	Namespaces []string
 	Status     string
 	Token      string
+	TenantID   string
+	ClusterID  string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -635,7 +674,7 @@ type Integration struct {
 // ListIntegrations returns all integrations ordered by creation time.
 func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list integrations: %w", err)
@@ -646,7 +685,7 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	for rows.Next() {
 		var in Integration
 		var nsJSON []byte
-		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CreatedAt, &in.UpdatedAt); err != nil {
+		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan integration: %w", err)
 		}
 		if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
@@ -662,9 +701,9 @@ func (c *Client) GetIntegration(ctx context.Context, id string) (*Integration, e
 	var in Integration
 	var nsJSON []byte
 	err := c.db.QueryRowContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations WHERE id = $1`, id).
-		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CreatedAt, &in.UpdatedAt)
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -958,6 +997,8 @@ type ChatSession struct {
 	Messages         []ChatMessage  `json:"messages"`
 	ContextCache     map[string]any `json:"context_cache"`
 	ContextFetchedAt *time.Time     `json:"context_fetched_at,omitempty"`
+	TenantID         string         `json:"tenant_id"`
+	ClusterID        string         `json:"cluster_id,omitempty"`
 	CreatedAt        time.Time      `json:"created_at"`
 	LastActive       time.Time      `json:"last_active"`
 	ExpiresAt        time.Time      `json:"expires_at"`
@@ -979,7 +1020,7 @@ func (c *Client) CreateChatSession(ctx context.Context, s *ChatSession) error {
 func (c *Client) GetChatSession(ctx context.Context, id string) (*ChatSession, error) {
 	row := c.db.QueryRowContext(ctx,
 		`SELECT id, title, namespace, service, messages, context_cache,
-		        context_fetched_at, created_at, last_active, expires_at
+		        context_fetched_at, tenant_id, COALESCE(cluster_id, ''), created_at, last_active, expires_at
 		 FROM chat_sessions WHERE id = $1`, id)
 	return scanChatSession(row)
 }
@@ -1004,7 +1045,7 @@ func (c *Client) ListChatSessions(ctx context.Context, limit int) ([]ChatSession
 	}
 	rows, err := c.db.QueryContext(ctx,
 		`SELECT id, title, namespace, service, messages, context_cache,
-		        context_fetched_at, created_at, last_active, expires_at
+		        context_fetched_at, tenant_id, COALESCE(cluster_id, ''), created_at, last_active, expires_at
 		 FROM chat_sessions ORDER BY last_active DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -1033,6 +1074,7 @@ func scanChatSession(row interface{ Scan(...any) error }) (*ChatSession, error) 
 	err := row.Scan(
 		&s.ID, &s.Title, &s.Namespace, &s.Service,
 		&msgsJSON, &cacheJSON, &s.ContextFetchedAt,
+		&s.TenantID, &s.ClusterID,
 		&s.CreatedAt, &s.LastActive, &s.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -1059,6 +1101,8 @@ type IncidentEmbedding struct {
 	Service   string
 	Summary   string
 	Embedding []float32 // nil when embed service was unavailable
+	TenantID  string
+	ClusterID string
 }
 
 // InsertIncidentEmbedding upserts an incident embedding row. The embedding
@@ -1118,7 +1162,7 @@ func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service st
 		}
 		sb.WriteByte(']')
 		rows, err = c.db.QueryContext(ctx, `
-			SELECT id, trace_id, namespace, service, summary
+			SELECT id, trace_id, namespace, service, summary, tenant_id, COALESCE(cluster_id, '')
 			FROM incident_embeddings
 			WHERE embedding IS NOT NULL
 			ORDER BY embedding <-> $1::vector
@@ -1127,7 +1171,7 @@ func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service st
 	} else {
 		// Fallback: most recent incidents matching namespace/service.
 		rows, err = c.db.QueryContext(ctx, `
-			SELECT id, trace_id, namespace, service, summary
+			SELECT id, trace_id, namespace, service, summary, tenant_id, COALESCE(cluster_id, '')
 			FROM incident_embeddings
 			WHERE ($1 = '' OR namespace = $1)
 			  AND ($2 = '' OR service  = $2)
@@ -1143,7 +1187,7 @@ func (c *Client) FindSimilarIncidents(ctx context.Context, namespace, service st
 	var result []IncidentEmbedding
 	for rows.Next() {
 		var e IncidentEmbedding
-		if serr := rows.Scan(&e.ID, &e.TraceID, &e.Namespace, &e.Service, &e.Summary); serr != nil {
+		if serr := rows.Scan(&e.ID, &e.TraceID, &e.Namespace, &e.Service, &e.Summary, &e.TenantID, &e.ClusterID); serr != nil {
 			continue
 		}
 		result = append(result, e)
@@ -1174,6 +1218,8 @@ type RemediationProposal struct {
 	ExecutedAt     *time.Time
 	Result         map[string]interface{}
 	Error          string
+	TenantID       string
+	ClusterID      string
 }
 
 // CreateRemediationProposal inserts a new pending proposal. p.ID must be set by the caller.
@@ -1199,7 +1245,8 @@ func (c *Client) CreateRemediationProposal(ctx context.Context, p *RemediationPr
 const remediationSelectCols = `
 	SELECT id, trace_id, use_case, namespace, service, proposed_action,
 	       action_params, analysis, status, source_event_id,
-	       created_at, expires_at, decided_at, decided_by, executed_at, result, error
+	       created_at, expires_at, decided_at, decided_by, executed_at, result, error,
+	       tenant_id, COALESCE(cluster_id, '')
 	FROM remediation_proposals`
 
 func scanRemediationProposal(row interface{ Scan(...any) error }) (*RemediationProposal, error) {
@@ -1208,7 +1255,8 @@ func scanRemediationProposal(row interface{ Scan(...any) error }) (*RemediationP
 	err := row.Scan(
 		&p.ID, &p.TraceID, &p.UseCase, &p.Namespace, &p.Service, &p.ProposedAction,
 		&paramsJSON, &analysisJSON, &p.Status, &p.SourceEventID,
-		&p.CreatedAt, &p.ExpiresAt, &p.DecidedAt, &p.DecidedBy, &p.ExecutedAt, &resultJSON, &p.Error)
+		&p.CreatedAt, &p.ExpiresAt, &p.DecidedAt, &p.DecidedBy, &p.ExecutedAt, &resultJSON, &p.Error,
+		&p.TenantID, &p.ClusterID)
 	if err != nil {
 		return nil, err
 	}
@@ -1363,6 +1411,8 @@ type ServiceDependency struct {
 	EvidenceCount int       `json:"evidence_count"`
 	FirstSeen     time.Time `json:"first_seen"`
 	LastSeen      time.Time `json:"last_seen"`
+	TenantID      string    `json:"tenant_id"`
+	ClusterID     string    `json:"cluster_id,omitempty"`
 }
 
 // UpsertServiceDependency records one piece of evidence for a from->to edge —
@@ -1383,7 +1433,8 @@ func (c *Client) UpsertServiceDependency(ctx context.Context, id, namespace, fro
 // ListServiceDependencies returns every mined edge for one namespace, most-evidenced first.
 func (c *Client) ListServiceDependencies(ctx context.Context, namespace string) ([]ServiceDependency, error) {
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT id, namespace, from_service, to_service, evidence_count, first_seen, last_seen
+		SELECT id, namespace, from_service, to_service, evidence_count, first_seen, last_seen,
+		       tenant_id, COALESCE(cluster_id, '')
 		FROM service_dependencies WHERE namespace = $1 ORDER BY evidence_count DESC`, namespace)
 	if err != nil {
 		return nil, err
@@ -1394,7 +1445,7 @@ func (c *Client) ListServiceDependencies(ctx context.Context, namespace string) 
 	for rows.Next() {
 		var d ServiceDependency
 		if err := rows.Scan(&d.ID, &d.Namespace, &d.FromService, &d.ToService,
-			&d.EvidenceCount, &d.FirstSeen, &d.LastSeen); err != nil {
+			&d.EvidenceCount, &d.FirstSeen, &d.LastSeen, &d.TenantID, &d.ClusterID); err != nil {
 			return nil, err
 		}
 		result = append(result, d)

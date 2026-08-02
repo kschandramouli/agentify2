@@ -102,6 +102,33 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("event payload should decode to a map, got %T", rows[0]["payload"])
 		}
 	})
+
+	t.Run("multi-tenancy migration: existing insert paths default tenant_id, leave cluster_id empty", func(t *testing.T) {
+		// ADR 0022, phase 1 (schema only): CreateIntegration doesn't reference
+		// tenant_id/cluster_id at all, so Postgres must apply the column
+		// default/NULL on its own — this is the guarantee the whole
+		// schema-only phase rests on (no existing INSERT path changed).
+		in := &Integration{
+			ID:         uuid.New().String(),
+			Name:       "tenancy-test",
+			AdapterURL: "http://example.invalid",
+			Namespaces: []string{},
+			Status:     "inactive",
+		}
+		if err := client.CreateIntegration(ctx, in); err != nil {
+			t.Fatalf("create integration: %v", err)
+		}
+		got, err := client.GetIntegration(ctx, in.ID)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if got.TenantID != DefaultTenantID {
+			t.Errorf("tenant_id: want default %q, got %q", DefaultTenantID, got.TenantID)
+		}
+		if got.ClusterID != "" {
+			t.Errorf("cluster_id: want empty (NULL), got %q", got.ClusterID)
+		}
+	})
 }
 
 func TestEventsWindowedQuery(t *testing.T) {
