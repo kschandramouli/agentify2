@@ -9,6 +9,7 @@ import httpx
 from k8fy.live_diagnostics import LIVE_DIAGNOSTIC_TOOLS
 from k8fy import live_diagnostics
 from k8fy.log_router import get_logs as _get_logs
+from k8fy.service_topology import fetch_service_dependencies as _fetch_service_dependencies
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +313,26 @@ TOOLS = [
             "required": ["namespace", "service", "description"],
         },
     },
+    # ── Service topology (mined from logs, see service_topology.py) ──────────
+    {
+        "name": "get_service_dependencies",
+        "description": (
+            "Get the known service-call graph for a namespace — which services "
+            "have been observed (via log text) calling which other services. "
+            "Use this when a service's own signals don't fully explain a symptom: "
+            "check for upstream services that might be causing it, or downstream "
+            "services that might be the actual root cause. Best-effort and often "
+            "sparse — an empty result means no evidence has been mined yet, not "
+            "that the service has no dependencies."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace (e.g. 'payments')."},
+            },
+            "required": ["namespace"],
+        },
+    },
 ]
 
 # ── Vault tool implementations ────────────────────────────────────────────────
@@ -598,6 +619,12 @@ async def process_tool_call(
             tail_lines=int(arguments.get("tail_lines", 200)),
             previous=bool(arguments.get("previous", False)),
         )
+
+    # get_service_dependencies: read-only — the graph mined from logs, see
+    # service_topology.py.
+    if tool_name == "get_service_dependencies":
+        deps = await _fetch_service_dependencies(arguments.get("namespace", ""), backend_url)
+        return {"namespace": arguments.get("namespace", ""), "dependencies": deps}
 
     url = f"{backend_url.rstrip('/')}/api/agent/fetch"
     payload = {"tool": tool_name, "args": arguments}

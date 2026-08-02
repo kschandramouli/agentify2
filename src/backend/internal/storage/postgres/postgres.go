@@ -232,6 +232,23 @@ func (c *Client) initSchema(ctx context.Context) error {
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_remediation_source_event
 		ON remediation_proposals(source_event_id) WHERE source_event_id != '';
 
+	-- Service dependency edges, mined from log text (agent-side, see
+	-- k8fy/service_topology.py) — structured facts extracted from logs, not
+	-- raw log text itself, so this doesn't revisit ADR 0014's "logs are
+	-- ephemeral, never persisted" (same category of exception as
+	-- k8fy.events/k8fy.metrics/incident_embeddings above).
+	CREATE TABLE IF NOT EXISTS service_dependencies (
+		id             TEXT PRIMARY KEY,
+		namespace      TEXT NOT NULL,
+		from_service   TEXT NOT NULL,
+		to_service     TEXT NOT NULL,
+		evidence_count INT NOT NULL DEFAULT 1,
+		first_seen     TIMESTAMP DEFAULT NOW(),
+		last_seen      TIMESTAMP DEFAULT NOW(),
+		UNIQUE (namespace, from_service, to_service)
+	);
+	CREATE INDEX IF NOT EXISTS idx_service_deps_namespace ON service_dependencies(namespace);
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -1332,4 +1349,55 @@ func (c *Client) UpsertModelPricing(ctx context.Context, p *ModelPricing) error 
 		p.ModelID, p.DisplayName, p.InputPerMTok, p.OutputPerMTok,
 		p.CacheWritePerMTok, p.CacheReadPerMTok)
 	return err
+}
+
+// ── Service dependencies (mined from log text, see k8fy/service_topology.py) ─
+
+// ServiceDependency is one directed edge in the mined service-call graph:
+// from_service was observed (via log text) calling to_service, within namespace.
+type ServiceDependency struct {
+	ID            string    `json:"id"`
+	Namespace     string    `json:"namespace"`
+	FromService   string    `json:"from_service"`
+	ToService     string    `json:"to_service"`
+	EvidenceCount int       `json:"evidence_count"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+}
+
+// UpsertServiceDependency records one piece of evidence for a from->to edge —
+// increments evidence_count and bumps last_seen if the edge is already known.
+// id must be set by the caller (matches CreateIntegration's convention) —
+// only used on first insert; ON CONFLICT is keyed by (namespace, from, to).
+func (c *Client) UpsertServiceDependency(ctx context.Context, id, namespace, fromService, toService string) error {
+	_, err := c.db.ExecContext(ctx, `
+		INSERT INTO service_dependencies (id, namespace, from_service, to_service, evidence_count, first_seen, last_seen)
+		VALUES ($1, $2, $3, $4, 1, NOW(), NOW())
+		ON CONFLICT (namespace, from_service, to_service) DO UPDATE SET
+		  evidence_count = service_dependencies.evidence_count + 1,
+		  last_seen      = NOW()`,
+		id, namespace, fromService, toService)
+	return err
+}
+
+// ListServiceDependencies returns every mined edge for one namespace, most-evidenced first.
+func (c *Client) ListServiceDependencies(ctx context.Context, namespace string) ([]ServiceDependency, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT id, namespace, from_service, to_service, evidence_count, first_seen, last_seen
+		FROM service_dependencies WHERE namespace = $1 ORDER BY evidence_count DESC`, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []ServiceDependency
+	for rows.Next() {
+		var d ServiceDependency
+		if err := rows.Scan(&d.ID, &d.Namespace, &d.FromService, &d.ToService,
+			&d.EvidenceCount, &d.FirstSeen, &d.LastSeen); err != nil {
+			return nil, err
+		}
+		result = append(result, d)
+	}
+	return result, rows.Err()
 }

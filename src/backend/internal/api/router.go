@@ -62,6 +62,12 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// Semantic memory: similar past incidents retrieval (P8 — called by the Python agent's get_similar_incidents tool)
 	mux.HandleFunc("GET /api/incidents/similar", h.HandleSimilarIncidents)
 
+	// Service dependency graph mined from log text (see k8fy/service_topology.py):
+	// upsert one piece of evidence, or list a namespace's known edges. Called by
+	// DiagnoseSkill's prefetch and the get_service_dependencies chat tool.
+	mux.HandleFunc("POST /api/service-dependencies", h.HandleServiceDependencyUpsert)
+	mux.HandleFunc("GET /api/service-dependencies", h.HandleServiceDependencyList)
+
 	// Admin: on-demand cert renewal — issues from Vault PKI + updates K8s Secret
 	mux.HandleFunc("POST /admin/certs/renew", h.HandleCertRenew)
 

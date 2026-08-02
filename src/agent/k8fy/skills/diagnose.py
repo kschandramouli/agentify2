@@ -10,9 +10,18 @@ Pre-fetch sequence (all parallel via asyncio.gather):
   4. get_change_history(namespace, service_name)        — deploy/rollout correlation
   5. get_pod_logs(pod_id, namespace, previous=True)     — only for crashing pods
      (restarts >= _CRASH_RESTART_THRESHOLD or phase in _CRASH_PHASES)
+  6. get_service_dependencies                           — the already-mined graph
+     for this namespace (service_topology.py), so Claude can consider upstream/
+     downstream services, not just the one being asked about
 
-Cost: (4 + crashing-pod-count) parallel backend fetches + exactly 1 Opus call.
-Previously: advisor/executor loop with 2–7 tool iterations (unpredictable cost).
+After the fetch, up to _MAX_TOPOLOGY_PODS pods' logs (not conditioned on crash
+state — routine logs mention routine downstream calls more than crash traces
+do) are mined for service-dependency evidence (service_topology.py) and
+recorded for next time. Best-effort, never blocks or fails the diagnosis.
+
+Cost: (4 + crashing-pod-count + up to _MAX_TOPOLOGY_PODS) parallel backend
+fetches + exactly 1 Opus call. Previously: advisor/executor loop with 2–7
+tool iterations (unpredictable cost).
 """
 
 import asyncio
@@ -22,6 +31,7 @@ from typing import Any, Dict, List
 from k8fy.agent import ADVISOR_MODEL, DIAGNOSE_REASONING_SCHEMA, K8fyAgent
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import DIAGNOSE_PROMPT
+from k8fy.service_topology import fetch_service_dependencies, mine_service_dependencies
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
 
@@ -50,6 +60,11 @@ _MAX_EVENT_ROWS     = 20    # ~600 tokens per pod events list
 _MAX_METRICS_ROWS   = 50    # ~1 500 tokens for restart time-series
 _MAX_CHANGE_ROWS    = 10    # ~800 tokens for deploy/rollout history
 _MAX_SIMILAR        = 3     # how many past incidents to surface (each ~200 tokens)
+
+# Service-topology mining (service_topology.py) — capped low since each pod
+# costs one extra get_logs() call (1-3s when it hits Athena); this is a
+# best-effort side channel, not a core signal, so it stays cheap.
+_MAX_TOPOLOGY_PODS = 2
 
 
 class DiagnoseSkill(K8fyAgent):
@@ -137,6 +152,22 @@ class DiagnoseSkill(K8fyAgent):
                 },
             )
 
+        # 7. Service-dependency graph — the already-mined edges for this
+        #    namespace (service_topology.py), so Claude can consider upstream/
+        #    downstream services, not just the one being asked about.
+        tasks["service_dependencies"] = fetch_service_dependencies(namespace, self.backend_url)
+
+        # 8. Topology-mining log fetch — a few GENERAL (not crash-only) pods'
+        #    logs, since routine operation logs mention routine downstream
+        #    calls more than crash traces do. Mined for service-dependency
+        #    evidence below, after the gather resolves.
+        topology_pod_ids = _all_pod_ids(data)[:_MAX_TOPOLOGY_PODS]
+        for pod_id in topology_pod_ids:
+            tasks[f"topology_logs.{pod_id}"] = self._fetch(
+                "get_logs",
+                {"namespace": namespace, "pod": pod_id},
+            )
+
         if not tasks:
             return {}
 
@@ -147,6 +178,17 @@ class DiagnoseSkill(K8fyAgent):
                 logger.warning("diagnose prefetch failed for %s: %s", key, result)
             else:
                 prefetched[key] = result
+
+        # Mine the just-fetched topology logs for service-dependency evidence.
+        # Best-effort side channel — mine_service_dependencies() never raises,
+        # so this never affects the diagnosis itself.
+        if service_name:
+            for pod_id in topology_pod_ids:
+                log_result = prefetched.get(f"topology_logs.{pod_id}")
+                log_text = log_result.get("logs", "") if isinstance(log_result, dict) else ""
+                if log_text:
+                    await mine_service_dependencies(namespace, service_name, log_text, self.backend_url)
+
         return prefetched
 
 

@@ -34,11 +34,12 @@ type Handler struct {
 	chatStore         ChatStore        // nil when postgres is not provisioned
 	remediationStore  RemediationStore // nil when postgres is not provisioned
 	remediationConfig RemediationConfig
+	serviceDepsStore  ServiceDependencyStore // nil when postgres is not provisioned
 	logger            *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -55,6 +56,7 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		chatStore:         chat,
 		remediationStore:  remediation,
 		remediationConfig: remediationCfg,
+		serviceDepsStore:  serviceDeps,
 		logger:            logger,
 	}
 }
@@ -1672,4 +1674,63 @@ func (h *Handler) HandleUpsertPricing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// serviceDependencyUpsertRequest is the body accepted by POST /api/service-dependencies.
+type serviceDependencyUpsertRequest struct {
+	Namespace   string `json:"namespace"`
+	FromService string `json:"from_service"`
+	ToService   string `json:"to_service"`
+}
+
+// HandleServiceDependencyUpsert records one piece of mined evidence for a
+// from->to service call edge (see k8fy/service_topology.py). Best-effort from
+// the agent's side — a failure here just means one piece of evidence is lost,
+// never surfaces as a diagnosis error.
+func (h *Handler) HandleServiceDependencyUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.serviceDepsStore == nil {
+		http.Error(w, "service dependency store not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req serviceDependencyUpsertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Namespace == "" || req.FromService == "" || req.ToService == "" {
+		http.Error(w, "namespace, from_service, and to_service are required", http.StatusBadRequest)
+		return
+	}
+	id := uuid.New().String()
+	if err := h.serviceDepsStore.UpsertServiceDependency(r.Context(), id, req.Namespace, req.FromService, req.ToService); err != nil {
+		h.logger.Warn("failed to upsert service dependency", "namespace", req.Namespace, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleServiceDependencyList returns every mined edge for one namespace —
+// read by DiagnoseSkill's prefetch and the get_service_dependencies chat tool.
+func (h *Handler) HandleServiceDependencyList(w http.ResponseWriter, r *http.Request) {
+	namespace := r.URL.Query().Get("namespace")
+	if namespace == "" {
+		http.Error(w, "namespace is required", http.StatusBadRequest)
+		return
+	}
+	if h.serviceDepsStore == nil {
+		writeJSON(w, http.StatusOK, []pgstore.ServiceDependency{})
+		return
+	}
+	deps, err := h.serviceDepsStore.ListServiceDependencies(r.Context(), namespace)
+	if err != nil {
+		h.logger.Warn("failed to list service dependencies", "namespace", namespace, "error", err)
+		writeJSON(w, http.StatusOK, []pgstore.ServiceDependency{})
+		return
+	}
+	writeJSON(w, http.StatusOK, deps)
 }

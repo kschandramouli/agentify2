@@ -1,0 +1,174 @@
+"""Tests for service_topology.py — mining a service-dependency graph out of
+log text (service-topology brainstorm, Option 2).
+
+`extract_service_mentions` is a pure function — no network — and is the
+highest-value test surface here since it's a precision-over-recall
+extraction heuristic: false positives would feed wrong correlations into
+diagnosis. The network-facing functions use the same httpx.MockTransport
+pattern as test_live_diagnostics.py.
+"""
+
+import httpx
+import pytest
+
+from k8fy import service_topology as st
+
+_RealAsyncClient = httpx.AsyncClient
+
+
+def _client_factory(transport: httpx.MockTransport):
+    def factory(*args, **kwargs):
+        kwargs.pop("verify", None)
+        kwargs["transport"] = transport
+        return _RealAsyncClient(**kwargs)
+    return factory
+
+
+# ── extract_service_mentions (pure function) ─────────────────────────────────
+
+def test_extract_accepts_fully_qualified_mention():
+    log_text = "2026-08-02 calling http://payment-backend.payments.svc.cluster.local:8080/charge"
+    found = st.extract_service_mentions(log_text, "payments", {"payment-backend"})
+    assert found == {"payment-backend"}
+
+
+def test_extract_accepts_partially_qualified_mention():
+    log_text = "connecting to payment-backend.payments now"
+    found = st.extract_service_mentions(log_text, "payments", {"payment-backend"})
+    assert found == {"payment-backend"}
+
+
+def test_extract_rejects_bare_unqualified_mention():
+    # No second DNS label at all — the regex itself never matches this,
+    # cross-validation never even gets a candidate to check.
+    log_text = "payment-backend restarted due to OOMKilled"
+    found = st.extract_service_mentions(log_text, "payments", {"payment-backend"})
+    assert found == set()
+
+
+def test_extract_rejects_wrong_namespace():
+    log_text = "calling payment-backend.orders.svc.cluster.local"
+    found = st.extract_service_mentions(log_text, "payments", {"payment-backend"})
+    assert found == set()
+
+
+def test_extract_rejects_unknown_service():
+    log_text = "calling unknown-svc.payments.svc.cluster.local"
+    found = st.extract_service_mentions(log_text, "payments", {"payment-backend"})
+    assert found == set()
+
+
+def test_extract_finds_multiple_distinct_services():
+    log_text = (
+        "step 1: payment-ui.payments.svc.cluster.local ok\n"
+        "step 2: payment-backend.payments ok\n"
+    )
+    found = st.extract_service_mentions(log_text, "payments", {"payment-ui", "payment-backend"})
+    assert found == {"payment-ui", "payment-backend"}
+
+
+def test_extract_empty_inputs_return_empty_set():
+    assert st.extract_service_mentions("", "payments", {"payment-backend"}) == set()
+    assert st.extract_service_mentions("payment-backend.payments", "payments", set()) == set()
+
+
+# ── get_known_services ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_known_services_filters_to_namespace(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            "payments/payment-backend",
+            "payments/payment-ui",
+            "orders/order-service",
+        ])
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    services = await st.get_known_services("payments", "http://backend")
+    assert services == {"payment-backend", "payment-ui"}
+
+
+@pytest.mark.asyncio
+async def test_get_known_services_degrades_to_empty_on_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    services = await st.get_known_services("payments", "http://backend")
+    assert services == set()
+
+
+# ── fetch_service_dependencies ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_service_dependencies_returns_list(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("namespace") == "payments"
+        return httpx.Response(200, json=[{"from_service": "payment-ui", "to_service": "payment-backend"}])
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    deps = await st.fetch_service_dependencies("payments", "http://backend")
+    assert deps == [{"from_service": "payment-ui", "to_service": "payment-backend"}]
+
+
+@pytest.mark.asyncio
+async def test_fetch_service_dependencies_degrades_to_empty_on_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    deps = await st.fetch_service_dependencies("payments", "http://backend")
+    assert deps == []
+
+
+# ── mine_service_dependencies (orchestration) ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_mine_service_dependencies_upserts_validated_edges(monkeypatch):
+    known_services_calls = []
+    upserted = []
+
+    async def fake_get_known_services(namespace, backend_url):
+        known_services_calls.append(namespace)
+        return {"payment-backend", "payment-ui"}
+
+    async def fake_upsert(namespace, from_service, to_service, backend_url):
+        upserted.append((namespace, from_service, to_service))
+
+    monkeypatch.setattr(st, "get_known_services", fake_get_known_services)
+    monkeypatch.setattr(st, "upsert_service_dependency", fake_upsert)
+
+    log_text = "calling payment-backend.payments.svc.cluster.local now"
+    await st.mine_service_dependencies("payments", "payment-ui", log_text, "http://backend")
+
+    assert known_services_calls == ["payments"]
+    assert upserted == [("payments", "payment-ui", "payment-backend")]
+
+
+@pytest.mark.asyncio
+async def test_mine_service_dependencies_skips_self_loop(monkeypatch):
+    async def fake_get_known_services(namespace, backend_url):
+        return {"payment-ui"}
+
+    async def fake_upsert(*args, **kwargs):
+        raise AssertionError("should not upsert a self-loop")
+
+    monkeypatch.setattr(st, "get_known_services", fake_get_known_services)
+    monkeypatch.setattr(st, "upsert_service_dependency", fake_upsert)
+
+    log_text = "payment-ui.payments.svc.cluster.local health check ok"
+    await st.mine_service_dependencies("payments", "payment-ui", log_text, "http://backend")
+
+
+@pytest.mark.asyncio
+async def test_mine_service_dependencies_no_known_services_is_noop(monkeypatch):
+    async def fake_get_known_services(namespace, backend_url):
+        return set()
+
+    async def fake_upsert(*args, **kwargs):
+        raise AssertionError("should not upsert when there are no known services")
+
+    monkeypatch.setattr(st, "get_known_services", fake_get_known_services)
+    monkeypatch.setattr(st, "upsert_service_dependency", fake_upsert)
+
+    await st.mine_service_dependencies("payments", "payment-ui", "some log text", "http://backend")

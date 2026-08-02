@@ -104,6 +104,13 @@ type PricingStore interface {
 	UpsertModelPricing(ctx context.Context, p *pgstore.ModelPricing) error
 }
 
+// ServiceDependencyStore is the mined-service-graph interface implemented by
+// the Postgres client — see k8fy/service_topology.py for how edges are mined.
+type ServiceDependencyStore interface {
+	UpsertServiceDependency(ctx context.Context, id, namespace, fromService, toService string) error
+	ListServiceDependencies(ctx context.Context, namespace string) ([]pgstore.ServiceDependency, error)
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.
