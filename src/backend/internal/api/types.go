@@ -106,9 +106,11 @@ type PricingStore interface {
 
 // ServiceDependencyStore is the mined-service-graph interface implemented by
 // the Postgres client — see k8fy/service_topology.py for how edges are mined.
+// tenantID/clusterID come from Handler.resolveTenantContext, never directly
+// from client input (ADR 0022 phase 2).
 type ServiceDependencyStore interface {
-	UpsertServiceDependency(ctx context.Context, id, namespace, fromService, toService string) error
-	ListServiceDependencies(ctx context.Context, namespace string) ([]pgstore.ServiceDependency, error)
+	UpsertServiceDependency(ctx context.Context, id, tenantID, clusterID, namespace, fromService, toService string) error
+	ListServiceDependencies(ctx context.Context, tenantID, namespace string) ([]pgstore.ServiceDependency, error)
 }
 
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
@@ -117,36 +119,40 @@ type ServiceDependencyStore interface {
 type IntegrationStore interface {
 	ListIntegrations(ctx context.Context) ([]pgstore.Integration, error)
 	GetIntegration(ctx context.Context, id string) (*pgstore.Integration, error)
+	GetIntegrationByCollectorToken(ctx context.Context, token string) (*pgstore.Integration, error)
 	CreateIntegration(ctx context.Context, in *pgstore.Integration) error
 	UpdateIntegration(ctx context.Context, in *pgstore.Integration) error
 	DeleteIntegration(ctx context.Context, id string) error
 }
 
 // IntegrationResponse is what the API returns — identical to pgstore.Integration
-// but with HasToken instead of Token so the credential is never leaked.
+// but with HasToken/HasCollectorToken instead of the raw credentials so
+// neither is ever leaked.
 type IntegrationResponse struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	AdapterURL string    `json:"adapter_url"`
-	Namespaces []string  `json:"namespaces"`
-	Status     string    `json:"status"`
-	HasToken   bool      `json:"has_token"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	AdapterURL        string    `json:"adapter_url"`
+	Namespaces        []string  `json:"namespaces"`
+	Status            string    `json:"status"`
+	HasToken          bool      `json:"has_token"`
+	HasCollectorToken bool      `json:"has_collector_token"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // integrationToResponse converts a storage integration to an API response,
-// replacing the plaintext token with a boolean.
+// replacing the plaintext credentials with booleans.
 func integrationToResponse(in pgstore.Integration) IntegrationResponse {
 	return IntegrationResponse{
-		ID:         in.ID,
-		Name:       in.Name,
-		AdapterURL: in.AdapterURL,
-		Namespaces: in.Namespaces,
-		Status:     in.Status,
-		HasToken:   in.Token != "",
-		CreatedAt:  in.CreatedAt,
-		UpdatedAt:  in.UpdatedAt,
+		ID:                in.ID,
+		Name:              in.Name,
+		AdapterURL:        in.AdapterURL,
+		Namespaces:        in.Namespaces,
+		Status:            in.Status,
+		HasToken:          in.Token != "",
+		HasCollectorToken: in.CollectorToken != "",
+		CreatedAt:         in.CreatedAt,
+		UpdatedAt:         in.UpdatedAt,
 	}
 }
 

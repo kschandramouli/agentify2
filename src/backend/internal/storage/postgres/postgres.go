@@ -282,6 +282,66 @@ func (c *Client) initSchema(ctx context.Context) error {
 	ALTER TABLE IF EXISTS service_dependencies  ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
 	ALTER TABLE IF EXISTS service_dependencies  ADD COLUMN IF NOT EXISTS cluster_id TEXT;
 
+	-- Multi-tenancy phase 2 (ADR 0022 Decisions #1/#5): service_dependencies
+	-- is the first genuinely tenant-scoped, RLS-enforced table. collector_token
+	-- is a SEPARATE credential from the existing outbound "token" column —
+	-- token is this backend calling OUT to an adapter; collector_token is a
+	-- collector calling IN to this backend. Conflating both directions on one
+	-- field would mean a leaked outbound token also grants inbound push access.
+	ALTER TABLE IF EXISTS integrations ADD COLUMN IF NOT EXISTS collector_token TEXT NOT NULL DEFAULT '';
+
+	-- The original UNIQUE (namespace, from_service, to_service) constraint
+	-- predates tenant_id/cluster_id and would silently merge two different
+	-- tenants' (or two clusters' within one tenant's fleet) evidence under
+	-- ON CONFLICT -- a real cross-tenant data-corruption bug, not just a
+	-- read-isolation gap. Backfill cluster_id to '' first (never leave it
+	-- NULL going forward) since Postgres treats every NULL as distinct from
+	-- every other NULL in a UNIQUE constraint -- an unconstrained NULL would
+	-- silently defeat the new constraint below for exactly the callers (no
+	-- credential presented) this phase cares most about getting right.
+	UPDATE service_dependencies SET cluster_id = '' WHERE cluster_id IS NULL;
+	ALTER TABLE IF EXISTS service_dependencies ALTER COLUMN cluster_id SET DEFAULT '';
+	DO $$
+	DECLARE
+		old_constraint_name TEXT;
+	BEGIN
+		SELECT conname INTO old_constraint_name
+		FROM pg_constraint
+		WHERE conrelid = 'service_dependencies'::regclass
+		  AND contype = 'u'
+		  AND conname != 'service_dependencies_tenant_cluster_ns_svc_key';
+		IF old_constraint_name IS NOT NULL THEN
+			EXECUTE format('ALTER TABLE service_dependencies DROP CONSTRAINT %I', old_constraint_name);
+		END IF;
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_constraint WHERE conname = 'service_dependencies_tenant_cluster_ns_svc_key'
+		) THEN
+			ALTER TABLE service_dependencies ADD CONSTRAINT service_dependencies_tenant_cluster_ns_svc_key
+				UNIQUE (tenant_id, cluster_id, namespace, from_service, to_service);
+		END IF;
+	END $$;
+
+	ALTER TABLE IF EXISTS service_dependencies ENABLE ROW LEVEL SECURITY;
+	-- FORCE is critical: without it, Postgres exempts the table OWNER role
+	-- from RLS, and this app almost certainly connects as the owner —
+	-- omitting FORCE would make the policy below a silent no-op.
+	ALTER TABLE IF EXISTS service_dependencies FORCE ROW LEVEL SECURITY;
+
+	-- CREATE POLICY has no IF NOT EXISTS — idempotency via pg_policies, same
+	-- style as the pgvector block below. Unlike that block, no exception-
+	-- swallowing here: RLS is core Postgres, always available, so a real
+	-- failure here should surface loudly, not be silently ignored.
+	DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_policies
+			WHERE tablename = 'service_dependencies' AND policyname = 'tenant_isolation'
+		) THEN
+			EXECUTE 'CREATE POLICY tenant_isolation ON service_dependencies
+				USING (tenant_id = current_setting(''app.current_tenant_id'', true))';
+		END IF;
+	END $$;
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -659,22 +719,23 @@ func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
 // Token is stored plaintext in Postgres for the prototype; in production it
 // should be a reference to a Secrets Manager secret ID.
 type Integration struct {
-	ID         string
-	Name       string
-	AdapterURL string
-	Namespaces []string
-	Status     string
-	Token      string
-	TenantID   string
-	ClusterID  string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID             string
+	Name           string
+	AdapterURL     string
+	Namespaces     []string
+	Status         string
+	Token          string // outbound: this backend calling OUT to the adapter
+	CollectorToken string // inbound: a collector calling IN to this backend (ADR 0022)
+	TenantID       string
+	ClusterID      string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // ListIntegrations returns all integrations ordered by creation time.
 func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list integrations: %w", err)
@@ -685,7 +746,7 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	for rows.Next() {
 		var in Integration
 		var nsJSON []byte
-		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt); err != nil {
+		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan integration: %w", err)
 		}
 		if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
@@ -701,9 +762,28 @@ func (c *Client) GetIntegration(ctx context.Context, id string) (*Integration, e
 	var in Integration
 	var nsJSON []byte
 	err := c.db.QueryRowContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations WHERE id = $1`, id).
-		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
+		in.Namespaces = nil
+	}
+	return &in, nil
+}
+
+// GetIntegrationByCollectorToken looks up the Integration a collector's push
+// credential belongs to — sql.ErrNoRows if the token is unrecognized (or
+// empty; empty never matches, since every row defaults collector_token to '').
+func (c *Client) GetIntegrationByCollectorToken(ctx context.Context, token string) (*Integration, error) {
+	var in Integration
+	var nsJSON []byte
+	err := c.db.QueryRowContext(ctx,
+		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		 FROM integrations WHERE collector_token = $1 AND collector_token != ''`, token).
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -720,30 +800,30 @@ func (c *Client) CreateIntegration(ctx context.Context, in *Integration) error {
 		return fmt.Errorf("marshal namespaces: %w", err)
 	}
 	_, err = c.db.ExecContext(ctx,
-		`INSERT INTO integrations (id, name, adapter_url, namespaces, status, token, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-		in.ID, in.Name, in.AdapterURL, nsJSON, in.Status, in.Token)
+		`INSERT INTO integrations (id, name, adapter_url, namespaces, status, token, collector_token, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
+		in.ID, in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.CollectorToken)
 	return err
 }
 
 // UpdateIntegration replaces all mutable fields for an existing integration.
-// Preserves created_at. Token is updated only when non-empty (empty = keep existing).
+// Preserves created_at. Token and CollectorToken are each updated only when
+// non-empty (empty = keep existing) — independent credentials, updated
+// independently, via SQL CASE rather than branching per-field in Go (which
+// would need 4 branches to cover both fields' empty/non-empty combinations).
 func (c *Client) UpdateIntegration(ctx context.Context, in *Integration) error {
 	nsJSON, err := json.Marshal(in.Namespaces)
 	if err != nil {
 		return fmt.Errorf("marshal namespaces: %w", err)
 	}
-	if in.Token != "" {
-		_, err = c.db.ExecContext(ctx,
-			`UPDATE integrations SET name=$1, adapter_url=$2, namespaces=$3, status=$4, token=$5, updated_at=NOW()
-			 WHERE id=$6`,
-			in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.ID)
-	} else {
-		_, err = c.db.ExecContext(ctx,
-			`UPDATE integrations SET name=$1, adapter_url=$2, namespaces=$3, status=$4, updated_at=NOW()
-			 WHERE id=$5`,
-			in.Name, in.AdapterURL, nsJSON, in.Status, in.ID)
-	}
+	_, err = c.db.ExecContext(ctx,
+		`UPDATE integrations SET
+		   name=$1, adapter_url=$2, namespaces=$3, status=$4,
+		   token = CASE WHEN $5 = '' THEN token ELSE $5 END,
+		   collector_token = CASE WHEN $6 = '' THEN collector_token ELSE $6 END,
+		   updated_at=NOW()
+		 WHERE id=$7`,
+		in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.CollectorToken, in.ID)
 	return err
 }
 
@@ -1419,20 +1499,59 @@ type ServiceDependency struct {
 // increments evidence_count and bumps last_seen if the edge is already known.
 // id must be set by the caller (matches CreateIntegration's convention) —
 // only used on first insert; ON CONFLICT is keyed by (namespace, from, to).
-func (c *Client) UpsertServiceDependency(ctx context.Context, id, namespace, fromService, toService string) error {
-	_, err := c.db.ExecContext(ctx, `
-		INSERT INTO service_dependencies (id, namespace, from_service, to_service, evidence_count, first_seen, last_seen)
-		VALUES ($1, $2, $3, $4, 1, NOW(), NOW())
-		ON CONFLICT (namespace, from_service, to_service) DO UPDATE SET
-		  evidence_count = service_dependencies.evidence_count + 1,
-		  last_seen      = NOW()`,
-		id, namespace, fromService, toService)
+// setTenantContext scopes the rest of tx to one tenant for every RLS-enabled
+// table it touches — set_config(..., true) is the parameterized equivalent
+// of SET LOCAL (avoids ever string-interpolating tenantID into SQL text),
+// and "true" (is_local) means it resets automatically at commit/rollback,
+// so it can never leak onto a pooled connection reused by a different
+// request afterward.
+func setTenantContext(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	_, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant_id', $1, true)`, tenantID)
 	return err
 }
 
-// ListServiceDependencies returns every mined edge for one namespace, most-evidenced first.
-func (c *Client) ListServiceDependencies(ctx context.Context, namespace string) ([]ServiceDependency, error) {
-	rows, err := c.db.QueryContext(ctx, `
+// UpsertServiceDependency records one piece of evidence for a from->to edge,
+// scoped to (tenantID, clusterID) — ADR 0022. Runs inside a transaction so
+// the tenant scoping above only ever applies to this one call.
+func (c *Client) UpsertServiceDependency(ctx context.Context, id, tenantID, clusterID, namespace, fromService, toService string) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO service_dependencies (id, namespace, from_service, to_service, tenant_id, cluster_id, evidence_count, first_seen, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, 1, NOW(), NOW())
+		ON CONFLICT (tenant_id, cluster_id, namespace, from_service, to_service) DO UPDATE SET
+		  evidence_count = service_dependencies.evidence_count + 1,
+		  last_seen      = NOW()`,
+		id, namespace, fromService, toService, tenantID, clusterID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ListServiceDependencies returns every mined edge for one namespace, across
+// every cluster belonging to tenantID (deliberately not filtered by cluster —
+// a tenant's clusters' edges surfacing together is what enables cross-cluster
+// dependency correlation, P18 use case #4), most-evidenced first. RLS (not
+// this query's WHERE clause) is what actually enforces the tenant boundary.
+func (c *Client) ListServiceDependencies(ctx context.Context, tenantID, namespace string) ([]ServiceDependency, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; always rolled back, never committed
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id, namespace, from_service, to_service, evidence_count, first_seen, last_seen,
 		       tenant_id, COALESCE(cluster_id, '')
 		FROM service_dependencies WHERE namespace = $1 ORDER BY evidence_count DESC`, namespace)

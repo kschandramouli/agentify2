@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -491,10 +493,11 @@ func (h *Handler) HandleIntegrationGet(w http.ResponseWriter, r *http.Request) {
 
 // integrationCreateRequest is the body accepted by POST /admin/integrations.
 type integrationCreateRequest struct {
-	Name       string   `json:"name"`
-	AdapterURL string   `json:"adapter_url"`
-	Namespaces []string `json:"namespaces"`
-	Token      string   `json:"token"`
+	Name           string   `json:"name"`
+	AdapterURL     string   `json:"adapter_url"`
+	Namespaces     []string `json:"namespaces"`
+	Token          string   `json:"token"`
+	CollectorToken string   `json:"collector_token"` // ADR 0022 — a collector's inbound push credential
 }
 
 // HandleIntegrationCreate adds a new integration.
@@ -518,12 +521,13 @@ func (h *Handler) HandleIntegrationCreate(w http.ResponseWriter, r *http.Request
 
 	id := uuid.New().String()
 	row := &pgstore.Integration{
-		ID:         id,
-		Name:       req.Name,
-		AdapterURL: req.AdapterURL,
-		Namespaces: req.Namespaces,
-		Status:     "inactive",
-		Token:      req.Token,
+		ID:             id,
+		Name:           req.Name,
+		AdapterURL:     req.AdapterURL,
+		Namespaces:     req.Namespaces,
+		Status:         "inactive",
+		Token:          req.Token,
+		CollectorToken: req.CollectorToken,
 	}
 	if err := h.integrationStore.CreateIntegration(r.Context(), row); err != nil {
 		h.logger.Error("create integration failed", "error", err)
@@ -543,11 +547,12 @@ func (h *Handler) HandleIntegrationCreate(w http.ResponseWriter, r *http.Request
 
 // integrationUpdateRequest is the body accepted by PUT /admin/integrations/{id}.
 type integrationUpdateRequest struct {
-	Name       string   `json:"name"`
-	AdapterURL string   `json:"adapter_url"`
-	Namespaces []string `json:"namespaces"`
-	Status     string   `json:"status"`
-	Token      string   `json:"token"` // empty = keep existing token
+	Name           string   `json:"name"`
+	AdapterURL     string   `json:"adapter_url"`
+	Namespaces     []string `json:"namespaces"`
+	Status         string   `json:"status"`
+	Token          string   `json:"token"`           // empty = keep existing token
+	CollectorToken string   `json:"collector_token"` // empty = keep existing collector token
 }
 
 // HandleIntegrationUpdate replaces mutable fields for an existing integration.
@@ -579,12 +584,13 @@ func (h *Handler) HandleIntegrationUpdate(w http.ResponseWriter, r *http.Request
 	}
 
 	row := &pgstore.Integration{
-		ID:         id,
-		Name:       req.Name,
-		AdapterURL: req.AdapterURL,
-		Namespaces: req.Namespaces,
-		Status:     status,
-		Token:      req.Token,
+		ID:             id,
+		Name:           req.Name,
+		AdapterURL:     req.AdapterURL,
+		Namespaces:     req.Namespaces,
+		Status:         status,
+		Token:          req.Token,
+		CollectorToken: req.CollectorToken,
 	}
 	if err := h.integrationStore.UpdateIntegration(r.Context(), row); err != nil {
 		h.logger.Error("update integration failed", "id", id, "error", err)
@@ -1676,6 +1682,37 @@ func (h *Handler) HandleUpsertPricing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// errInvalidCredential means a Bearer credential was presented but didn't
+// match any Integration's collector_token — distinct from "no credential
+// presented at all" (which defaults to pgstore.DefaultTenantID, not an error).
+var errInvalidCredential = errors.New("invalid credential")
+
+// resolveTenantContext reads an optional Bearer credential and resolves it to
+// (tenantID, clusterID) via Integration.CollectorToken (ADR 0022 phase 2).
+// Absent header -> (DefaultTenantID, "", nil), today's behavior unchanged --
+// this is what keeps src/agent's existing, credential-less calls working
+// exactly as before. Presented but unrecognized -> ("", "", errInvalidCredential),
+// a 401, never silently defaulted. clusterID is the matched Integration's own
+// ID -- Integration rows already ARE the cluster registry, no separate
+// cluster identifier is needed.
+func (h *Handler) resolveTenantContext(r *http.Request) (tenantID, clusterID string, err error) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		return pgstore.DefaultTenantID, "", nil
+	}
+	if h.integrationStore == nil {
+		return "", "", errInvalidCredential
+	}
+	integ, err := h.integrationStore.GetIntegrationByCollectorToken(r.Context(), token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", errInvalidCredential
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return integ.TenantID, integ.ID, nil
+}
+
 // serviceDependencyUpsertRequest is the body accepted by POST /api/service-dependencies.
 type serviceDependencyUpsertRequest struct {
 	Namespace   string `json:"namespace"`
@@ -1696,6 +1733,16 @@ func (h *Handler) HandleServiceDependencyUpsert(w http.ResponseWriter, r *http.R
 		http.Error(w, "service dependency store not available", http.StatusServiceUnavailable)
 		return
 	}
+	tenantID, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	var req serviceDependencyUpsertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1706,7 +1753,7 @@ func (h *Handler) HandleServiceDependencyUpsert(w http.ResponseWriter, r *http.R
 		return
 	}
 	id := uuid.New().String()
-	if err := h.serviceDepsStore.UpsertServiceDependency(r.Context(), id, req.Namespace, req.FromService, req.ToService); err != nil {
+	if err := h.serviceDepsStore.UpsertServiceDependency(r.Context(), id, tenantID, clusterID, req.Namespace, req.FromService, req.ToService); err != nil {
 		h.logger.Warn("failed to upsert service dependency", "namespace", req.Namespace, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -1726,7 +1773,17 @@ func (h *Handler) HandleServiceDependencyList(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusOK, []pgstore.ServiceDependency{})
 		return
 	}
-	deps, err := h.serviceDepsStore.ListServiceDependencies(r.Context(), namespace)
+	tenantID, _, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	deps, err := h.serviceDepsStore.ListServiceDependencies(r.Context(), tenantID, namespace)
 	if err != nil {
 		h.logger.Warn("failed to list service dependencies", "namespace", namespace, "error", err)
 		writeJSON(w, http.StatusOK, []pgstore.ServiceDependency{})

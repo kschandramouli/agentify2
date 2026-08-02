@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"testing"
 	"time"
@@ -129,6 +130,111 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("cluster_id: want empty (NULL), got %q", got.ClusterID)
 		}
 	})
+}
+
+// TestServiceDependencyTenantIsolation is the RLS test that actually
+// matters (ADR 0022 phase 2): proves cross-tenant isolation is real,
+// enforced by Postgres itself, not just that the tenant-aware code compiles
+// and happens to pass the right WHERE clause.
+//
+// Deliberately runs the RLS-sensitive calls through a SECOND connection,
+// authenticated as a freshly-created, ordinary (non-superuser, non-owner)
+// role — not through `client`/startEmbedded's bootstrap "postgres" role.
+// That bootstrap role is a genuine Postgres superuser, and superusers always
+// bypass RLS regardless of ENABLE/FORCE ROW LEVEL SECURITY (documented
+// Postgres behavior, not a policy bug) — testing through it would prove
+// nothing about whether the policy itself works. This matters beyond the
+// test too: if agentify's real production DB connection also happens to use
+// a superuser-equivalent role, this RLS policy would be silently ineffective
+// in production the same way — worth confirming separately, not assumed here.
+func TestServiceDependencyTenantIsolation(t *testing.T) {
+	client := startEmbedded(t)
+	ctx := context.Background()
+
+	if _, err := client.db.ExecContext(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rls_test_app') THEN
+				CREATE ROLE rls_test_app LOGIN PASSWORD 'rls_test_app' NOSUPERUSER;
+			END IF;
+		END $$;
+	`); err != nil {
+		t.Fatalf("create restricted test role: %v", err)
+	}
+	if _, err := client.db.ExecContext(ctx, `GRANT SELECT, INSERT, UPDATE ON service_dependencies TO rls_test_app`); err != nil {
+		t.Fatalf("grant restricted test role: %v", err)
+	}
+	appDB, err := sql.Open("postgres", "host=localhost port=54329 user=rls_test_app password=rls_test_app dbname=agentify_test sslmode=disable")
+	if err != nil {
+		t.Fatalf("open restricted-role connection: %v", err)
+	}
+	defer appDB.Close()
+	// appClient runs the RLS-sensitive calls (as the restricted role);
+	// client (still the superuser connection) handles Integration setup,
+	// which isn't RLS-sensitive and needs CREATE-level privileges anyway.
+	appClient := &Client{db: appDB, logger: client.logger}
+
+	tenantA := uuid.New().String()
+	tenantB := uuid.New().String()
+
+	clusterA := &Integration{ID: uuid.New().String(), Name: "cluster-a", AdapterURL: "http://a.invalid", Namespaces: []string{}, Status: "inactive", TenantID: tenantA}
+	clusterB := &Integration{ID: uuid.New().String(), Name: "cluster-b", AdapterURL: "http://b.invalid", Namespaces: []string{}, Status: "inactive", TenantID: tenantB}
+	// CreateIntegration doesn't write tenant_id itself (phase 1's deliberate
+	// scope) — set it directly after creation so this test controls it, not
+	// relying on the DB default (which would put both under the same tenant).
+	if err := client.CreateIntegration(ctx, clusterA); err != nil {
+		t.Fatalf("create cluster A: %v", err)
+	}
+	if err := client.CreateIntegration(ctx, clusterB); err != nil {
+		t.Fatalf("create cluster B: %v", err)
+	}
+	if _, err := client.db.ExecContext(ctx, `UPDATE integrations SET tenant_id = $1 WHERE id = $2`, tenantA, clusterA.ID); err != nil {
+		t.Fatalf("set tenant A: %v", err)
+	}
+	if _, err := client.db.ExecContext(ctx, `UPDATE integrations SET tenant_id = $1 WHERE id = $2`, tenantB, clusterB.ID); err != nil {
+		t.Fatalf("set tenant B: %v", err)
+	}
+
+	// Same namespace/from/to on purpose — this is exactly the case that
+	// would silently collide under the OLD (namespace, from_service,
+	// to_service) unique constraint, merging two tenants' evidence into
+	// one row.
+	if err := appClient.UpsertServiceDependency(ctx, uuid.New().String(), tenantA, clusterA.ID, "payments", "payment-ui", "payment-backend"); err != nil {
+		t.Fatalf("upsert tenant A dependency: %v", err)
+	}
+	if err := appClient.UpsertServiceDependency(ctx, uuid.New().String(), tenantB, clusterB.ID, "payments", "payment-ui", "payment-backend"); err != nil {
+		t.Fatalf("upsert tenant B dependency: %v", err)
+	}
+	// Evidence again for tenant A only — proves ON CONFLICT is scoped per
+	// tenant (increments A's row), not global (which would also bump B's).
+	if err := appClient.UpsertServiceDependency(ctx, uuid.New().String(), tenantA, clusterA.ID, "payments", "payment-ui", "payment-backend"); err != nil {
+		t.Fatalf("re-upsert tenant A dependency: %v", err)
+	}
+
+	depsA, err := appClient.ListServiceDependencies(ctx, tenantA, "payments")
+	if err != nil {
+		t.Fatalf("list tenant A dependencies: %v", err)
+	}
+	if len(depsA) != 1 {
+		t.Fatalf("tenant A: want exactly 1 edge (RLS should hide tenant B's row), got %d", len(depsA))
+	}
+	if depsA[0].EvidenceCount != 2 {
+		t.Errorf("tenant A evidence_count: want 2 (two upserts), got %d — ON CONFLICT may not be tenant-scoped", depsA[0].EvidenceCount)
+	}
+	if depsA[0].TenantID != tenantA || depsA[0].ClusterID != clusterA.ID {
+		t.Errorf("tenant A row: want tenant=%q cluster=%q, got tenant=%q cluster=%q", tenantA, clusterA.ID, depsA[0].TenantID, depsA[0].ClusterID)
+	}
+
+	depsB, err := appClient.ListServiceDependencies(ctx, tenantB, "payments")
+	if err != nil {
+		t.Fatalf("list tenant B dependencies: %v", err)
+	}
+	if len(depsB) != 1 {
+		t.Fatalf("tenant B: want exactly 1 edge (RLS should hide tenant A's row), got %d", len(depsB))
+	}
+	if depsB[0].EvidenceCount != 1 {
+		t.Errorf("tenant B evidence_count: want 1 (untouched by tenant A's re-upsert), got %d", depsB[0].EvidenceCount)
+	}
 }
 
 func TestEventsWindowedQuery(t *testing.T) {
