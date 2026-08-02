@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted · (date: 2026-08-02) — supersedes [ADR 0009](0009-tenancy-single-tenant-per-deployment.md)
+Accepted · (date: 2026-08-02) — supersedes [ADR 0009](0009-tenancy-single-tenant-per-deployment.md) · Amended 2026-08-03 — see note after Decision #7; two wording corrections found while implementing the first real collector, agentify-discovery.
 
 ## Context
 
@@ -187,6 +187,33 @@ anticipated — scope and time this accordingly, not as a quick flag flip.
    but only as "the Hub sends a message over a connection one specific
    tenant's one specific collector already opened," never "one central
    agent holds standing credentials for every cluster in the fleet."
+
+**Amendment (2026-08-03), found while building the first real collector,
+[agentify-discovery](../../src/adapters/discovery/):**
+
+- **Decision #6's "`cluster_id` (and `tenant_id`) are set via ConfigMap/env
+  at deploy time" is corrected — no separate `CLUSTER_ID`/`TENANT_ID` env is
+  needed.** By the time this was actually implemented, phase 2 of the
+  multi-tenancy migration had already built `resolveTenantContext`
+  (`src/backend/internal/api/handlers.go`), which derives `clusterID`
+  server-side from *which* `Integration` row the presented
+  `COLLECTOR_TOKEN` matches (`integ.ID`). The collector only needs its own
+  token — a second, separately-injected cluster identity would be
+  redundant and could drift from the Hub's own record. "Injected at
+  onboarding, never auto-detected" still holds; it happens at the moment an
+  admin creates the `Integration` row and mints its `CollectorToken`, not
+  via a second config value on the collector itself.
+- **`service_topology.py`'s original `get_known_services()` calls the Hub's
+  `GET /admin/tracked` — confirmed to have no tenant scoping.** Reusing it
+  unchanged from a multi-tenant collector would leak every tenant's known
+  service names into another tenant's extraction-validation set (a
+  cross-tenant information leak, not just an isolation gap — the leaked
+  names never get stored, but a collector could use them to fabricate
+  false-positive edges). `agentify-discovery` instead lists K8s `Service`
+  objects directly from its own cluster
+  (`GET /api/v1/namespaces/{ns}/services`) to build its known-services set
+  — more correct, and also more portable (no dependency on the k8fy-adapter
+  having run first to populate `/admin/tracked`).
 
 8. **Coupled decisions this ADR does NOT resolve — flagged, not silently
    punted:**

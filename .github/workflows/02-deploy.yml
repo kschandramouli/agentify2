@@ -40,7 +40,7 @@ jobs:
 
       - name: Ensure ECR repos exist
         run: |
-          for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend; do
+          for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend agentify/discovery; do
             aws ecr describe-repositories --repository-names "$repo" \
               --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 \
             || aws ecr create-repository --repository-name "$repo" \
@@ -93,6 +93,15 @@ jobs:
           tags: |
             ${{ secrets.ECR_REGISTRY }}/agentify/frontend:${{ steps.meta.outputs.tag }}
             ${{ secrets.ECR_REGISTRY }}/agentify/frontend:latest
+
+      - name: Build & push discovery
+        uses: docker/build-push-action@v5
+        with:
+          context: src/adapters/discovery
+          push: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY }}/agentify/discovery:${{ steps.meta.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY }}/agentify/discovery:latest
 
   deploy:
     name: Deploy to EKS
@@ -195,6 +204,7 @@ jobs:
 
           # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
           for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml \
+                   infra/kubernetes/discovery.yaml \
                    infra/kubernetes/payments-test/payment-api.yaml infra/kubernetes/payments-test/payment-worker.yaml \
                    infra/kubernetes/payments-test/payment-service.yaml; do
             sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" "$f"
@@ -204,6 +214,7 @@ jobs:
           sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
           sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
           sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
+          sed -i "s|${REGISTRY}/agentify/discovery:latest|${REGISTRY}/agentify/discovery:${TAG}|g" infra/kubernetes/discovery.yaml
           sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/frontend.yaml
           sed -i "s|${REGISTRY}/agentify/frontend:latest|${REGISTRY}/agentify/frontend:${TAG}|g" infra/kubernetes/frontend.yaml
 
@@ -418,6 +429,17 @@ jobs:
           kubectl apply -f infra/kubernetes/backend.yaml
           kubectl apply -f infra/kubernetes/agent.yaml
           kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+          # agentify-discovery (ADR 0022 / ROADMAP P18): applied, but deliberately
+          # not in "Wait for rollouts" below yet. Its Deployment references
+          # Secret agentify-discovery-secret / key collector_token, which has no
+          # corresponding AWS Secrets Manager entry or sync step yet (minting a
+          # real CollectorToken via POST/PUT /admin/integrations and wiring its
+          # Secrets Manager entry is still a manual, one-time step — see the
+          # agentify-discovery plan's "explicitly out of scope" section). Without
+          # that Secret the pod sits in ContainerCreating; applying it anyway is
+          # harmless, but gating this deploy job on its rollout would make every
+          # future deploy fail until that manual step happens.
+          kubectl apply -f infra/kubernetes/discovery.yaml
           kubectl apply -f infra/kubernetes/frontend.yaml
           kubectl apply -f infra/kubernetes/ingress.yaml
           kubectl apply -f infra/kubernetes/namespace-sync-cronjob.yaml
@@ -664,6 +686,7 @@ jobs:
             echo "| backend  | \`agentify/backend:${{ env.IMAGE_TAG }}\` |"
             echo "| agent    | \`agentify/agent:${{ env.IMAGE_TAG }}\` |"
             echo "| adapter  | \`agentify/k8fy-adapter:${{ env.IMAGE_TAG }}\` |"
+            echo "| discovery| \`agentify/discovery:${{ env.IMAGE_TAG }}\` |"
             echo "| frontend | \`agentify/frontend:${{ env.IMAGE_TAG }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 

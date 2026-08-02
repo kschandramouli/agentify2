@@ -43,7 +43,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 | **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
-| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/agent/k8fy/service_topology.py` |
+| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use case #2 (service-dependency mining) shipped 2026-08-03 as `agentify-discovery`**; use cases #1/#3/#5-#9 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py` |
 
 ---
 
@@ -972,11 +972,19 @@ just EKS. This item is the concrete *what to build*.
   collector dials out to the Hub and holds the connection open; the Hub
   never dials into a cluster. Both periodic push and on-demand "fetch X
   now" requests multiplex over that one connection.
-- **Credential model:** one bearer credential (or mTLS cert) per (tenant,
-  cluster) pair — extends `Integration.Token`'s existing shape. The
-  mechanism is cloud-agnostic (works identically on any distribution); how
-  the Hub stores/rotates its own copy is a Hub-side detail (ADR 0022
-  Decision #5), not a collector requirement.
+- **Credential model:** one bearer credential per (tenant, cluster) pair —
+  `Integration.CollectorToken`, a field **separate** from the pre-existing
+  `Integration.Token` (corrected from an earlier draft that said this would
+  "extend `Integration.Token`'s existing shape": `Token` is *outbound*, the
+  Hub calling out to an adapter; a collector credential is *inbound*,
+  something calling into the Hub — conflating them would mean a leaked
+  outbound token also grants inbound push access). The mechanism is
+  cloud-agnostic (works identically on any distribution); how the Hub
+  stores/rotates its own copy is a Hub-side detail (ADR 0022 Decision #5),
+  not a collector requirement. Resolved server-side by `resolveTenantContext`
+  (`src/backend/internal/api/handlers.go`) — the collector itself carries no
+  separate `cluster_id`/`tenant_id` config (see ADR 0022's 2026-08-03
+  amendment).
 
 **Use cases unlocked, roughly in build order:**
 1. **Namespace/Service/Deployment inventory** — portable via the core K8s
@@ -984,9 +992,20 @@ just EKS. This item is the concrete *what to build*.
    Feeds `Integration.Namespaces` automatically — auto-discovery instead of
    the manual entry `IntegrationsPanel.tsx` currently requires, closing the
    gap flagged when that form's namespace field was made editable earlier.
-2. **Service-dependency mining** — already built (`service_topology.py`),
-   now also runnable standalone off the portable pod-logs API per-cluster,
-   not just from inside the monolithic agent process.
+2. **Service-dependency mining — shipped 2026-08-03 as `agentify-discovery`**
+   (`src/adapters/discovery/`): a standalone Deployment reusing
+   `extract_service_mentions`'s logic off the portable pod-logs API,
+   per-cluster, pushing real tenant/cluster-scoped edges via the
+   `Integration.CollectorToken` credential — not just from inside the
+   monolithic agent process anymore. Known-services are read directly from
+   this cluster's own `Service` objects, not the Hub's (untenanted)
+   `GET /admin/tracked` — see the ADR 0022 amendment. `from_service` is
+   resolved via K8s Service-selector-to-pod-label matching (the same
+   mechanism K8s itself uses for Service endpoints), not a pod-name
+   heuristic. Deferred from this slice: cluster onboarding UX (token
+   minting is via the existing admin API only, no UI yet) and the
+   `agentify-discovery-secret`/Secrets Manager wiring for the CI deploy
+   pipeline — both flagged as manual follow-ups, not blocking.
 3. **Ingress/entry-point mapping** — `Ingress`/`Gateway`+`HTTPRoute`/
    OpenShift `Route`, whichever exists — "where does traffic into this
    cluster actually originate," directly relevant to the traffic-flow

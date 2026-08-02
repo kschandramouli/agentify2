@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentify-discovery
+  namespace: agentify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentify-discovery
+  template:
+    metadata:
+      labels:
+        app: agentify-discovery
+      annotations: {}
+    spec:
+      serviceAccountName: agentify-discovery
+      # Graceful shutdown: the default 60s scan cycle always finishes well
+      # inside this window (see main.py's SIGTERM handler).
+      terminationGracePeriodSeconds: 90
+      containers:
+      - name: discovery
+        image: ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/agentify/discovery:latest
+        ports:
+        - name: health
+          containerPort: 8300
+          protocol: TCP
+        env:
+        - name: BACKEND_URL
+          value: "http://agentify-backend:8080"
+        - name: SCAN_INTERVAL_SECONDS
+          value: "60"
+        - name: MAX_PODS_PER_NAMESPACE
+          value: "5"
+        - name: LOG_TAIL_LINES
+          value: "200"
+        - name: NAMESPACE_EXCLUDE
+          value: "kube-system,kube-public,kube-node-lease"
+        - name: HEALTH_PORT
+          value: "8300"
+        # The bearer credential resolveTenantContext (src/backend/internal/api/handlers.go)
+        # matches against Integration.CollectorToken to derive this cluster's
+        # (tenant_id, cluster_id) — no separate CLUSTER_ID/TENANT_ID env here,
+        # see ADR 0022's amendment note. Minted via POST/PUT /admin/integrations'
+        # collector_token field; synced into this Secret the same way
+        # agentify-adapter-secret is (Secrets Manager -> K8s Secret).
+        - name: COLLECTOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: agentify-discovery-secret
+              key: collector_token
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8300
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8300
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentify-discovery
+  namespace: agentify
+
+---
+# Cluster-wide, not namespace-scoped like agent-live-diagnostics
+# (infra/kubernetes/payments-test/serviceaccounts.yaml): this collector's job
+# is fleet-wide namespace/service discovery within its own cluster (ADR 0022
+# / ROADMAP P18 use case #1's discovery step), not one fixed namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agentify-discovery
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["list", "get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list", "get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agentify-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agentify-discovery
+subjects:
+- kind: ServiceAccount
+  name: agentify-discovery
+  namespace: agentify
