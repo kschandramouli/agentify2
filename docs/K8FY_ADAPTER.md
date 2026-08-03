@@ -1,92 +1,109 @@
 # K8fy Adapter
 
+> Rewritten 2026-08-03 — the previous version described a Go implementation
+> with `.go` file extensions and said "normalized events are logged but not
+> sent to backend." Neither is true: the adapter has been Python since early
+> on, and it has fully emitted to `/api/ingest` for a long time — this
+> version matches `src/adapters/k8fy/` as it stands today.
+
 ## Overview
 
-The K8fy adapter is the integration point between Kubernetes and agentify. It:
-1. Watches Kubernetes API for pod/service changes
-2. Scrapes metrics (restarts, resource usage)
-3. Checks certificates for expiry
-4. Normalizes to canonical events
-5. Sends to backend for ingestion
+The K8fy adapter is the original, still-running integration point between
+Kubernetes and agentify's ingested-data store. It:
+1. Watches the K8s API (pods, services, Deployments) via long-lived watch
+   streams — not polling
+2. Scrapes container restart counts and TLS certificate expiry on a timer
+3. Normalizes everything to agentify's canonical `Event` schema
+4. Emits to the backend's `POST /api/ingest`
+5. Serves on-demand pod logs and namespace discovery over its own small HTTP endpoint
 
-## Components
+**Relationship to `agentify-discovery`:** this adapter and the newer fleet
+collector (ROADMAP P18, see `docs/AGENT_INTEGRATION.md`) are two separate
+per-cluster components with overlapping concerns (both need K8s RBAC read
+access, both report to the central backend). [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md)
+Decision #9 flags this as a real smell whose natural end state is one
+per-cluster deployable doing both jobs — explicitly **not resolved**, since
+merging them means migrating every existing adapter deployment.
 
-### Watcher
-- `src/adapters/k8fy/watcher.go` — K8s API client
-- Methods:
-  - `WatchPods()` — stream pod events (ADDED, MODIFIED, DELETED)
-  - `WatchServices()` — stream service events
-  - `ScrapeMetrics()` — periodic pod metrics collection
-  - `ScrapeCertificates()` — periodic cert expiry checks
+## Components (all Python, `src/adapters/k8fy/`)
 
-### Normalizer
-- `src/adapters/k8fy/normalizer.go` — K8s → canonical events
-- Functions:
-  - `NormalizePodEvent()` — pod with phase, ready status, restarts
-  - `NormalizeServiceEvent()` — service with endpoints
-  - `NormalizeCertificateEvent()` — cert with expiry date
-  - `ParseCertExpiry()` — extract cert NotAfter
+### Watcher (`watcher.py`) — `K8sWatcher`
+- `watch_pods()` / `watch_services()` / `watch_deployments()` — long-lived
+  `kubernetes.watch.Watch()` streams, auto-retrying with a 2s backoff on
+  error. Deployment watches dedupe by `deployment.kubernetes.io/revision`
+  annotation so only genuine rollouts emit a change event (spec 007).
+- `scrape_metrics(interval)` — periodically lists every pod, emits a restart-count sample per container.
+- `scrape_certificates(interval)` — periodically lists Secrets, filters to `type=kubernetes.io/tls`, parses each with `cryptography.x509` (expiry + SAN/CN DNS names), emits a cert-expiry event.
+- `list_namespaces()` — powers namespace/service discovery for the frontend autocomplete.
+- **Cluster-wide by default**: `K8S_NAMESPACE=*` (or empty) watches every namespace except a fixed skip-list (`kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, `monitoring`, `ingress-nginx`) — new namespaces are picked up automatically, no restart needed. A single namespace can still be pinned via `K8S_NAMESPACE`.
 
-### Configuration
-- `src/adapters/k8fy/config.go` — env-based config:
-  - `BACKEND_URL` — agentify backend address
-  - `K8S_NAMESPACE` — namespace to watch (default: "default")
-  - `SCRAPE_INTERVAL` — metrics scrape cadence (default: 30s)
-  - `CERT_CHECK_INTERVAL` — cert check interval (default: 300s)
+### Normalizer (`normalizer.py`)
+- Builds the canonical event dict `POST /api/ingest` expects — `id`, `timestamp`, `event_namespace`, `type`, `source`, `payload`, `traits`, `entity_key`. The trait values (not the payload) are what the backend's storage-strategy classification actually keys on.
+- `normalize_pod_event` / `normalize_service_event` / `normalize_deploy_event` / `normalize_metric_event` / `normalize_certificate_event`.
 
-### Entry Point
-- `src/adapters/k8fy/main.go` — starts watchers
+### Emitter (`emitter.py`) — `Emitter`
+- Posts to `POST {BACKEND_URL}/api/ingest`. Best-effort: a failed POST is logged and swallowed, never crashes a watch loop.
+- **Already sends `Authorization: Bearer {BACKEND_AUTH_TOKEN}` on every request** — this predates [ADR 0024](../context-mesh/decisions/0024-ingested-data-cluster-scoping.md), but that token was never checked server-side until ADR 0024 wired `HandleIngestEvent` to call `resolveTenantContext`. **To join a multi-cluster fleet**, set this adapter's `BACKEND_AUTH_TOKEN` to the same value as the `Integration` row's `collector_token` (minted the same way `agentify-discovery`'s `COLLECTOR_TOKEN` already is) — no adapter code change needed, only configuration.
+
+### Log server + namespace discovery (`logserver.py`)
+- `POST /logs` (`spec 008` / [ADR 0014](../context-mesh/decisions/0014-on-demand-ephemeral-log-fetch.md)) — the backend's on-demand pod-log fetch calls this; logs are read live and never persisted by the adapter. Bearer-guarded via `ADAPTER_AUTH_TOKEN` (constant-time compare); open if unset (dev only).
+- Namespace discovery endpoint backing the frontend's "known namespaces" autocomplete.
+
+### Configuration (`config.py`)
+| Env var | Purpose | Default |
+|---|---|---|
+| `BACKEND_URL` | Ingestion target | `http://localhost:8080` |
+| `BACKEND_AUTH_TOKEN` | Bearer sent on every `/api/ingest` POST (empty = unauthenticated push, single-cluster default) | `""` |
+| `K8S_NAMESPACE` | `*`/empty = cluster-wide; a value pins to one namespace | `*` |
+| `SCRAPE_INTERVAL` | Metrics scrape cadence (seconds) | `30` |
+| `CERT_CHECK_INTERVAL` | Cert scrape cadence (seconds) | `300` |
+| `LOG_SERVER_PORT` | On-demand log endpoint port | `8200` |
+| `MAX_TAIL_LINES` | Hard cap on log tail length | `200` |
+| `ADAPTER_AUTH_TOKEN` | Guards `POST /logs` (empty = open, dev only) | `""` |
+
+### Entry point (`main.py`)
+Loads in-cluster kube config (falls back to local kubeconfig for dev),
+starts every watcher/scraper/log-server as a daemon thread, blocks on
+`SIGINT`/`Ctrl-C`.
 
 ## Deployment
 
-### Dockerfile
-- Multi-stage build (Alpine)
-- Runs inside k8s cluster (in-cluster auth)
+### Kubernetes manifests (`infra/kubernetes/k8fy-adapter.yaml`)
+- Deployment (1 replica), Service (log-server port 8200)
+- ServiceAccount with IRSA annotation
+- ClusterRole: `list/watch/get` on `pods`, `services`, `secrets`, `events`, `namespaces`; `get` on `pods/log`; `list/watch/get` on `apps/deployments`
 
-### Kubernetes manifests
-- `infra/kubernetes/k8fy-adapter.yaml`:
-  - Deployment (1 replica)
-  - ServiceAccount with cluster-wide permissions
-  - ClusterRole (read pods, services, secrets, events)
-
-### Running locally (for testing)
+### Running locally
 ```bash
-# Set backend URL
 export BACKEND_URL=http://localhost:8080
-export K8S_NAMESPACE=default
+export K8S_NAMESPACE=default   # or leave unset/"*" for cluster-wide
 
-# Run
-cd src/adapters/k8fy
-go run main.go
+cd src/adapters   # k8fy.main uses relative imports, so run as a package from here
+python -m k8fy.main
 ```
 
 ### Running on EKS
 ```bash
-# Deploy
 kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
-
-# Check logs
 kubectl logs -n agentify -l app=k8fy-adapter -f
 ```
 
-## Event Flow
+## Event flow
 
 ```
-Watcher observes K8s
-  ├─ Pod restarted
-  ├─ → NormalizePodEvent()
-  ├─ → {event_namespace: "k8fy.live-state", type: "MODIFIED", payload: {...}}
-  └─ → POST /api/ingest
+K8sWatcher observes K8s (watch stream or scrape tick)
+  ├─ normalizer.normalize_*_event() → canonical dict
+  └─ Emitter.emit() → POST /api/ingest (Bearer BACKEND_AUTH_TOKEN)
 
-Backend ingestion
-  ├─ Classify: "time-range-scan" + "append-only" → "logs" store
-  ├─ Route: k8fy.events pod
-  ├─ Store: Postgres/Elasticsearch
-  ├─ Update: pod registry
-  └─ Emit: refinement loop observation
+Backend ingestion (see EVENT_INGESTION.md)
+  ├─ resolveTenantContext(r) → (tenant_id, cluster_id)
+  ├─ Classify traits → store type (kv for live-state/certs, relational for events/metrics)
+  ├─ Route to a cluster-aware pod ID (models.PodID, ADR 0024)
+  ├─ Store in Postgres
+  └─ Update pod registry
 ```
 
-## Data Examples
+## Data examples
 
 ### Pod event
 ```json
@@ -94,7 +111,8 @@ Backend ingestion
   "event_namespace": "k8fy.live-state",
   "type": "MODIFIED",
   "source": "kubernetes-api",
-  "timestamp": "2026-05-31T10:00:00Z",
+  "entity_key": "payment-svc-abc",
+  "timestamp": "2026-08-03T10:00:00Z",
   "payload": {
     "pod_id": "payment-svc-abc",
     "namespace": "prod",
@@ -111,21 +129,13 @@ Backend ingestion
   "event_namespace": "k8fy.certificates",
   "type": "cert_check",
   "source": "kubernetes-api",
-  "timestamp": "2026-05-31T10:00:00Z",
+  "entity_key": "tls-cert-prod",
+  "timestamp": "2026-08-03T10:00:00Z",
   "payload": {
     "secret": "tls-cert-prod",
     "namespace": "prod",
-    "expires_at": "2026-07-15T10:00:00Z",
-    "days_until_expiry": 45
+    "expires_at": "2026-10-15T10:00:00Z",
+    "dns_names": ["payment.prod.svc.cluster.local"]
   }
 }
 ```
-
-## Next: Sending events to backend
-
-Currently, normalized events are logged but not sent to backend. To complete:
-
-1. Create HTTP client (with retry + backoff)
-2. Send events to `POST /api/ingest`
-3. Handle errors (log, dead-letter queue)
-4. Add metrics (events/sec, errors/sec)
