@@ -2,20 +2,29 @@
 
 Pre-fetch sequence:
   1. get_metrics_history(namespace, service_name, order=asc) — always, unconditionally.
+  2. Fleet-cluster scoping (ROADMAP P16 / ADR 0023/0024): if service_name is
+     present, resolve which cluster(s) run it via the Hub's cluster_services
+     registry, and add a cluster-scoped get_metrics_history per resolved
+     cluster — no live equivalent exists for restart metrics, so this is the
+     ingested-data path only (ADR 0024's cluster_id support on
+     get_metrics_history). A no-op for deployments with no registered fleet
+     clusters.
 
 Restart time-series is the single data source for this intent; its parameters are
 fully known from context, so pre-fetching before the Claude call is safe and
 eliminates the agentic tool-call round-trip entirely.
 
-Cost: 1 backend fetch + exactly 1 Claude call (predictable).
+Cost: 1 backend fetch (+ 1 per resolved fleet cluster) + exactly 1 Claude call.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict
 
 from k8fy.agent import K8fyAgent
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import RESTART_TREND_PROMPT
+from k8fy.service_topology import resolve_service_clusters
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
 
@@ -50,9 +59,20 @@ class RestartTrendSkill(K8fyAgent):
         args: Dict[str, Any] = {"namespace": namespace, "order": "asc"}
         if service_name:
             args["service_name"] = service_name
-        try:
-            result = await self._fetch("get_metrics_history", args)
-            return {"metrics_history": result}
-        except Exception as exc:
-            logger.warning("metrics_history prefetch failed: %s", exc)
-            return {}
+
+        tasks: Dict[str, Any] = {"metrics_history": self._fetch("get_metrics_history", args)}
+
+        if service_name:
+            for cluster_id in await resolve_service_clusters(namespace, service_name, self.backend_url):
+                tasks[f"metrics_history.{cluster_id}"] = self._fetch(
+                    "get_metrics_history", {**args, "cluster_id": cluster_id},
+                )
+
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        prefetched: Dict[str, Any] = {}
+        for key, result in zip(tasks.keys(), results):
+            if isinstance(result, Exception):
+                logger.warning("metrics_history prefetch failed for %s: %s", key, result)
+            else:
+                prefetched[key] = result
+        return prefetched

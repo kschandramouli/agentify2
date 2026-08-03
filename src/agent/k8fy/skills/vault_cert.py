@@ -18,6 +18,7 @@ from typing import Any, Dict
 from k8fy.agent import K8fyAgent
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import VAULT_CERT_PROMPT
+from k8fy.service_topology import resolve_service_clusters
 from k8fy.tools import TOOLS, process_tool_call
 from models.response import AgentResponse
 
@@ -126,8 +127,20 @@ class VaultCertSkill(K8fyAgent):
     async def _prefetch(
         self, data: Dict[str, Any], context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Fetch Vault cert status and K8s cert status in parallel."""
+        """Fetch Vault cert status and K8s cert status in parallel.
+
+        Fleet-cluster scoping (ROADMAP P16 / ADR 0023/0024) only applies to
+        the K8s-cert half (get_certificates, ADR 0024's cluster_id support) —
+        NOT to get_vault_cert_status. Vault is addressed by a single
+        VAULT_ADDR this agent process is configured with; there is no
+        per-cluster Vault routing concept anywhere (no live_get_vault_status
+        tool, no cluster_id support on the Hub's Vault-facing code), so a
+        resolved fleet cluster's Vault instance (if it even has one) can't be
+        reached this way. Flagged rather than silently assumed away — a real
+        gap if Vault-backed cert monitoring needs to span a fleet.
+        """
         namespace = context.get("namespace", "payments")
+        service_name = context.get("service_name") or context.get("service")
         pki_role  = context.get("pki_role", data.get("pki_role", "payment-api"))
         kv_path   = context.get("kv_path",  data.get("kv_path",  "secret/data/payments/tls"))
 
@@ -135,6 +148,12 @@ class VaultCertSkill(K8fyAgent):
             "vault_cert": self._fetch("get_vault_cert_status", {"pki_role": pki_role, "kv_path": kv_path}),
             "k8s_certs":  self._fetch("get_certificates", {"namespace": namespace}),
         }
+
+        if service_name:
+            for cluster_id in await resolve_service_clusters(namespace, service_name, self.backend_url):
+                tasks[f"k8s_certs.{cluster_id}"] = self._fetch(
+                    "get_certificates", {"namespace": namespace, "cluster_id": cluster_id},
+                )
 
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         prefetched: Dict[str, Any] = {}

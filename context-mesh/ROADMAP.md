@@ -890,6 +890,21 @@ cluster-scoped `get_service_health` + `live_list_pods`; `CertAuditSkill` to
 a brand-new `live_get_certificates` tool — the first Secrets RBAC grant
 `agentify-discovery` has ever had, narrow-scoped to `type=kubernetes.io/tls`
 client-side, flagged in the ADR as RBAC-unenforced at the Kubernetes level).
+
+**Resolver rollout complete (2026-08-03):** `ChangeHistorySkill`,
+`RestartTrendSkill`, and `VaultCertSkill` also now call
+`resolve_service_clusters` — every Pattern-A skill uses the resolver.
+`ChangeHistorySkill`/`RestartTrendSkill` fan out a cluster-scoped
+`get_change_history`/`get_metrics_history` per resolved cluster (no live
+equivalent exists for either signal, so ingested-data-only, same as
+`get_service_health`). `VaultCertSkill` only scopes its K8s-cert half
+(`get_certificates`) — `get_vault_cert_status` is deliberately never given a
+`cluster_id`: Vault is addressed by a single `VAULT_ADDR` this agent process
+is configured with, and no per-cluster Vault routing concept exists
+anywhere (no `live_get_vault_status` tool, no Hub-side Vault cluster_id
+support) — flagged in `vault_cert.py` as a real gap if Vault-backed cert
+monitoring ever needs to span a fleet, not silently assumed away.
+
 **Still open, sub-problem (3):** `Integration.Token` is still plaintext
 Postgres, not Secrets-Manager-backed.
 
