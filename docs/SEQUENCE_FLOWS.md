@@ -49,7 +49,7 @@ sequenceDiagram
         else cert_check → CertAuditSkill
             Note over Py: [Pattern A] 1 cert fetch → 1 Opus call
         else diagnose → DiagnoseSkill
-            Note over Py: [Pattern B] Sonnet executor + Opus advisor loop
+            Note over Py: [Pattern A] parallel multi-signal pre-fetch<br/>(+ fleet-cluster fan-out, ADR 0023/0024) → 1 Opus call
         else general_query / metrics_query → K8fyAgent
             Note over Py: [Pattern B] Opus agentic loop · up to 5 tool iterations
         end
@@ -132,71 +132,69 @@ Tool iterations recorded in Prometheus: **0**.
 
 ---
 
-## 4. Pattern B — DiagnoseSkill (`diagnose`) with Advisor/Executor
+## 4. Pattern A — DiagnoseSkill (`diagnose`), including fleet-cluster fan-out
 
-**Same agentic tool loop as K8fyAgent** — the structural difference is the model
-pair and a single extra tool in the list. Sonnet 4.6 (executor) is the primary
-model and makes all K8fy tool calls exactly as Opus does in K8fyAgent. Opus 4.8
-(advisor) is just another entry in `tools` — a server-side tool Sonnet can
-optionally call 0–3 times for strategic guidance. The client never sees the
-advisor sub-inference; it arrives pre-resolved inside the response.
+**Superseded 2026-06-11 ([ADR 0017](../context-mesh/decisions/0017-pattern-a-skills-standardisation.md)):**
+this used to be an agentic Sonnet-executor/Opus-advisor loop (same shape as
+Diagram 5 below). `DiagnoseSkill` is now Pattern A like `HealthSkill`/
+`CertAuditSkill`: every predictable signal is pre-fetched in parallel, then
+exactly **one** Opus call reasons over all of it. As of ROADMAP P16/ADR 0024
+(2026-08-03), the pre-fetch also resolves which of the tenant's fleet
+clusters run the service being diagnosed and fans out a cluster-scoped
+signal per match — [correlation.md](../context-mesh/policies/correlation.md)'s
+existing rule (fan out, let Tier-2 synthesize/surface disagreement), not a
+new mechanism.
 
 ```mermaid
 sequenceDiagram
-    participant Router   as SkillRouter
-    participant Skill    as DiagnoseSkill
-    participant BE       as Backend API<br/>/api/agent/fetch
-    participant Anthropic as Anthropic Server
+    participant Router as SkillRouter
+    participant Skill  as DiagnoseSkill
+    participant BE     as Backend API
+    participant Hub    as Hub (Go backend)
+    participant Coll   as agentify-discovery<br/>(fleet cluster's collector)
+    participant Anthropic as Anthropic API<br/>claude-opus-4-8
 
     Router->>Skill: dispatch("diagnose", data, context)
 
-    Note over Skill: tools list = [advisor_20260301, get_service_health,<br/>query_pod, get_pod_events, get_pod_logs,<br/>get_metrics_history, get_change_history]
+    Note over Skill: [Pattern A] parallel pre-fetch (asyncio.gather)
 
-    loop Agentic tool loop · same structure as K8fyAgent (up to max_iterations)
-
-        Skill->>Anthropic: beta.messages.create<br/>model=sonnet-4-6 · tools=[advisor + 6 K8fy tools]
-
-        opt Sonnet chooses to call the advisor tool (0–3 times total across the request)
-            rect rgb(235, 245, 255)
-                Note over Anthropic: Server-side Opus 4.8 sub-inference<br/>Full conversation forwarded automatically<br/>adaptive thinking · max_tokens=2048<br/>advisor_tool_result added to response
-            end
-        end
-
-        Anthropic-->>Skill: response<br/>(may contain advisor_tool_result and/or tool_use blocks)
-
-        alt stop_reason == tool_use  (Sonnet requested K8fy data)
-            loop Execute each tool_use block in parallel
-                Skill->>BE: /api/agent/fetch {tool_name, args}
-                BE-->>Skill: tool result
-            end
-            Note over Skill: append full assistant turn + tool_results<br/>(advisor_tool_result blocks passed through verbatim)
-        else stop_reason == end_turn
-            Note over Skill: final structured JSON answer
-        end
-
+    par Core signals (unscoped — this deployment's own cluster)
+        Skill->>BE: get_service_health / get_pod_events /<br/>get_metrics_history / get_change_history /<br/>get_logs / get_service_dependencies
+        BE-->>Skill: ingested-store results
+    and Fleet resolution (ADR 0023)
+        Skill->>Hub: GET /api/resolve-cluster?namespace=..&service=..
+        Hub-->>Skill: {cluster_ids: [...]}  (empty for single-cluster deployments — no-op)
     end
 
-    Skill-->>Router: AgentResponse {findings, likely_cause, severity, …}
+    opt cluster_ids non-empty
+        loop once per resolved cluster_id
+            par
+                Skill->>BE: get_service_health {..., cluster_id}
+                Note over BE: cluster-scoped pod ID (ADR 0024)<br/>k8fy.live-state.{cluster_id}.{namespace}
+                BE-->>Skill: cluster-scoped ingested result
+            and
+                Skill->>Hub: POST /api/live-fetch {cluster_id, tool: live_list_pods}
+                Hub->>Coll: relay over persistent connection (ADR 0022 Decision #7)
+                Coll-->>Hub: live K8s snapshot
+                Hub-->>Skill: live_list_pods result
+            end
+        end
+    end
+
+    Note over Skill: merge every pre-fetched result (core + per-cluster) into one user message
+
+    Skill->>Anthropic: messages.create<br/>model=opus-4-8 · no tools · merged data
+    Note over Anthropic: adaptive thinking · effort=high<br/>structured output (DIAGNOSE_REASONING_SCHEMA)
+    Anthropic-->>Skill: {findings, likely_cause, severity, …}
+
+    Skill-->>Router: AgentResponse
 ```
 
-**How this differs from K8fyAgent fallback (Diagram 5):**
-
-| | DiagnoseSkill | K8fyAgent |
-|---|---|---|
-| Primary model | **Sonnet 4.6** (cheaper tool-caller) | **Opus 4.8** |
-| Advisor | **Opus 4.8** server-side tool (optional) | None |
-| Tool subset | 6 domain tools + advisor | All 7 tools, no advisor |
-| System prompt | Crash / causal correlation expert | General K8fy operations |
-| API | `client.beta.messages.create` | `client.messages.create` |
-| Billing | Sonnet rates + separate Opus advisor rates | Opus rates only |
-
-The tool loop body is structurally identical. The extra box (advisor) only
-appears when Sonnet decides to consult it — typically once before committing to
-a diagnostic sequence and optionally once before the final answer.
-
-**Cost profile:** Sonnet tokens (executor) + Opus tokens (advisor, reported
-separately in `usage.iterations` as `type: "advisor_message"`).
-Advisor called up to **3 times** per request. Tool iterations in Prometheus: **actual count**.
+**Cost profile:** N parallel backend/Hub fetches (milliseconds to low
+seconds for a live relay hop, no LLM billing) + **1 Opus call**. Fleet
+fan-out only adds cost for tenants with registered clusters — zero extra
+calls otherwise. Tool iterations recorded in Prometheus: **0** (Pattern A
+never loops).
 
 ---
 
@@ -217,7 +215,7 @@ sequenceDiagram
     Note over Agent: [Pattern B] single-model agentic loop
 
     loop Agentic tool loop (up to max_iterations = 5)
-        Agent->>Anthropic: messages.create<br/>model=opus-4-8 · all 7 tools · accumulated messages
+        Agent->>Anthropic: messages.create<br/>model=opus-4-8 · all registered tools · accumulated messages
         Note over Anthropic: adaptive thinking · effort=high<br/>structured output (REASONING_SCHEMA)
 
         alt stop_reason == tool_use
@@ -240,12 +238,59 @@ sequenceDiagram
 
 ---
 
+## 6. Fleet collector persistent connection (ROADMAP P18 use case #9, ADR 0022 Decision #7)
+
+No LLM anywhere in this diagram — `agentify-discovery` is deterministic.
+This is the mechanism Diagram 4's "Fleet resolution" box relies on: a
+collector connects once and stays connected; the Hub relays requests over
+that connection rather than ever dialing into a cluster (which usually
+isn't reachable — NAT, private VPC, firewall).
+
+```mermaid
+sequenceDiagram
+    participant Coll as agentify-discovery<br/>(runs inside the fleet cluster)
+    participant Hub  as Hub (Go backend)<br/>CollectorHub
+    participant Agent as Python agent<br/>(DiagnoseSkill/HealthSkill/CertAuditSkill)
+
+    Note over Coll,Hub: Connection setup (once, reconnects with backoff on drop)
+    Coll->>Hub: GET /api/collector/connect<br/>Authorization: Bearer {COLLECTOR_TOKEN}
+    Hub->>Hub: resolveTenantContext(token) → (tenant_id, cluster_id)
+    Hub-->>Coll: 101 Switching Protocols (WebSocket upgrade)
+    Hub->>Hub: CollectorHub.Register(cluster_id, conn)
+
+    loop Every SCAN_INTERVAL_SECONDS (independent of the connection above)
+        Coll->>Hub: POST /api/cluster-inventory (namespaces + services)
+        Coll->>Hub: POST /api/service-dependencies (mined edges)
+    end
+
+    Note over Agent,Coll: On-demand relay (as many times as needed, over the one open connection)
+    Agent->>Hub: POST /api/live-fetch {cluster_id, tool: "live_list_pods", args}
+    Hub->>Hub: liveFetchAllowedTools[tool]? then CollectorHub.RequestLive(cluster_id, ...)
+    Hub->>Coll: {"id": "...", "type": "request", "tool": "live_list_pods", "args": {...}}<br/>(over the already-open connection)
+    Coll->>Coll: live_tools.dispatch(tool, args)<br/>— reads the K8s API directly, own RBAC only
+    Coll-->>Hub: {"id": "...", "type": "response", "result": {...}}
+    Hub-->>Agent: 200 {result}
+
+    Note over Hub: If no connection is registered for cluster_id,<br/>or the collector doesn't answer within 15s,<br/>Hub returns 502/504 immediately — never blocks indefinitely
+```
+
+**Why this shape:** periodic push (inventory/dependencies) stays plain HTTP
+POST — it already worked and didn't need the persistent channel. Only
+on-demand request/response traffic uses the WebSocket. See the ADR 0022
+amendment (2026-08-03) for why these weren't unified onto one connection.
+
+---
+
 ## Summary comparison
 
-| Path | Skill | LLM calls | Tool loop | Models |
-|------|-------|-----------|-----------|--------|
-| Tier-1 | — | **0** | no | — |
-| Pattern A | HealthSkill | **1** | no | Opus 4.8 |
-| Pattern A | CertAuditSkill | **1** | no | Opus 4.8 |
-| Pattern B | DiagnoseSkill | **1–N** (Sonnet) + advisor sub-calls (Opus) | yes | Sonnet 4.6 + Opus 4.8 |
-| Pattern B | K8fyAgent | **1–N** (Opus) | yes | Opus 4.8 |
+| Path | Skill | LLM calls | Tool loop | Fleet fan-out (ADR 0023/0024) | Models |
+|------|-------|-----------|-----------|--------------------------------|--------|
+| Tier-1 | — | **0** | no | no | — |
+| Pattern A | HealthSkill | **1** | no | yes | Opus 4.8 |
+| Pattern A | CertAuditSkill | **1** | no | yes | Opus 4.8 |
+| Pattern A | DiagnoseSkill | **1** | no | yes | Opus 4.8 |
+| Pattern B | K8fyAgent (fallback) | **1–N** (Opus) | yes | no | Opus 4.8 |
+
+"Fleet fan-out" means the skill calls `resolve_service_clusters` and adds a
+cluster-scoped prefetch task per matching cluster — a no-op (zero extra
+calls) for any deployment with no registered fleet clusters.

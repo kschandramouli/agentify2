@@ -37,6 +37,15 @@ then picks a tier:
   to a pod family, the namespace selects the shard (`k8fy.live-state.<ns>`). Index
   pods are never fetched (no data). _Vector-similarity scoring against pod summaries
   is future, gated on the storage-consolidation work in [ROADMAP](ROADMAP.md)._
+  **Since [ADR 0024](decisions/0024-ingested-data-cluster-scoping.md)
+  (2026-08-03):** the shard ID can also carry a resolved `cluster_id`
+  (`models.PodID`, e.g. `k8fy.live-state.<cluster>.<ns>`) for fleet
+  deployments — this is *how* two clusters' identically-named namespaces
+  stay isolated (the routing key disambiguates them, not a tenant filter on
+  the query itself). Omitted `cluster_id` reproduces the shape above
+  unchanged; resolving which `cluster_id` to route to is a separate step
+  (`GET /api/resolve-cluster`, ADR 0023), not part of this routing decision
+  itself.
 - **Single-pod vs multi-pod (fan-out):** a query scoped to one namespace hits one
   shard; an unscoped or cross-namespace query fans out across the family's shards
   and the results are correlated (see [correlation](policies/correlation.md)).

@@ -27,7 +27,7 @@ The agent integration connects the backend's query orchestrator to Claude AI for
 - TODO: Replace with Claude-based NLP in future
 
 **Query Executor** (`src/backend/internal/orchestrator/query_executor.go`)
-- Routes queries to pods based on intent
+- Routes queries to pods based on intent (and, since ADR 0024, an optional `clusterID` for fleet-scoped reads — see "Fleet clusters" below)
 - Fetches data from selected pods
 - Correlates results from multiple pods
 
@@ -42,29 +42,73 @@ The agent integration connects the backend's query orchestrator to Claude AI for
 - Returns structured `AgentResponse` (answer, status, confidence, sources, details)
 
 **Skill Router** (`src/agent/k8fy/skills/router.py`)
-- Dispatches each intent to the narrowest skill sub-agent (spec 010 — Pattern B)
+- Dispatches each intent to the narrowest skill sub-agent (spec 010)
 - O(1) dispatch table — intent is pre-classified by Go; no classification cost here
 - Falls back to the full `K8fyAgent` for unrecognised intents
+- Registers 9 skills today (`health_check`, `cert_check`, `diagnose`,
+  `change_history`, `metrics_history`, `vault_cert`/`renew_cert`,
+  `incident_respond`, `execute_remediation`, `deploy_guardian_check`) —
+  `router.py` is the source of truth for the current list.
 
-### Skills
+### Skills (core K8s observability path)
 
-| Skill | Intent | Tool subset | Strategy |
+| Skill | Intent | Tool subset (core) | Strategy |
 |-------|--------|-------------|----------|
-| `HealthSkill` | `health_check` | `get_service_health`, `query_pod`, `get_pod_events` | **Pattern A** — parallel pre-fetch + 1 Claude call |
-| `CertAuditSkill` | `cert_check` | `get_certificates` | **Pattern A** — pre-fetch certs + 1 Claude call |
-| `DiagnoseSkill` | `diagnose` | 6 tools (all except `get_certificates`) | **Pattern B** — agentic loop, Opus advisor + Sonnet executor |
-| `K8fyAgent` (fallback) | `general_query`, `metrics_query`, anything else | All 7 tools | **Pattern B** — agentic loop, single model |
+| `HealthSkill` | `health_check` | `get_service_health`, `query_pod`, `get_pod_events` (+ fleet-scoped variants, see below) | **Pattern A** — parallel pre-fetch + 1 Claude call |
+| `CertAuditSkill` | `cert_check` | `get_certificates` (+ `live_get_certificates` per fleet cluster) | **Pattern A** — pre-fetch certs + 1 Claude call |
+| `DiagnoseSkill` | `diagnose` | 6+ tools (all except `get_certificates`) | **Pattern A** — parallel multi-signal pre-fetch + 1 Claude call |
+| `K8fyAgent` (fallback) | `general_query`, `metrics_query`, anything else | All tools | **Pattern B** — agentic tool-calling loop, single model |
 
-`DiagnoseSkill` excludes `get_certificates` because cert data arrives in the pre-fetched payload for `diagnose` queries — the agent reads it from context without a redundant tool call.
+**All five original skill classes standardised on Pattern A** (`HealthSkill`,
+`CertAuditSkill`, `DiagnoseSkill`, `ChangeHistorySkill`, `RestartTrendSkill`)
+— deterministic parallel pre-fetch of every predictable signal, followed by
+exactly one Claude call. No agentic tool-calling loop, no advisor/executor
+pairing. See [ADR 0017](../context-mesh/decisions/0017-pattern-a-skills-standardisation.md)
+(2026-06-11) — this superseded an earlier Opus-advisor/Sonnet-executor
+design for `DiagnoseSkill` that no longer exists in the code. Only the
+`K8fyAgent` fallback (unrecognised intents) still runs a real agentic loop
+(Pattern B).
 
-### Advisor/Executor Strategy (DiagnoseSkill)
+### Fleet clusters & live drill-down (ROADMAP P16/P18, ADR 0022–0024)
 
-`DiagnoseSkill` uses the Claude `advisor_20260301` server-side tool to pair two models in a single API call:
+A tenant can own more than one Kubernetes cluster (a "fleet"). Each cluster
+runs `agentify-discovery`, a deterministic, non-agentic collector — never a
+second copy of this agent — that:
+- pushes namespace/service inventory and a mined service-dependency graph to
+  the Hub on a timer (`POST /api/cluster-inventory`, `/api/service-dependencies`), and
+- holds open a **persistent outbound WebSocket** to the Hub
+  (`GET /api/collector/connect`) for on-demand "live" requests — the Hub
+  relays a request over that connection and returns the collector's answer,
+  never the other way around (no standing credential lets the Hub reach
+  into a cluster).
 
-- **Executor — Sonnet 4.6** (`claude-sonnet-4-6`): primary model; handles all K8fy tool calls cheaply
-- **Advisor — Opus 4.8** (`claude-opus-4-8`): consulted mid-generation via the server-side tool for strategic diagnostic planning
+**How a skill uses this:** `resolve_service_clusters(namespace, service,
+backend_url)` (`src/agent/k8fy/service_topology.py`) asks the Hub's
+`GET /api/resolve-cluster` which fleet cluster(s) run a given service — 0
+matches (the common case for a single-cluster deployment) is a no-op; 1 or
+more matches means the skill adds one prefetch task **per resolved
+cluster**, per [correlation.md](../context-mesh/policies/correlation.md)'s
+existing fan-out rule (diagnostic intent fans out across every matching
+signal; Tier-2 synthesizes and surfaces disagreement rather than picking a
+winner). `DiagnoseSkill` and `HealthSkill` both do this today; `CertAuditSkill`
+does the same for `live_get_certificates`.
 
-The executor calls the advisor tool when committing to a diagnostic approach, when tool results are ambiguous, and before producing the final answer. Advisor output is capped at 2,048 tokens per call; up to 3 advisor calls are allowed per request. All of this happens inside a single `/v1/messages` call — no extra round trips.
+**Two ways a tool call can be "live":**
+- `live_list_pods` / `live_get_pod_logs` / `live_get_events` /
+  `live_describe_pod` / `live_get_certificates` — reach a cluster's
+  real-time K8s API. Pass `cluster_id` to relay through
+  `agentify-discovery`'s persistent connection instead of this agent pod's
+  own in-cluster ServiceAccount; omit it to query the agent's own cluster
+  directly (unchanged, original behavior). `live_get_certificates` has
+  **no** local implementation — it always requires `cluster_id`.
+- `get_service_health` / `get_pod_events` / `get_metrics_history` /
+  `get_change_history` / `get_certificates` — the *ingested*-store tools
+  now also accept an optional `cluster_id` (ADR 0024): the Hub builds a
+  cluster-scoped pod ID (`models.PodID`, e.g.
+  `"k8fy.live-state.cluster-42.payments"` instead of
+  `"k8fy.live-state.payments"`) so two clusters' identically-named
+  namespaces never collide. Omitted `cluster_id` behaves exactly as before
+  this ADR.
 
 ### Data Flow
 
@@ -77,14 +121,14 @@ User Question
     ↓
 [Route to Pods] → Find relevant pods in registry based on intent
     ↓
-[Fetch Data] → Query each pod's storage backend (Postgres, Redis, Weaviate)
+[Fetch Data] → Query the Postgres-backed store (ADR 0010) for the selected pod(s)
     ↓
 [Agent Client] → Send {question, intent, pod_data, context} to agent service
     ↓
-[Skill Router] → Dispatch intent → HealthSkill | CertAuditSkill | DiagnoseSkill | K8fyAgent
+[Skill Router] → Dispatch intent → HealthSkill | CertAuditSkill | DiagnoseSkill | … | K8fyAgent
     ↓
 [Claude API] → Reason about data using skill-specific prompt + tool subset
-              (DiagnoseSkill: Sonnet executor + Opus advisor tool)
+              (Pattern A: 1 call; K8fyAgent fallback: agentic loop, N calls)
     ↓
 [Format Response] → Return {answer, status, confidence, sources, details}
     ↓
@@ -101,13 +145,11 @@ AGENT_SERVICE_URL=http://localhost:8001   # Where agent service is running
 **Agent Service** (via `.env` or environment):
 ```bash
 ANTHROPIC_API_KEY=sk-...                  # Claude API key (also accepted as CLAUDE_API_KEY)
-CLAUDE_MODEL=claude-opus-4-8              # Default model (single-model path)
+CLAUDE_MODEL=claude-opus-4-8              # Default model
 CLAUDE_MAX_TOKENS=4096                    # Room for adaptive thinking + structured answer
 CLAUDE_EFFORT=high                        # low | medium | high | max
-AGENT_MAX_TOOL_ITERATIONS=5              # Cap on the tool-calling loop per request
+AGENT_MAX_TOOL_ITERATIONS=5              # Cap on the tool-calling loop per request (K8fyAgent fallback only)
 ```
-
-DiagnoseSkill's advisor (`claude-opus-4-8`) and executor (`claude-sonnet-4-6`) models are hardcoded constants in `src/agent/k8fy/agent.py` (`ADVISOR_MODEL`, `EXECUTOR_MODEL`).
 
 ## Usage Example
 
@@ -160,30 +202,40 @@ The system currently recognises these intents:
 
 | Intent | Trigger words (heuristic) | Skill dispatched | Tools available |
 |--------|--------------------------|------------------|-----------------|
-| `health_check` | "health", "healthy", "status", "up" | `HealthSkill` | 3 |
-| `cert_check` | "certificate", "cert", "expir", "tls" | `CertAuditSkill` | 1 |
-| `diagnose` | "diagnose", "why", "cause", "failing", "crash" | `DiagnoseSkill` | 6 |
-| `metrics_query` | "metric", "cpu", "memory", "usage" | `K8fyAgent` (fallback) | 7 |
-| `general_query` | (default) | `K8fyAgent` (fallback) | 7 |
+| `health_check` | "health", "healthy", "status", "up" | `HealthSkill` | 3 core + fleet-scoped variants |
+| `cert_check` | "certificate", "cert", "expir", "tls" | `CertAuditSkill` | 1 core + `live_get_certificates` |
+| `diagnose` | "diagnose", "why", "cause", "failing", "crash" | `DiagnoseSkill` | 6+ tools |
+| `metrics_query` | "metric", "cpu", "memory", "usage" | `K8fyAgent` (fallback) | All tools |
+| `general_query` | (default) | `K8fyAgent` (fallback) | All tools |
+
+`vault_cert`/`renew_cert`, `incident_respond`, `execute_remediation`, and
+`deploy_guardian_check` route to their own skills too — see `router.py` and
+`inferIntent()` for the current full list.
 
 ## Tools
 
-The agent has access to tools that fetch live data from the backend via `POST /api/agent/fetch`
-(the core set below; `src/agent/k8fy/tools.py` is the source of truth for the full current list,
-which has since grown to include semantic-memory, live-diagnostics, and Vault tools not detailed here):
+The agent has access to tools that fetch data via `POST /api/agent/fetch`
+(ingested store) or, for `live_*` tools, `POST /api/live-fetch` (relayed to a
+fleet cluster's collector). `src/agent/k8fy/tools.py` is the source of truth
+for the full current list.
 
 | Tool | Description | Key parameters |
 |------|-------------|----------------|
-| `get_service_health` | Endpoints, ready ratio, pod statuses for a service | `service_name`, `namespace` |
+| `get_service_health` | Endpoints, ready ratio, pod statuses for a service | `service_name`, `namespace`, `cluster_id` (optional, ADR 0024) |
 | `query_pod` | Phase, ready status, restart count for a specific pod | `pod_id`, `namespace` |
 | `get_pod_events` | Recent warning/crash events for a pod | `pod_id`, `namespace`, `limit` |
-| `get_certificates` | Certificate list, expiry dates, renewal needs | `namespace` (optional) |
+| `get_certificates` | Certificate list, expiry dates, renewal needs (ingested snapshot) | `namespace` (optional) |
 | `get_logs` | **Preferred** bounded redacted log tail — tries the Glue/Athena log platform first when configured (ADR 0021), else the live cluster; `previous=true` for the crashed container | `namespace`, `pod`, `previous`, `tail_lines` |
 | `get_pod_logs` | Same, but always reads the adapter's cached store specifically — use `get_logs` unless you need this cached snapshot in particular | `pod_id`, `namespace`, `previous`, `tail_lines` |
 | `get_metrics_history` | Restart-count time-series over a window | `pod_id`, `namespace`, `since`, `until`, `order` |
 | `get_change_history` | Deployment/rollout events over a time window | `deployment`, `namespace`, `since`, `until` |
+| `get_service_dependencies` | Mined service-call graph for a namespace (`service_topology.py`) | `namespace` |
+| `get_similar_incidents` | Semantic search over past diagnoses (P8, pgvector) | `namespace`, `service`, `description`, `limit` |
+| `get_vault_cert_status` / `rotate_vault_cert` | HashiCorp Vault PKI cert lifecycle | `pki_role`, `common_name`, … |
+| `live_list_pods` / `live_get_pod_logs` / `live_get_events` / `live_describe_pod` | LIVE K8s API reads — this agent's own cluster, or a fleet cluster via `cluster_id` | `namespace`, `pod`, `cluster_id` (optional) |
+| `live_get_certificates` | LIVE TLS cert expiry from a fleet cluster's `kubernetes.io/tls` Secrets — **`cluster_id` required**, no local implementation | `namespace`, `cluster_id` |
 
-Tools are defined in `src/agent/k8fy/tools.py`. Each skill sub-agent is given only the tools relevant to its domain (see Skills table above).
+Each skill sub-agent is given only the tools relevant to its domain (see Skills table above).
 
 ## Fallback Behavior
 
@@ -191,6 +243,11 @@ If the agent service is unavailable:
 - Backend returns raw pod data formatted as plain text
 - Response has `status: "partial"` and `confidence: 0.5`
 - User gets data but without Claude's reasoning
+
+If a fleet cluster's collector is disconnected, `live_*` tool calls degrade
+to a clear error (`"cluster not connected"`, HTTP 502 from
+`POST /api/live-fetch`) rather than blocking — the skill's other prefetch
+tasks still complete and Claude reasons over whatever landed.
 
 ## Testing
 
@@ -212,7 +269,7 @@ curl -X POST http://localhost:8080/api/query \
     "context": {"namespace": "prod"}
   }' | jq .
 
-# Terminal 3: Send a diagnose query (uses advisor/executor path)
+# Terminal 3: Send a diagnose query
 curl -X POST http://localhost:8080/api/query \
   -H "Content-Type: application/json" \
   -d '{
@@ -230,9 +287,13 @@ make test-integration   # Run tests (includes query testing)
 
 ## Future Improvements
 
-1. **Multi-turn Conversation**: Keep chat history for follow-up questions
-2. **Dynamic Intent**: Let Claude infer intent from question instead of heuristics
-3. **Correlation Queries**: Handle questions that span multiple data sources
+1. **Dynamic Intent**: Let Claude infer intent from question instead of heuristics
+2. **Namespace/service → cluster auto-routing**: today `cluster_id` must be
+   resolved via `resolve_service_clusters` per-tool-call; P16's remaining
+   sub-problem 3 (`Integration.Token` off plaintext Postgres) is still open —
+   see [ROADMAP](../context-mesh/ROADMAP.md) P16
+3. **Remaining P18 fleet-collector use cases** (ingress mapping, fleet
+   health/capacity snapshots, RBAC/NetworkPolicy posture) — see ROADMAP P18
 4. **Scheduled Queries**: Support "alert me if X becomes unhealthy"
 
 ## Troubleshooting
@@ -246,6 +307,17 @@ make test-integration   # Run tests (includes query testing)
 - Agent service likely errored; check its logs
 - Backend will fall back to returning raw data
 
-**Slow responses on diagnose queries:**
-- DiagnoseSkill uses the `advisor_20260301` beta tool; the advisor sub-inference does not stream — expect a short pause while Opus runs
-- Check `usage.iterations` in logs for advisor token counts; advisor tokens are billed separately at Opus rates
+**A `live_*` tool call returns "cluster not connected":**
+- The target cluster's `agentify-discovery` collector isn't holding an open
+  connection to the Hub — check its pod logs and confirm `COLLECTOR_TOKEN`
+  matches the `Integration` row's `collector_token` (see
+  [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md))
+- `live_get_certificates` specifically also needs the collector's
+  ClusterRole to have the `secrets: list, get` grant added in ADR 0024
+
+**Two clusters' data looks merged/wrong for the same namespace name:**
+- Confirm the caller actually resolved and passed `cluster_id` — omitting it
+  routes to the legacy unscoped pod ID, which predates fleet support and is
+  shared across every cluster reporting that namespace without a
+  `cluster_id` (this is the ADR 0024 "byte-for-byte unchanged" default, not
+  a bug, but it does mean an un-scoped query can't distinguish clusters)

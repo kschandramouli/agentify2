@@ -209,6 +209,15 @@ ADAPTER_TOKEN=$(aws secretsmanager get-secret-value \
 kubectl create secret generic agentify-adapter-secret -n agentify \
   --from-literal=token=$ADAPTER_TOKEN
 
+# Fleet collector token (agentify-discovery, ROADMAP P18/P16, ADR 0022-0024) —
+# only needed if this cluster is joining a multi-cluster fleet. Mint the value
+# via POST/PUT /admin/integrations' collector_token field first (it becomes
+# that Integration row's credential — see ADR 0022), then sync it here:
+COLLECTOR_TOKEN=$(aws secretsmanager get-secret-value \
+  --secret-id agentify/dev/discovery --query SecretString --output text | jq -r .collector_token)
+kubectl create secret generic agentify-discovery-secret -n agentify \
+  --from-literal=collector_token=$COLLECTOR_TOKEN
+
 # Anthropic API key
 ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
   --secret-id agentify/dev/anthropic --query SecretString --output text | jq -r .api_key)
@@ -235,6 +244,25 @@ Get the ALB address:
 ```bash
 kubectl get ingress -n agentify
 ```
+
+### Optional — join a multi-cluster fleet (ROADMAP P18/P16)
+
+Only needed if this cluster reports into a shared Hub alongside other
+clusters. Requires the `agentify-discovery-secret` created in Step 7.
+
+```bash
+kubectl apply -f infra/kubernetes/discovery.yaml
+kubectl rollout status deployment/agentify-discovery -n agentify
+```
+
+**Security note (ADR 0024):** `agentify-discovery`'s ClusterRole grants
+`secrets: list, get` cluster-wide — the collector's `live_get_certificates`
+capability needs to read `kubernetes.io/tls` Secrets for expiry, but RBAC
+itself can't scope by Secret *type*, only by resource kind. The collector
+enforces the type filter client-side (`fieldSelector=type=kubernetes.io/tls`)
+and never returns raw cert/key bytes, but a compromised collector pod would
+have read access to every Secret in the cluster. Review before onboarding a
+cluster with sensitive Secrets outside the TLS-cert use case.
 
 ---
 
