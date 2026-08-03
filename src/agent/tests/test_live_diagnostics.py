@@ -181,6 +181,6 @@ async def test_live_describe_pod_combines_status_and_events(sa_token, monkeypatc
 @pytest.mark.asyncio
 async def test_dispatch_rejects_unknown_tool():
     from k8fy.tools import _dispatch_live_diagnostic
-    result = await _dispatch_live_diagnostic("live_delete_pod", {})
+    result = await _dispatch_live_diagnostic("live_delete_pod", {}, "http://backend")
     assert "error" in result
     assert "Unknown live diagnostic tool" in result["error"]

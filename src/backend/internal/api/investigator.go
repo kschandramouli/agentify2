@@ -33,7 +33,7 @@ type reasoner interface {
 // so gather/investigate can be tested without real storage. *orchestrator.QueryExecutor
 // satisfies it.
 type signalFetcher interface {
-	RouteToPods(ctx context.Context, intent, namespace string) ([]*models.Pod, error)
+	RouteToPods(ctx context.Context, intent, namespace, clusterID string) ([]*models.Pod, error)
 	FetchFromPod(ctx context.Context, pod *models.Pod, query map[string]interface{}) ([]map[string]interface{}, error)
 }
 
@@ -260,7 +260,7 @@ func (in *Investigator) investigateAndNotify(ctx context.Context, ns string, an 
 	traceID := uuid.New().String()
 
 	// Reuse the diagnose fan-out: all k8fy leaves for the namespace, redacted.
-	pods, err := in.queryExec.RouteToPods(ctx, "diagnose", ns)
+	pods, err := in.queryExec.RouteToPods(ctx, "diagnose", ns, "")
 	if err != nil {
 		in.logger.Error("investigation routing failed", "namespace", ns, "error", err)
 		return

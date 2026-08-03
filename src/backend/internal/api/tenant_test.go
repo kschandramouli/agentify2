@@ -12,10 +12,13 @@ import (
 )
 
 // fakeIntegrationStore implements IntegrationStore with just enough behavior
-// to exercise resolveTenantContext — every other method panics if called,
-// since none of these tests should reach them.
+// to exercise resolveTenantContext and HandleClusterInventoryUpsert — every
+// other method panics if called, since none of these tests should reach
+// them. UpdateIntegrationNamespaces is a real (non-panicking) implementation
+// since cluster_inventory_test.go needs to assert what it was called with.
 type fakeIntegrationStore struct {
-	byToken map[string]*pgstore.Integration
+	byToken           map[string]*pgstore.Integration
+	updatedNamespaces map[string][]string // keyed by cluster (Integration) id
 }
 
 func (f *fakeIntegrationStore) GetIntegrationByCollectorToken(ctx context.Context, token string) (*pgstore.Integration, error) {
@@ -36,6 +39,13 @@ func (f *fakeIntegrationStore) CreateIntegration(ctx context.Context, in *pgstor
 }
 func (f *fakeIntegrationStore) UpdateIntegration(ctx context.Context, in *pgstore.Integration) error {
 	panic("not used by resolveTenantContext tests")
+}
+func (f *fakeIntegrationStore) UpdateIntegrationNamespaces(ctx context.Context, id string, namespaces []string) error {
+	if f.updatedNamespaces == nil {
+		f.updatedNamespaces = map[string][]string{}
+	}
+	f.updatedNamespaces[id] = namespaces
+	return nil
 }
 func (f *fakeIntegrationStore) DeleteIntegration(ctx context.Context, id string) error {
 	panic("not used by resolveTenantContext tests")

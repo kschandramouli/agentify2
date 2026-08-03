@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 _VAULT_ADDR = os.environ.get("VAULT_ADDR", "")
 _VAULT_TOKEN = os.environ.get("VAULT_TOKEN", "")
 
+# Shared input_schema property for the four live_* tools (ROADMAP P18 use
+# case #9): omit for the agent's own cluster (today's unchanged behavior);
+# set to target another of the tenant's fleet clusters, relayed through that
+# cluster's agentify-discovery collector. This tool does NOT resolve "which
+# cluster is service X in" — that's P16 (multi-cluster connector), not
+# built — the caller must already know the id, listed via GET /admin/integrations.
+CLUSTER_ID_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Optional: target a specific fleet cluster by its Integration id "
+        "(see GET /admin/integrations) instead of the agent's own cluster. "
+        "Omit for the local cluster."
+    ),
+}
+
 # Tool schema for Claude to understand what it can call
 TOOLS = [
     {
@@ -234,6 +249,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "cluster_id": CLUSTER_ID_PROPERTY,
             },
             "required": ["namespace"],
         },
@@ -253,6 +269,7 @@ TOOLS = [
                 "container": {"type": "string", "description": "Container name (optional)."},
                 "tail_lines": {"type": "integer", "description": "Lines from the end (default 200, capped at 1000)."},
                 "previous": {"type": "boolean", "description": "Read the previous (crashed) container instance."},
+                "cluster_id": CLUSTER_ID_PROPERTY,
             },
             "required": ["namespace", "pod"],
         },
@@ -265,6 +282,7 @@ TOOLS = [
             "properties": {
                 "namespace": {"type": "string", "description": "Kubernetes namespace"},
                 "pod": {"type": "string", "description": "Pod name to filter events to (optional)."},
+                "cluster_id": CLUSTER_ID_PROPERTY,
             },
             "required": ["namespace"],
         },
@@ -277,8 +295,27 @@ TOOLS = [
             "properties": {
                 "namespace": {"type": "string", "description": "Kubernetes namespace"},
                 "pod": {"type": "string", "description": "Pod name"},
+                "cluster_id": CLUSTER_ID_PROPERTY,
             },
             "required": ["namespace", "pod"],
+        },
+    },
+    {
+        "name": "live_get_certificates",
+        "description": (
+            "LIVE TLS certificate expiry check for a namespace — reads kubernetes.io/tls "
+            "Secrets directly from the cluster and returns parsed expiry metadata only "
+            "(never raw cert/key material). Unlike get_certificates (the ingested-store "
+            "snapshot), this ALWAYS requires cluster_id — there is no local/current-agent "
+            "implementation, only the fleet-relay path (ROADMAP P18 use case #9)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string", "description": "Kubernetes namespace"},
+                "cluster_id": CLUSTER_ID_PROPERTY,
+            },
+            "required": ["namespace", "cluster_id"],
         },
     },
     # ── Semantic memory tool (P8) ─────────────────────────────────────────────
@@ -541,8 +578,32 @@ async def _get_similar_incidents(
         return {"similar_incidents": [], "error": str(exc)}
 
 
-async def _dispatch_live_diagnostic(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Dispatch to the live_diagnostics function matching a LIVE_DIAGNOSTIC_TOOLS name."""
+async def _remote_live_fetch(backend_url: str, cluster_id: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Relay a live_* tool call to a specific fleet cluster's collector via
+    the Hub's on-demand relay (ADR 0022 Decision #7 / ROADMAP P18 use case
+    #9), instead of calling this agent pod's own in-cluster K8s API. `args`
+    is passed through as-is minus `cluster_id` itself (the collector's
+    live_tools.dispatch doesn't need to see its own routing key).
+    """
+    args = {k: v for k, v in arguments.items() if k != "cluster_id"}
+    url = f"{backend_url.rstrip('/')}/api/live-fetch"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, json={"cluster_id": cluster_id, "tool": tool_name, "args": args})
+        if resp.status_code != 200:
+            return {"error": f"live-fetch to cluster {cluster_id} failed ({resp.status_code}): {resp.text[:300]}"}
+        return resp.json()
+    except httpx.HTTPError as e:
+        return {"error": f"live-fetch to cluster {cluster_id} failed: {e}"}
+
+
+async def _dispatch_live_diagnostic(tool_name: str, arguments: Dict[str, Any], backend_url: str) -> Dict[str, Any]:
+    """Dispatch to the live_diagnostics function matching a LIVE_DIAGNOSTIC_TOOLS
+    name — locally (this agent pod's own cluster) unless `cluster_id` is
+    present, in which case it's relayed to that fleet cluster's collector."""
+    cluster_id = arguments.get("cluster_id")
+    if cluster_id:
+        return await _remote_live_fetch(backend_url, cluster_id, tool_name, arguments)
     if tool_name == "live_list_pods":
         return await live_diagnostics.live_list_pods(namespace=arguments.get("namespace", ""))
     if tool_name == "live_get_pod_logs":
@@ -563,6 +624,13 @@ async def _dispatch_live_diagnostic(tool_name: str, arguments: Dict[str, Any]) -
             namespace=arguments.get("namespace", ""),
             pod=arguments.get("pod", ""),
         )
+    if tool_name == "live_get_certificates":
+        # No local (this-agent's-own-cluster) implementation — remote-only,
+        # always requires an explicit cluster_id (handled above, before this
+        # local dispatch chain is ever reached). Reaching here means the
+        # caller omitted cluster_id, which is always a caller bug for this
+        # specific tool, not a degrade-gracefully case.
+        return {"error": "live_get_certificates requires an explicit cluster_id — no local in-cluster implementation"}
     return {"error": f"Unknown live diagnostic tool: {tool_name}"}
 
 
@@ -605,9 +673,10 @@ async def process_tool_call(
             limit=int(arguments.get("limit", 3)),
         )
 
-    # Live diagnostics: calls the live K8s API directly, never the backend store.
+    # Live diagnostics: calls the live K8s API directly (or, with cluster_id,
+    # relays to that fleet cluster's collector) — never the backend store.
     if tool_name in LIVE_DIAGNOSTIC_TOOLS:
-        return await _dispatch_live_diagnostic(tool_name, arguments)
+        return await _dispatch_live_diagnostic(tool_name, arguments, backend_url)
 
     # get_logs: tries the log platform (Glue/Athena) first when configured,
     # falls back to the live cluster — see log_router.py.

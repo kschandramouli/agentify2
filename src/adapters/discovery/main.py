@@ -18,9 +18,10 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-from . import k8s_client
+from . import k8s_client, live_relay
 from .config import Config, load_from_env
 from .health import serve_health
+from .inventory import push_inventory
 from .log_redaction import redact_log_text
 from .service_topology import extract_service_mentions, push_dependency
 
@@ -72,8 +73,38 @@ async def _scan_namespace(ns: str, cfg: Config) -> None:
             await push_dependency(ns, from_service, to_service, cfg.backend_url, cfg.collector_token)
 
 
+async def _namespace_service_names(ns: str) -> Optional[List[str]]:
+    """This namespace's service names if it's "active" — has at least one
+    Service, Deployment, StatefulSet, or DaemonSet — else None (excludes
+    empty namespaces the ServiceAccount can merely list). ROADMAP P18 use
+    case #1 only needed the active/inactive bool; ROADMAP P16 / ADR 0023's
+    service->cluster registry needs the real names too, which this same scan
+    already has on hand via list_services — nothing extra to fetch.
+    """
+    services = await k8s_client.list_services(ns)
+    if services:
+        return [s["name"] for s in services]
+    if await k8s_client.list_deployments(ns) or await k8s_client.list_statefulsets(ns) or await k8s_client.list_daemonsets(ns):
+        return []  # active (has workloads) but no Service fronts them
+    return None  # inactive
+
+
+async def _scan_inventory(namespaces: List[str], cfg: Config) -> None:
+    namespace_services: Dict[str, List[str]] = {}
+    for ns in namespaces:
+        names = await _namespace_service_names(ns)
+        if names is not None:
+            namespace_services[ns] = names
+    if namespace_services:
+        await push_inventory(namespace_services, cfg.backend_url, cfg.collector_token)
+
+
 async def _scan_once(cfg: Config) -> None:
     namespaces = await k8s_client.list_namespaces(exclude=set(cfg.namespace_exclude))
+    try:
+        await _scan_inventory(namespaces, cfg)
+    except Exception:
+        logger.exception("inventory scan failed")
     for ns in namespaces:
         try:
             await _scan_namespace(ns, cfg)
@@ -94,6 +125,15 @@ async def _run(cfg: Config, shutdown: asyncio.Event) -> None:
             await asyncio.wait_for(shutdown.wait(), timeout=cfg.scan_interval_seconds)
         except asyncio.TimeoutError:
             pass  # normal: next cycle starts
+
+
+async def _run_all(cfg: Config, shutdown: asyncio.Event) -> None:
+    """Runs the periodic scan-and-push loop and the on-demand live-relay
+    connection (ADR 0022 Decision #7 / ROADMAP P18 use case #9) as two
+    independent background tasks — a drop in one never affects the other.
+    Both already stop cleanly once `shutdown` is set.
+    """
+    await asyncio.gather(_run(cfg, shutdown), live_relay.run_forever(cfg, shutdown))
 
 
 def main() -> None:
@@ -120,7 +160,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
-        loop.run_until_complete(_run(cfg, shutdown))
+        loop.run_until_complete(_run_all(cfg, shutdown))
     except KeyboardInterrupt:
         logger.info("agentify-discovery shutting down")
     finally:

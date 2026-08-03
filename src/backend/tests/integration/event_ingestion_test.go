@@ -71,7 +71,7 @@ func TestEventIngestion(t *testing.T) {
 	event := gen.GeneratePodRestartEvent("payment-svc-abc")
 
 	// Test: Ingest the event
-	result, err := ingester.Ingest(ctx, event)
+	result, err := ingester.Ingest(ctx, event, postgres.DefaultTenantID, "")
 	if err != nil {
 		t.Fatalf("failed to ingest event: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestPodCreation(t *testing.T) {
 	event := gen.GeneratePodRestartEvent("new-service-xyz")
 
 	// First ingest should create the pod
-	result1, err := ingester.Ingest(ctx, event)
+	result1, err := ingester.Ingest(ctx, event, postgres.DefaultTenantID, "")
 	if err != nil {
 		t.Fatalf("failed to ingest: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestPodCreation(t *testing.T) {
 
 	// Second ingest to same event type should reuse pod
 	event2 := gen.GeneratePodHealthyEvent("another-pod")
-	result2, err := ingester.Ingest(ctx, event2)
+	result2, err := ingester.Ingest(ctx, event2, postgres.DefaultTenantID, "")
 	if err != nil {
 		t.Fatalf("failed to ingest second event: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestMultipleEvents(t *testing.T) {
 	events := gen.GenerateBulkPodEvents("test-pod", 10)
 
 	for i, event := range events {
-		result, err := ingester.Ingest(ctx, event)
+		result, err := ingester.Ingest(ctx, event, postgres.DefaultTenantID, "")
 		if err != nil {
 			t.Fatalf("failed to ingest event %d: %v", i, err)
 		}

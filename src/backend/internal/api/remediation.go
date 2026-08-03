@@ -45,7 +45,7 @@ func (h *Handler) checkRemediationAuth(r *http.Request) bool {
 // generation and post-execution verification see the same shape of data the
 // diagnose path already relies on.
 func (h *Handler) fetchNamespaceData(ctx context.Context, namespace string) map[string]interface{} {
-	pods, err := h.queryExec.RouteToPods(ctx, "diagnose", namespace)
+	pods, err := h.queryExec.RouteToPods(ctx, "diagnose", namespace, "")
 	if err != nil {
 		h.logger.Warn("remediation data fetch: routing failed", "namespace", namespace, "error", err)
 		return map[string]interface{}{}

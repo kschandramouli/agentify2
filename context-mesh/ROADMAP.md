@@ -43,7 +43,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 | **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
-| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use case #2 (service-dependency mining) shipped 2026-08-03 as `agentify-discovery`**; use cases #1/#3/#5-#9 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py` |
+| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03 as `agentify-discovery`**; use cases #3/#5-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
 
 ---
 
@@ -868,6 +868,31 @@ a tenant (customer/org) can own a fleet of multiple clusters, each still
 represented by its own `Integration` row. The namespace→cluster routing work
 below is unchanged in shape, just additionally scoped by tenant.
 
+**v1 done (2026-08-03, [ADR 0023](decisions/0023-service-cluster-resolver.md)):**
+sub-problem (1) above — namespace/service→cluster routing — is solved via a
+new `cluster_services` registry table (populated by `agentify-discovery`'s
+existing inventory push, which already fetched service names and previously
+discarded them) and `GET /api/resolve-cluster`, wired into `DiagnoseSkill`'s
+Pattern-A prefetch (`src/agent/k8fy/skills/diagnose.py`): every fleet
+cluster resolved for the service being diagnosed gets a live snapshot
+prefetched via the ROADMAP P18 use case #9 relay, all in parallel —
+`correlation.md`'s existing fan-out rule, not a new mechanism.
+
+**v2 done (2026-08-03, [ADR 0024](decisions/0024-ingested-data-cluster-scoping.md)):**
+sub-problem (2) is now also resolved — not by making `h.adapterClient` a
+keyed per-Integration cache as originally framed, but by making pod IDs
+themselves cluster-aware (`models.PodID`, `internal/models/shard.go`):
+`current_state`/`events` reads and writes are isolated by which pod ID they
+target, not a WHERE-clause retrofit (RLS was deliberately rejected for these
+two tables — see ADR 0024's "Isolation mechanism" section). `HealthSkill`
+and `CertAuditSkill` now also use the resolver (`HealthSkill` fans out to
+cluster-scoped `get_service_health` + `live_list_pods`; `CertAuditSkill` to
+a brand-new `live_get_certificates` tool — the first Secrets RBAC grant
+`agentify-discovery` has ever had, narrow-scoped to `type=kubernetes.io/tls`
+client-side, flagged in the ADR as RBAC-unenforced at the Kubernetes level).
+**Still open, sub-problem (3):** `Integration.Token` is still plaintext
+Postgres, not Secrets-Manager-backed.
+
 **Original framing (2026-07-21), preserved for context — since superseded by
 ADR 0022:** this was multi-**cluster**, not multi-**tenant** — ADR 0009
 (single-tenant per deployment, no `tenant_id`/RLS) stayed as-is, and serving
@@ -987,11 +1012,24 @@ just EKS. This item is the concrete *what to build*.
   amendment).
 
 **Use cases unlocked, roughly in build order:**
-1. **Namespace/Service/Deployment inventory** — portable via the core K8s
-   API (`Services`, `Deployments`/`StatefulSets`/`DaemonSets` list calls).
-   Feeds `Integration.Namespaces` automatically — auto-discovery instead of
-   the manual entry `IntegrationsPanel.tsx` currently requires, closing the
-   gap flagged when that form's namespace field was made editable earlier.
+1. **Namespace/Service/Deployment inventory — shipped 2026-08-03**
+   (`src/adapters/discovery/inventory.py`, `k8s_client.py`'s
+   `list_deployments`/`list_statefulsets`/`list_daemonsets`): each scan cycle,
+   `agentify-discovery` now also lists every namespace's `Service`s,
+   `Deployment`s, `StatefulSet`s, and `DaemonSet`s via the portable core
+   `apps/v1` API and pushes the resulting **active-namespace list** (any
+   namespace with at least one of those objects) to a new tenant/cluster-
+   scoped `POST /api/cluster-inventory` endpoint, which overwrites the
+   matching `Integration.Namespaces` — auto-discovery instead of the manual
+   checkbox entry `IntegrationsPanel.tsx` currently requires, closing the gap
+   flagged when that form's namespace field was made editable earlier. Full
+   replace per push (reflects live cluster truth — a decommissioned
+   namespace disappears on the next cycle, not left stale). **Known gap, not
+   solved here:** `IntegrationsPanel.tsx`'s manual namespace editor still
+   does a full replace on save via `PUT /admin/integrations/{id}`, so an
+   admin saving that form after auto-discovery has run would clobber the
+   collector-pushed list — same class of deferred-UX gap as use case #2's
+   onboarding follow-up, flagged as a manual follow-up, not blocking.
 2. **Service-dependency mining — shipped 2026-08-03 as `agentify-discovery`**
    (`src/adapters/discovery/`): a standalone Deployment reusing
    `extract_service_mentions`'s logic off the portable pod-logs API,
@@ -1038,9 +1076,24 @@ just EKS. This item is the concrete *what to build*.
    does its RBAC surface look like) — a bigger scope increase than the
    others (new signal category), tracked here but not assumed to ship with
    the first version of the collector.
-9. **On-demand live drill-down** — via the corrected outbound-connection
-   mechanism above; "show me live state in cluster B right now" from a
-   chat session, without a standing central credential for the fleet.
+9. **On-demand live drill-down — shipped 2026-08-03** (`src/backend/
+   internal/api/collector_hub.go`'s `CollectorHub` + `HandleCollectorConnect`/
+   `HandleLiveFetch`; `src/adapters/discovery/live_relay.py` +
+   `live_tools.py`): the collector now also holds open a **second**,
+   purpose-built persistent WebSocket to the Hub (`GET /api/collector/
+   connect`, same `CollectorToken` handshake as the push endpoints) —
+   periodic push (use cases #1/#2) stays plain HTTP POST, unchanged; see the
+   ADR 0022 amendment for why these weren't unified onto one connection.
+   The agent's four `live_*` tools (`src/agent/k8fy/tools.py`) gained an
+   optional `cluster_id` argument: omitted, they behave exactly as before
+   (direct in-cluster call); set, `POST /api/live-fetch` relays the request
+   to that cluster's collector over its open connection and returns the
+   answer — "show me live state in cluster B right now" from chat, without
+   a standing central credential for the fleet (P17's rejected shape).
+   **Known gap, not solved here:** `cluster_id` must be supplied explicitly
+   (via `GET /admin/integrations`) — this does not build "which cluster is
+   service X in" auto-routing, which is [P16](#p16--multi-cluster-connector-proposed-2026-07-21),
+   separately proposed and not started.
 
 **Explicitly out of scope for this item:** ADR 0008/0007's coupled-decision
 follow-ups (per-tenant model routing/BYOK, per-tenant redaction policy) —

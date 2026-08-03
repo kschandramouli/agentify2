@@ -121,6 +121,40 @@ async def test_fetch_service_dependencies_degrades_to_empty_on_error(monkeypatch
     assert deps == []
 
 
+# ── resolve_service_clusters (ROADMAP P16 / ADR 0023) ────────────────────────
+
+@pytest.mark.asyncio
+async def test_resolve_service_clusters_returns_ids(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("namespace") == "payments"
+        assert request.url.params.get("service") == "payment-api"
+        return httpx.Response(200, json={"cluster_ids": ["cluster-42", "cluster-99"]})
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    clusters = await st.resolve_service_clusters("payments", "payment-api", "http://backend")
+    assert clusters == ["cluster-42", "cluster-99"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_service_clusters_empty_on_no_match(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"cluster_ids": []})
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    clusters = await st.resolve_service_clusters("payments", "unknown-svc", "http://backend")
+    assert clusters == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_service_clusters_degrades_to_empty_on_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    clusters = await st.resolve_service_clusters("payments", "payment-api", "http://backend")
+    assert clusters == []
+
+
 # ── mine_service_dependencies (orchestration) ────────────────────────────────
 
 @pytest.mark.asyncio

@@ -41,6 +41,13 @@ LIVE_DIAGNOSTIC_TOOLS = frozenset({
     "live_get_pod_logs",
     "live_get_events",
     "live_describe_pod",
+    # live_get_certificates (ROADMAP P16/P18, ADR 0024) has NO local
+    # implementation in this module — it's remote-only, always requires an
+    # explicit cluster_id and is served by agentify-discovery's
+    # live_tools.py over the persistent-connection relay (use case #9).
+    # Listed here anyway so process_tool_call/_dispatch_live_diagnostic and
+    # app.py's /live-tool-call allow-list route it correctly.
+    "live_get_certificates",
 })
 
 

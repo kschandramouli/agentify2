@@ -30,7 +30,7 @@ func NewQueryExecutor(reg registry.PodStore, bf *storage.BackendFactory, logger 
 // Execute routes a query to pod(s), fetches results, and correlates them.
 func (qe *QueryExecutor) Execute(ctx context.Context, intent string, query map[string]interface{}, namespace string) (map[string]interface{}, error) {
 	// Step 1: Parse intent and determine target pods
-	pods, err := qe.RouteToPods(ctx, intent, namespace)
+	pods, err := qe.RouteToPods(ctx, intent, namespace, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to route query: %w", err)
 	}
@@ -69,26 +69,32 @@ func (qe *QueryExecutor) Execute(ctx context.Context, intent string, query map[s
 // `namespace` is the K8s namespace the query is scoped to (the live-state
 // partition key), not the integration grouping. Index pods are never returned —
 // they hold only a shard map and have no backend data to fetch.
-func (qe *QueryExecutor) RouteToPods(ctx context.Context, intent string, namespace string) ([]*models.Pod, error) {
+//
+// clusterID (ADR 0024) targets a specific fleet cluster's shard, mirroring
+// how ingestion builds cluster-scoped pod IDs (models.PodID) — empty
+// clusterID (every call site not yet passing one, including the "diagnose"/
+// default fan-out below, which isn't touched by this ADR) routes exactly as
+// before.
+func (qe *QueryExecutor) RouteToPods(ctx context.Context, intent string, namespace string, clusterID string) ([]*models.Pod, error) {
 	var pods []*models.Pod
 	var err error
 
 	switch intent {
 	case "health_check":
 		// Current health lives in the per-namespace live-state shard.
-		pods, err = qe.routeLiveState(ctx, namespace)
+		pods, err = qe.routeLiveState(ctx, namespace, clusterID)
 
 	case "metrics_query", "metrics_history":
 		// Restart/metric samples are an append-only time-series in their own pod
 		// (spec 006), no longer folded into live-state.
-		pods, err = qe.getLeafPod(ctx, "k8fy.metrics")
+		pods, err = qe.getLeafPod(ctx, models.PodID("k8fy.metrics", clusterID))
 
 	case "cert_check":
-		pods, err = qe.getLeafPod(ctx, "k8fy.certificates")
+		pods, err = qe.getLeafPod(ctx, models.PodID("k8fy.certificates", clusterID))
 
 	case "change_history":
 		// Deploy/change events live in the append-only events pod (spec 007).
-		pods, err = qe.getLeafPod(ctx, "k8fy.events")
+		pods, err = qe.getLeafPod(ctx, models.PodID("k8fy.events", clusterID))
 
 	case "diagnose":
 		// Multi-signal diagnosis (spec 005): fan out to every k8fy leaf so the agent
@@ -97,6 +103,9 @@ func (qe *QueryExecutor) RouteToPods(ctx context.Context, intent string, namespa
 
 	default:
 		// General/diagnostic query: every active k8fy leaf pod (skip index pods).
+		// Not cluster-scoped — this path is reached via HandleQuery's initial
+		// routing, not the agent's per-tool cluster_id-aware fetches (ADR 0024
+		// scopes HandleAgentFetch's tool routing, not this one).
 		integration := "k8fy"
 		var all []*models.Pod
 		all, err = qe.registry.ListPods(ctx, &models.PodFilter{Namespace: &integration})
@@ -107,16 +116,17 @@ func (qe *QueryExecutor) RouteToPods(ctx context.Context, intent string, namespa
 		return nil, err
 	}
 
-	qe.logger.Info("routed query to pods", "intent", intent, "namespace", namespace, "pod_count", len(pods))
+	qe.logger.Info("routed query to pods", "intent", intent, "namespace", namespace, "cluster_id", clusterID, "pod_count", len(pods))
 	return pods, nil
 }
 
-// routeLiveState targets the live-state shard for the requested K8s namespace,
-// falling back to a fan-out across all live-state shards when the namespace is
-// unspecified or its shard doesn't exist yet (cross-shard correlation).
-func (qe *QueryExecutor) routeLiveState(ctx context.Context, namespace string) ([]*models.Pod, error) {
+// routeLiveState targets the live-state shard for the requested K8s namespace
+// (and, per ADR 0024, cluster), falling back to a fan-out across all
+// live-state shards when the namespace is unspecified or its shard doesn't
+// exist yet (cross-shard correlation).
+func (qe *QueryExecutor) routeLiveState(ctx context.Context, namespace, clusterID string) ([]*models.Pod, error) {
 	if namespace != "" {
-		shardID := "k8fy.live-state." + namespace
+		shardID := models.PodID("k8fy.live-state", clusterID, namespace)
 		if pod, err := qe.registry.GetPod(ctx, shardID); err == nil && pod.Kind == "leaf" {
 			return []*models.Pod{pod}, nil
 		}

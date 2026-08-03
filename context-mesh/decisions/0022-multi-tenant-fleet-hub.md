@@ -241,6 +241,33 @@ anticipated — scope and time this accordingly, not as a quick flag flip.
    deployment, which is its own decision with its own migration plan, not
    something to fold in casually alongside this ADR.
 
+**Amendment (2026-08-03), found while building Decision #7's on-demand
+drill-down (ROADMAP P18 use case #9, `agentify-discovery`'s
+`live_relay.py`/`live_tools.py` + the Hub's `CollectorHub`):**
+
+- **Periodic push does NOT move onto the persistent connection.** Decision
+  #7's text describes "periodic push and the Hub's on-demand requests" both
+  flowing over the one outbound connection. In practice, use case #9 was
+  built as a **second, separate** WebSocket purely for on-demand
+  request/response traffic — `inventory.push_inventory` and
+  `service_topology.push_dependency` (use cases #1/#2) stay exactly as
+  shipped, plain HTTP POST. Migrating already-working, already-tested push
+  code onto the new channel bought nothing for this slice and would have
+  been pure churn; the two concerns (fire-and-forget periodic reporting vs.
+  request/response drill-down) have different failure modes and don't need
+  to share a transport just because the ADR originally imagined they would.
+  Revisit only if running two connections per cluster becomes an actual
+  operational cost worth collapsing.
+- **`cluster_id` is supplied by the caller, not resolved automatically.**
+  The Hub's `POST /api/live-fetch` and the agent's `live_*` tool schemas
+  require an explicit `cluster_id` (an `Integration.ID`, listed via the
+  existing `GET /admin/integrations`). This item does not build "which
+  cluster is service X in" resolution — that's [P16](../ROADMAP.md#p16--multi-cluster-connector-proposed-2026-07-21)
+  (multi-cluster connector), separately proposed and not started. Chat can
+  ask "show me pods in cluster `cluster-42`" today; it cannot yet ask "show
+  me pods for `payment-api`" and have that resolve to the right cluster on
+  its own.
+
 ## Consequences
 
 - **Positive:** unlocks the actual target architecture (one shared Hub, many

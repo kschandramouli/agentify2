@@ -115,6 +115,60 @@ async def list_pods(namespace: str) -> List[Dict[str, Any]]:
     return pods
 
 
+async def list_tls_secrets(namespace: str) -> List[Dict[str, str]]:
+    """List TLS Secrets in `namespace` as `{"name": ..., "tls_crt_b64": ...}`
+    (ROADMAP P16/P18 use case unlocked by ADR 0024's live_get_certificates).
+
+    Filtered server-side to `type=kubernetes.io/tls` via a field selector —
+    never lists arbitrary Secrets. Returns the still-base64-encoded `tls.crt`
+    field only; decoding/parsing (and NEVER returning it downstream) is
+    live_tools.py's job, not this thin transport layer's. `tls.key` (the
+    private key) is never read here at all — only `tls.crt` is extracted
+    from each Secret's data.
+    """
+    params = {"fieldSelector": "type=kubernetes.io/tls"}
+    resp = await _k8s_get(f"/api/v1/namespaces/{quote(namespace)}/secrets", params)
+    if resp.status_code != 200:
+        logger.warning("list tls secrets failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    secrets = []
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        tls_crt_b64 = item.get("data", {}).get("tls.crt", "")
+        if not name or not tls_crt_b64:
+            continue
+        secrets.append({"name": name, "tls_crt_b64": tls_crt_b64})
+    return secrets
+
+
+async def _list_apps_v1_names(namespace: str, resource: str) -> List[str]:
+    """Shared list-and-extract-names helper for the apps/v1 workload kinds
+    below — identical shape to list_services/list_pods, just against a
+    different API group/resource."""
+    resp = await _k8s_get(f"/apis/apps/v1/namespaces/{quote(namespace)}/{resource}")
+    if resp.status_code != 200:
+        logger.warning("list %s failed for namespace=%s (%s): %s", resource, namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    return [name for item in items if (name := item.get("metadata", {}).get("name", ""))]
+
+
+async def list_deployments(namespace: str) -> List[str]:
+    """List Deployment names in `namespace` (apps/v1)."""
+    return await _list_apps_v1_names(namespace, "deployments")
+
+
+async def list_statefulsets(namespace: str) -> List[str]:
+    """List StatefulSet names in `namespace` (apps/v1)."""
+    return await _list_apps_v1_names(namespace, "statefulsets")
+
+
+async def list_daemonsets(namespace: str) -> List[str]:
+    """List DaemonSet names in `namespace` (apps/v1)."""
+    return await _list_apps_v1_names(namespace, "daemonsets")
+
+
 async def get_pod_logs(namespace: str, pod: str, tail_lines: int = 200) -> str:
     """Fetch a bounded, unredacted tail of a pod's current logs. Callers
     must redact before this text leaves the cluster (see log_redaction.py)."""

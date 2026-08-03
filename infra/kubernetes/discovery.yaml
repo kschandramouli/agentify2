@@ -98,6 +98,26 @@ rules:
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["list", "get"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["list", "get"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["list", "get"]
+# ADR 0024 / live_get_certificates: the first Secrets read access this
+# collector has ever been granted. Deliberately NOT namespace-wide-blind —
+# k8s_client.list_tls_secrets always applies a server-side
+# fieldSelector=type=kubernetes.io/tls, so this grant only ever surfaces TLS
+# secrets, never arbitrary ones (app credentials, service-account tokens,
+# etc.), and live_get_certificates never returns the decoded cert/key bytes
+# themselves, only parsed expiry metadata. RBAC itself cannot express a
+# field-selector restriction, so this is enforced by the client, not by
+# Kubernetes — flagged here so a future reviewer knows this ClusterRole
+# grants list/get on ALL Secrets cluster-wide, and the narrowing is a
+# code-level guarantee, not an RBAC one.
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["list", "get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

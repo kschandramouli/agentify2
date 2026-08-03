@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,66 @@ func TestPostgresStores(t *testing.T) {
 		}
 	})
 
+	t.Run("ADR 0024: Store persists tenant_id/cluster_id on events and current_state", func(t *testing.T) {
+		eventID := uuid.New().String()
+		if _, err := client.Store(ctx, "k8fy.events.cluster-42", map[string]interface{}{
+			"id":              eventID,
+			"event_namespace": "k8fy.events",
+			"type":            "pod_restart",
+			"timestamp":       "2026-08-03T00:00:00Z",
+			"payload":         map[string]interface{}{"reason": "OOMKilled"},
+			"tenant_id":       "tenant-z",
+			"cluster_id":      "cluster-42",
+		}); err != nil {
+			t.Fatalf("events store: %v", err)
+		}
+		var eventTenant, eventCluster string
+		if err := client.db.QueryRowContext(ctx,
+			`SELECT tenant_id, cluster_id FROM events WHERE id = $1`, eventID,
+		).Scan(&eventTenant, &eventCluster); err != nil {
+			t.Fatalf("query event tenant/cluster: %v", err)
+		}
+		if eventTenant != "tenant-z" || eventCluster != "cluster-42" {
+			t.Errorf("events row: want tenant-z/cluster-42, got %s/%s", eventTenant, eventCluster)
+		}
+
+		cs := client.CurrentStateStore()
+		if _, err := cs.Store(ctx, "k8fy.live-state.cluster-42.payments", map[string]interface{}{
+			"entity_key":      "payment-api-abc",
+			"event_namespace": "k8fy.live-state",
+			"type":            "pod_modified",
+			"source":          "kubernetes-api",
+			"payload":         map[string]interface{}{"ready": true},
+			"tenant_id":       "tenant-z",
+			"cluster_id":      "cluster-42",
+		}); err != nil {
+			t.Fatalf("current_state store: %v", err)
+		}
+		var csTenant, csCluster string
+		if err := client.db.QueryRowContext(ctx,
+			`SELECT tenant_id, cluster_id FROM current_state WHERE pod_id = $1 AND entity_key = $2`,
+			"k8fy.live-state.cluster-42.payments", "payment-api-abc",
+		).Scan(&csTenant, &csCluster); err != nil {
+			t.Fatalf("query current_state tenant/cluster: %v", err)
+		}
+		if csTenant != "tenant-z" || csCluster != "cluster-42" {
+			t.Errorf("current_state row: want tenant-z/cluster-42, got %s/%s", csTenant, csCluster)
+		}
+
+		// Omitting tenant_id/cluster_id (every call site not yet passing them)
+		// must still succeed and default sensibly — the byte-for-byte-unchanged
+		// guarantee for existing deployments.
+		if _, err := client.Store(ctx, "k8fy.events", map[string]interface{}{
+			"id":              uuid.New().String(),
+			"event_namespace": "k8fy.events",
+			"type":            "pod_restart",
+			"timestamp":       "2026-08-03T00:00:00Z",
+			"payload":         map[string]interface{}{"reason": "OOMKilled"},
+		}); err != nil {
+			t.Fatalf("events store without tenant/cluster: %v", err)
+		}
+	})
+
 	t.Run("multi-tenancy migration: existing insert paths default tenant_id, leave cluster_id empty", func(t *testing.T) {
 		// ADR 0022, phase 1 (schema only): CreateIntegration doesn't reference
 		// tenant_id/cluster_id at all, so Postgres must apply the column
@@ -128,6 +189,126 @@ func TestPostgresStores(t *testing.T) {
 		}
 		if got.ClusterID != "" {
 			t.Errorf("cluster_id: want empty (NULL), got %q", got.ClusterID)
+		}
+	})
+
+	t.Run("UpdateIntegrationNamespaces overwrites only namespaces, leaving other fields untouched", func(t *testing.T) {
+		id := uuid.New().String()
+		in := &Integration{
+			ID: id, Name: "cluster-a", AdapterURL: "http://adapter", Namespaces: []string{"old-ns"},
+			Status: "active", CollectorToken: "collector-secret",
+		}
+		if err := client.CreateIntegration(ctx, in); err != nil {
+			t.Fatalf("create integration: %v", err)
+		}
+
+		if err := client.UpdateIntegrationNamespaces(ctx, id, []string{"payments", "checkout"}); err != nil {
+			t.Fatalf("update namespaces: %v", err)
+		}
+
+		got, err := client.GetIntegration(ctx, id)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if len(got.Namespaces) != 2 || got.Namespaces[0] != "payments" || got.Namespaces[1] != "checkout" {
+			t.Errorf("namespaces: want [payments checkout], got %v", got.Namespaces)
+		}
+		if got.Name != "cluster-a" || got.AdapterURL != "http://adapter" {
+			t.Errorf("unrelated fields should be untouched: got name=%q adapter_url=%q", got.Name, got.AdapterURL)
+		}
+	})
+
+	t.Run("ADR 0024: TrackedEntities extracts the real namespace from a cluster-scoped pod_id", func(t *testing.T) {
+		cs := client.CurrentStateStore()
+		mustStore(t, cs, "k8fy.live-state.orders", "order-worker-abc123-xz9y2", map[string]interface{}{
+			"pod_id": "order-worker-abc123-xz9y2", "ready": true,
+		})
+		mustStore(t, cs, "k8fy.live-state.cluster-77.orders", "order-worker-def456-ab1c3", map[string]interface{}{
+			"pod_id": "order-worker-def456-ab1c3", "ready": true,
+		})
+
+		entities, err := cs.TrackedEntities(ctx)
+		if err != nil {
+			t.Fatalf("TrackedEntities: %v", err)
+		}
+		found := map[string]bool{}
+		for _, e := range entities {
+			found[e] = true
+		}
+		if !found["orders/order-worker"] {
+			t.Errorf("want orders/order-worker (unscoped) in %v", entities)
+		}
+		// The cluster-scoped row must resolve to the same clean namespace, not
+		// "cluster-77.orders/...".
+		hasCleanClusterEntry := false
+		for e := range found {
+			if strings.HasPrefix(e, "orders/order-worker") {
+				hasCleanClusterEntry = true
+			}
+			if strings.Contains(e, "cluster-77") {
+				t.Errorf("cluster segment leaked into TrackedEntities output: %q", e)
+			}
+		}
+		if !hasCleanClusterEntry {
+			t.Errorf("expected at least one clean orders/order-worker entry, got %v", entities)
+		}
+	})
+
+	t.Run("cluster_services registry: resolve by (namespace, service), including ambiguous multi-cluster matches", func(t *testing.T) {
+		tenantID := uuid.New().String()
+
+		if err := client.UpsertClusterServices(ctx, tenantID, "cluster-a", map[string][]string{
+			"payments": {"payment-api", "payment-worker"},
+		}); err != nil {
+			t.Fatalf("upsert cluster-a: %v", err)
+		}
+		if err := client.UpsertClusterServices(ctx, tenantID, "cluster-b", map[string][]string{
+			"payments": {"payment-api"}, // same service name, a different cluster -> ambiguous
+		}); err != nil {
+			t.Fatalf("upsert cluster-b: %v", err)
+		}
+
+		// payment-worker only exists in cluster-a -> single unambiguous match.
+		clusters, err := client.ResolveServiceClusters(ctx, tenantID, "payments", "payment-worker")
+		if err != nil {
+			t.Fatalf("resolve payment-worker: %v", err)
+		}
+		if len(clusters) != 1 || clusters[0] != "cluster-a" {
+			t.Errorf("payment-worker clusters: want [cluster-a], got %v", clusters)
+		}
+
+		// payment-api exists in both -> ambiguous, both surfaced (correlation.md:
+		// surface disagreement, don't silently pick a winner).
+		clusters, err = client.ResolveServiceClusters(ctx, tenantID, "payments", "payment-api")
+		if err != nil {
+			t.Fatalf("resolve payment-api: %v", err)
+		}
+		if len(clusters) != 2 {
+			t.Errorf("payment-api clusters: want 2 matches, got %v", clusters)
+		}
+
+		// Unknown service -> empty, not an error.
+		clusters, err = client.ResolveServiceClusters(ctx, tenantID, "payments", "nonexistent")
+		if err != nil {
+			t.Fatalf("resolve nonexistent: %v", err)
+		}
+		if len(clusters) != 0 {
+			t.Errorf("nonexistent clusters: want empty, got %v", clusters)
+		}
+
+		// A second push to cluster-a fully replaces its prior service set —
+		// payment-worker should disappear once cluster-a stops reporting it.
+		if err := client.UpsertClusterServices(ctx, tenantID, "cluster-a", map[string][]string{
+			"payments": {"payment-api"},
+		}); err != nil {
+			t.Fatalf("re-upsert cluster-a: %v", err)
+		}
+		clusters, err = client.ResolveServiceClusters(ctx, tenantID, "payments", "payment-worker")
+		if err != nil {
+			t.Fatalf("resolve payment-worker after replace: %v", err)
+		}
+		if len(clusters) != 0 {
+			t.Errorf("payment-worker should be gone after cluster-a's full replace, got %v", clusters)
 		}
 	})
 }
@@ -455,6 +636,7 @@ func TestRemediationProposals(t *testing.T) {
 			t.Fatalf("expected proposal to exist: exists=%v err=%v", exists, err)
 		}
 	})
+
 }
 
 func mustTime(t *testing.T, s string) time.Time {

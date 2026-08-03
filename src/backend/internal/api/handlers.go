@@ -37,29 +37,33 @@ type Handler struct {
 	remediationStore  RemediationStore // nil when postgres is not provisioned
 	remediationConfig RemediationConfig
 	serviceDepsStore  ServiceDependencyStore // nil when postgres is not provisioned
+	collectorHub      *CollectorHub          // fleet collectors' persistent connections (ADR 0022 Decision #7 / ROADMAP P18 use case #9)
+	clusterServiceStore ClusterServiceStore  // service->cluster registry (ROADMAP P16 / ADR 0023); nil when postgres is not provisioned
 	logger            *slog.Logger
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
 	return &Handler{
-		orch:              orch,
-		ingester:          ingester,
-		queryExec:         queryExec,
-		agentClient:       NewAgentClient(agentServiceURL),
-		adapterClient:     NewAdapterClient(adapterURL, adapterToken),
-		redactor:          redactor,
-		integrationStore:  integrations,
-		traceStore:        traces,
-		pricingStore:      pricing,
-		chatStore:         chat,
-		remediationStore:  remediation,
-		remediationConfig: remediationCfg,
-		serviceDepsStore:  serviceDeps,
-		logger:            logger,
+		orch:                orch,
+		ingester:            ingester,
+		queryExec:           queryExec,
+		agentClient:         NewAgentClient(agentServiceURL),
+		adapterClient:       NewAdapterClient(adapterURL, adapterToken),
+		redactor:            redactor,
+		integrationStore:    integrations,
+		traceStore:          traces,
+		pricingStore:        pricing,
+		chatStore:           chat,
+		remediationStore:    remediation,
+		remediationConfig:   remediationCfg,
+		serviceDepsStore:    serviceDeps,
+		collectorHub:        NewCollectorHub(),
+		clusterServiceStore: clusterServices,
+		logger:              logger,
 	}
 }
 
@@ -93,9 +97,30 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleIngestEvent accepts a canonical event and ingests it into the mesh.
+//
+// tenantID/clusterID (ADR 0024) come from resolveTenantContext, same
+// CollectorToken credential the fleet-collector push endpoints already use
+// (src/adapters/k8fy/emitter.py already sends a Bearer token with every
+// ingest POST — BACKEND_AUTH_TOKEN — it was just never checked here).
+// Unlike the collector endpoints, an ABSENT credential is not rejected: it
+// defaults to (DefaultTenantID, "") so every existing k8fy-adapter
+// deployment that hasn't been given a CollectorToken keeps ingesting
+// exactly as before. An unrecognized (invalid) token is still rejected —
+// same as every other resolveTenantContext consumer.
 func (h *Handler) HandleIngestEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tenantID, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -107,7 +132,7 @@ func (h *Handler) HandleIngestEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ingest the event
-	result, err := h.ingester.Ingest(r.Context(), &event)
+	result, err := h.ingester.Ingest(r.Context(), &event, tenantID, clusterID)
 	if err != nil {
 		h.logger.Error("ingestion failed", "event_id", event.ID, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -146,8 +171,10 @@ func (h *Handler) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	// For MVP: use simple heuristics to determine intent
 	intent := inferIntent(req.Question)
 
-	// Route to pods and fetch data
-	pods, err := h.queryExec.RouteToPods(r.Context(), intent, namespace)
+	// Route to pods and fetch data. Not cluster-scoped: this is the initial
+	// /api/query routing (ADR 0024 scopes the agent's per-tool
+	// /api/agent/fetch path, not this one — see HandleAgentFetch).
+	pods, err := h.queryExec.RouteToPods(r.Context(), intent, namespace, "")
 	if err != nil {
 		h.logger.Error("failed to route query", "error", err)
 		telemetry.QueriesTotal.WithLabelValues(intent, "none", "error").Inc()
@@ -300,7 +327,14 @@ func (h *Handler) HandleAgentFetch(w http.ResponseWriter, r *http.Request) {
 
 	intent, namespace, key := mapToolToQuery(req.Tool, req.Args)
 
-	pods, err := h.queryExec.RouteToPods(r.Context(), intent, namespace)
+	// cluster_id (ADR 0024) is an optional explicit arg — same shape as
+	// HandleLiveFetch's, not a bearer credential (the agent presents none).
+	// Resolved by the agent via resolve_service_clusters before it calls
+	// here; empty (every call site not yet passing one) routes exactly as
+	// before this ADR.
+	clusterID := stringArg(req.Args, "cluster_id")
+
+	pods, err := h.queryExec.RouteToPods(r.Context(), intent, namespace, clusterID)
 	if err != nil {
 		h.logger.Warn("agent fetch routing failed", "tool", req.Tool, "error", err)
 		// Degrade to an empty result rather than failing the agent's loop.
@@ -1759,6 +1793,235 @@ func (h *Handler) HandleServiceDependencyUpsert(w http.ResponseWriter, r *http.R
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// namespaceInventory is one namespace's entry in the fleet collector's
+// inventory push — the namespace name plus its known service names (ROADMAP
+// P16 / ADR 0023: the collector already fetches these to decide "active",
+// this just stops discarding them after the check).
+type namespaceInventory struct {
+	Name     string   `json:"name"`
+	Services []string `json:"services"`
+}
+
+// clusterInventoryUpsertRequest is the body accepted by POST /api/cluster-inventory.
+type clusterInventoryUpsertRequest struct {
+	Namespaces []namespaceInventory `json:"namespaces"`
+}
+
+// HandleClusterInventoryUpsert records the fleet collector's live namespace
+// + service inventory for its own cluster (ADR 0022 / ROADMAP P18 use case
+// #1, extended by ROADMAP P16 / ADR 0023 to also carry service names) —
+// auto-populates Integration.Namespaces (unchanged) instead of the
+// IntegrationsPanel's manual checkbox entry, and populates the
+// cluster_services registry the P16 resolver reads from. Unlike
+// HandleServiceDependencyUpsert, an absent or unrecognized credential is
+// always rejected here: there is no Integration row to attach namespaces to
+// without one, so the usual "no credential -> DefaultTenantID" default
+// doesn't apply.
+func (h *Handler) HandleClusterInventoryUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	tenantID, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if clusterID == "" {
+		http.Error(w, "a collector credential is required", http.StatusUnauthorized)
+		return
+	}
+	var req clusterInventoryUpsertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Namespaces == nil {
+		req.Namespaces = []namespaceInventory{}
+	}
+
+	namespaces := make([]string, 0, len(req.Namespaces))
+	byNamespace := make(map[string][]string, len(req.Namespaces))
+	for _, ns := range req.Namespaces {
+		namespaces = append(namespaces, ns.Name)
+		byNamespace[ns.Name] = ns.Services
+	}
+
+	if err := h.integrationStore.UpdateIntegrationNamespaces(r.Context(), clusterID, namespaces); err != nil {
+		h.logger.Warn("failed to update integration namespaces", "cluster_id", clusterID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if h.clusterServiceStore != nil {
+		if err := h.clusterServiceStore.UpsertClusterServices(r.Context(), tenantID, clusterID, byNamespace); err != nil {
+			h.logger.Warn("failed to update cluster services", "cluster_id", clusterID, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveClusterResponse is the body returned by GET /api/resolve-cluster.
+type resolveClusterResponse struct {
+	ClusterIDs []string `json:"cluster_ids"`
+}
+
+// HandleResolveCluster answers "which fleet cluster(s) run this
+// (namespace, service)?" (ROADMAP P16 / ADR 0023), read from the
+// cluster_services registry HandleClusterInventoryUpsert populates. Called
+// by the agent over the same unauthenticated trust boundary as
+// GET /api/service-dependencies (the agent doesn't present a credential
+// today — ADR 0022 Decision #8 flags agent tenant-awareness as a separate,
+// unresolved follow-up) — resolves to DefaultTenantID via
+// resolveTenantContext the same way. Returns an empty list (200), never an
+// error, when nothing matches — callers are expected to degrade to today's
+// single-cluster behavior, not treat "unknown" as a failure.
+func (h *Handler) HandleResolveCluster(w http.ResponseWriter, r *http.Request) {
+	namespace := r.URL.Query().Get("namespace")
+	service := r.URL.Query().Get("service")
+	if namespace == "" || service == "" {
+		http.Error(w, "namespace and service are required", http.StatusBadRequest)
+		return
+	}
+	if h.clusterServiceStore == nil {
+		writeJSON(w, http.StatusOK, resolveClusterResponse{ClusterIDs: []string{}})
+		return
+	}
+	tenantID, _, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	clusterIDs, err := h.clusterServiceStore.ResolveServiceClusters(r.Context(), tenantID, namespace, service)
+	if err != nil {
+		h.logger.Warn("failed to resolve service clusters", "namespace", namespace, "service", service, "error", err)
+		writeJSON(w, http.StatusOK, resolveClusterResponse{ClusterIDs: []string{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, resolveClusterResponse{ClusterIDs: clusterIDs})
+}
+
+// HandleCollectorConnect upgrades to a persistent outbound WebSocket
+// connection used for on-demand live-diagnostic drill-down (ADR 0022
+// Decision #7 / ROADMAP P18 use case #9). Same CollectorToken handshake as
+// the push endpoints (resolveTenantContext) — an absent/invalid credential
+// is rejected exactly like HandleClusterInventoryUpsert, since there's no
+// cluster identity to register a connection under otherwise. Blocks for the
+// connection's lifetime (CollectorHub.Register only returns on disconnect).
+func (h *Handler) HandleCollectorConnect(w http.ResponseWriter, r *http.Request) {
+	if h.integrationStore == nil {
+		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	_, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if clusterID == "" {
+		http.Error(w, "a collector credential is required", http.StatusUnauthorized)
+		return
+	}
+	if h.collectorHub == nil {
+		http.Error(w, "collector hub not configured", http.StatusServiceUnavailable)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Error("collector websocket upgrade failed", "cluster_id", clusterID, "error", err)
+		return
+	}
+	h.logger.Info("collector connected", "cluster_id", clusterID)
+	h.collectorHub.Register(clusterID, conn) // blocks until disconnect
+	h.logger.Info("collector disconnected", "cluster_id", clusterID)
+}
+
+// liveFetchAllowedTools mirrors LIVE_DIAGNOSTIC_TOOLS in
+// src/agent/k8fy/live_diagnostics.py — kept explicit here too so this
+// passthrough can never become an arbitrary RPC surface into a cluster.
+var liveFetchAllowedTools = map[string]bool{
+	"live_list_pods":        true,
+	"live_get_pod_logs":     true,
+	"live_get_events":       true,
+	"live_describe_pod":     true,
+	"live_get_certificates": true,
+}
+
+// liveFetchRequest is the body accepted by POST /api/live-fetch.
+type liveFetchRequest struct {
+	ClusterID string         `json:"cluster_id"`
+	Tool      string         `json:"tool"`
+	Args      map[string]any `json:"args"`
+}
+
+// HandleLiveFetch relays one on-demand live-diagnostic call to a specific
+// fleet cluster's already-connected collector (ROADMAP P18 use case #9).
+// Called by the Python agent over the same trusted, unauthenticated
+// boundary as its other backend calls (e.g. GET /api/service-dependencies,
+// GET /api/incidents/similar) — no new auth layer invented here. cluster_id
+// must be supplied by the caller; this endpoint does not resolve "which
+// cluster is service X in" — that's P16 (multi-cluster connector), not
+// built.
+func (h *Handler) HandleLiveFetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.collectorHub == nil {
+		http.Error(w, "collector hub not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req liveFetchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.ClusterID == "" {
+		http.Error(w, "cluster_id is required", http.StatusBadRequest)
+		return
+	}
+	if !liveFetchAllowedTools[req.Tool] {
+		http.Error(w, "unsupported tool", http.StatusBadRequest)
+		return
+	}
+	result, err := h.collectorHub.RequestLive(r.Context(), req.ClusterID, req.Tool, req.Args)
+	if errors.Is(err, ErrClusterNotConnected) {
+		http.Error(w, "cluster not connected", http.StatusBadGateway)
+		return
+	}
+	if errors.Is(err, ErrLiveRequestTimeout) {
+		http.Error(w, "live request timed out", http.StatusGatewayTimeout)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("live fetch failed", "cluster_id", req.ClusterID, "tool", req.Tool, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
 }
 
 // HandleServiceDependencyList returns every mined edge for one namespace —

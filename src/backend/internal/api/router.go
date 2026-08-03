@@ -68,6 +68,20 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /api/service-dependencies", h.HandleServiceDependencyUpsert)
 	mux.HandleFunc("GET /api/service-dependencies", h.HandleServiceDependencyList)
 
+	// Fleet collector's namespace/service/deployment inventory push (ADR 0022 /
+	// ROADMAP P18 use case #1) — auto-populates Integration.Namespaces.
+	mux.HandleFunc("POST /api/cluster-inventory", h.HandleClusterInventoryUpsert)
+
+	// Fleet collector's persistent outbound connection + the agent's on-demand
+	// live-diagnostic relay over it (ADR 0022 Decision #7 / ROADMAP P18 use case #9).
+	mux.HandleFunc("GET /api/collector/connect", h.HandleCollectorConnect)
+	mux.HandleFunc("POST /api/live-fetch", h.HandleLiveFetch)
+
+	// Service->cluster resolver (ROADMAP P16 / ADR 0023) — "which fleet
+	// cluster(s) run this (namespace, service)?", read from the
+	// cluster_services registry POST /api/cluster-inventory populates.
+	mux.HandleFunc("GET /api/resolve-cluster", h.HandleResolveCluster)
+
 	// Admin: on-demand cert renewal — issues from Vault PKI + updates K8s Secret
 	mux.HandleFunc("POST /admin/certs/renew", h.HandleCertRenew)
 

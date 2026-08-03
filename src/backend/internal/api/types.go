@@ -113,6 +113,15 @@ type ServiceDependencyStore interface {
 	ListServiceDependencies(ctx context.Context, tenantID, namespace string) ([]pgstore.ServiceDependency, error)
 }
 
+// ClusterServiceStore is the service->cluster registry interface (ROADMAP
+// P16 / ADR 0023), populated by agentify-discovery's inventory push and
+// consulted by the resolver the agent uses to auto-route live-fetch and
+// DiagnoseSkill requests to the right fleet cluster.
+type ClusterServiceStore interface {
+	UpsertClusterServices(ctx context.Context, tenantID, clusterID string, byNamespace map[string][]string) error
+	ResolveServiceClusters(ctx context.Context, tenantID, namespace, service string) ([]string, error)
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.
@@ -122,6 +131,7 @@ type IntegrationStore interface {
 	GetIntegrationByCollectorToken(ctx context.Context, token string) (*pgstore.Integration, error)
 	CreateIntegration(ctx context.Context, in *pgstore.Integration) error
 	UpdateIntegration(ctx context.Context, in *pgstore.Integration) error
+	UpdateIntegrationNamespaces(ctx context.Context, id string, namespaces []string) error
 	DeleteIntegration(ctx context.Context, id string) error
 }
 

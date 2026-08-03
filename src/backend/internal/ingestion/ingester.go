@@ -36,6 +36,15 @@ func NewIngester(reg registry.PodStore, backends *storage.BackendFactory, logger
 
 // Ingest accepts an event, classifies it, routes to a pod, stores it, and returns feedback.
 //
+// tenantID/clusterID (ADR 0024) come from the caller having already resolved
+// the pushing collector/adapter's credential (HandleIngestEvent's
+// resolveTenantContext) — never from the event body itself, same trust
+// boundary as every other tenant-scoped write in this codebase. An empty
+// clusterID (no credential presented — every deployment that hasn't
+// onboarded a fleet collector) routes and stores exactly as before this ADR;
+// this is what keeps existing single-cluster deployments byte-for-byte
+// unchanged.
+//
 // Workflow:
 // 1. Classify the event by traits (shape, access pattern, temporality, etc.)
 // 2. Route the event to the appropriate pod(s) using storage-strategy
@@ -43,7 +52,7 @@ func NewIngester(reg registry.PodStore, backends *storage.BackendFactory, logger
 // 4. Store the event in the target pod's storage backend
 // 5. Update the pod registry (freshness, event count)
 // 6. Emit feedback for the refinement loop
-func (ing *Ingester) Ingest(ctx context.Context, event *models.Event) (*models.EventIngestionResult, error) {
+func (ing *Ingester) Ingest(ctx context.Context, event *models.Event, tenantID, clusterID string) (*models.EventIngestionResult, error) {
 	start := time.Now()
 
 	// Validate event
@@ -61,14 +70,14 @@ func (ing *Ingester) Ingest(ctx context.Context, event *models.Event) (*models.E
 	)
 
 	// Step 1: Determine target pod(s) via storage routing
-	targetPod, created, err := ing.routeAndCreatePod(ctx, event)
+	targetPod, created, err := ing.routeAndCreatePod(ctx, event, tenantID, clusterID)
 	if err != nil {
 		ing.logger.Error("failed to route event", "event_id", event.ID, "error", err)
 		return nil, err
 	}
 
 	// Step 2: Store event in the target pod's storage backend
-	if err := ing.storeEvent(ctx, targetPod, event); err != nil {
+	if err := ing.storeEvent(ctx, targetPod, event, tenantID, clusterID); err != nil {
 		telemetry.IngestTotal.WithLabelValues(targetPod.StoreType, "error").Inc()
 		ing.logger.Error("failed to store event", "event_id", event.ID, "pod_id", targetPod.ID, "error", err)
 		return nil, err
@@ -116,7 +125,7 @@ func (ing *Ingester) Ingest(ctx context.Context, event *models.Event) (*models.E
 //     entity overwrites the previous one (latest-wins). See ADR 0005.
 //   - history stores (relational) key by the unique event ID so every event is
 //     retained as its own row.
-func (ing *Ingester) storeEvent(ctx context.Context, pod *models.Pod, event *models.Event) error {
+func (ing *Ingester) storeEvent(ctx context.Context, pod *models.Pod, event *models.Event, tenantID, clusterID string) error {
 	backend, err := ing.backends.GetBackend(pod.StoreType)
 	if err != nil {
 		return fmt.Errorf("no backend for store type %q: %w", pod.StoreType, err)
@@ -136,6 +145,8 @@ func (ing *Ingester) storeEvent(ctx context.Context, pod *models.Pod, event *mod
 		"timestamp":       event.Timestamp.Format(time.RFC3339),
 		"source":          event.Source,
 		"payload":         event.Payload,
+		"tenant_id":       tenantID,
+		"cluster_id":      clusterID,
 	}
 
 	storedKey, err := backend.Store(ctx, pod.ID, data)
@@ -155,7 +166,15 @@ func (ing *Ingester) storeEvent(ctx context.Context, pod *models.Pod, event *mod
 // For a "by-namespace" family the event lands in a per-partition shard
 // (e.g. k8fy.live-state.prod) under an index pod (k8fy.live-state); see ADR 0002
 // and ADR 0005. Unknown namespaces fall back to trait-based classification.
-func (ing *Ingester) routeAndCreatePod(ctx context.Context, event *models.Event) (*models.Pod, bool, error) {
+//
+// clusterID (ADR 0024) is folded into the leaf pod ID via models.PodID —
+// empty clusterID reproduces today's plain "{family}.{partition}" shape
+// exactly; a non-empty one inserts a cluster segment so two clusters'
+// identically-named partitions (e.g. both running a "payments" namespace)
+// never collide in the same shard. The parent index pod's own ID
+// (profile.EventNamespace) is unchanged either way — it covers every
+// cluster's shards in one shard map.
+func (ing *Ingester) routeAndCreatePod(ctx context.Context, event *models.Event, tenantID, clusterID string) (*models.Pod, bool, error) {
 	profile, ok := config.LookupProfile(event.EventNamespace)
 	if !ok {
 		// Classify-don't-enumerate fallback: derive the store from traits and
@@ -169,13 +188,12 @@ func (ing *Ingester) routeAndCreatePod(ctx context.Context, event *models.Event)
 	}
 
 	// Resolve the target leaf pod ID (and partition for sharded families).
-	podID := profile.EventNamespace
 	partition := ""
 	if profile.Sharded {
 		partition = partitionValue(event, profile.PartitionField)
-		if partition != "" {
-			podID = fmt.Sprintf("%s.%s", profile.EventNamespace, partition)
-		}
+	}
+	podID := models.PodID(profile.EventNamespace, clusterID, partition)
+	if profile.Sharded {
 		// Maintain the parent index pod's shard map. Non-fatal: leaf storage
 		// must still succeed even if the index update races or fails.
 		if err := ing.ensureIndexPod(ctx, profile, podID, partition); err != nil {
@@ -189,7 +207,7 @@ func (ing *Ingester) routeAndCreatePod(ctx context.Context, event *models.Event)
 		return existing, false, nil
 	}
 
-	ing.logger.Info("creating new pod", "pod_id", podID, "integration", profile.Integration, "store_type", profile.StoreType)
+	ing.logger.Info("creating new pod", "pod_id", podID, "integration", profile.Integration, "store_type", profile.StoreType, "cluster_id", clusterID)
 
 	leaf := &models.Pod{
 		ID:           podID,
@@ -202,6 +220,8 @@ func (ing *Ingester) routeAndCreatePod(ctx context.Context, event *models.Event)
 		Lifecycle:    "active",
 		PartitionKey: profile.PartitionField,
 		Freshness:    time.Now(),
+		TenantID:     tenantID,
+		ClusterID:    clusterID,
 	}
 	if err := ing.registry.UpsertPod(ctx, leaf); err != nil {
 		return nil, false, fmt.Errorf("failed to create pod: %w", err)

@@ -112,6 +112,27 @@ async def fetch_service_dependencies(namespace: str, backend_url: str) -> List[D
         return []
 
 
+async def resolve_service_clusters(namespace: str, service: str, backend_url: str) -> List[str]:
+    """Resolve which fleet cluster(s) run (namespace, service) — ROADMAP P16
+    / ADR 0023 — via the Hub's cluster_services registry (populated by
+    agentify-discovery's inventory push). Degrades to an empty list on any
+    failure or when nothing matches, same convention as
+    fetch_service_dependencies: callers fall back to today's single-cluster
+    behavior, never block or raise on a missing/incomplete registry.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{backend_url.rstrip('/')}/api/resolve-cluster",
+                params={"namespace": namespace, "service": service},
+            )
+            resp.raise_for_status()
+            return resp.json().get("cluster_ids", []) or []
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning("resolve_service_clusters failed for %s/%s: %s", namespace, service, e)
+        return []
+
+
 async def mine_service_dependencies(namespace: str, from_service: str, log_text: str, backend_url: str) -> None:
     """Extract validated service mentions from `log_text` and record each as
     an edge `from_service -> mentioned_service`. Best-effort end-to-end —

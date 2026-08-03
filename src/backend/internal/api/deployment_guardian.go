@@ -107,7 +107,7 @@ func (dg *DeploymentGuardian) sweep(ctx context.Context) {
 // fetchDeployEvents returns type=deploy rows from k8fy.events within the
 // lookback window, newest first.
 func (dg *DeploymentGuardian) fetchDeployEvents(ctx context.Context) ([]deployEvent, error) {
-	pods, err := dg.queryExec.RouteToPods(ctx, "change_history", "")
+	pods, err := dg.queryExec.RouteToPods(ctx, "change_history", "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (dg *DeploymentGuardian) checkDeploy(ctx context.Context, ev deployEvent) {
 // [since,until) window (empty bound = unbounded) for a deployment, or a note
 // when none exist — the caller reasons over these numbers, never guesses.
 func (dg *DeploymentGuardian) metricsSnapshot(ctx context.Context, namespace, deployment, since, until string) map[string]interface{} {
-	pods, err := dg.queryExec.RouteToPods(ctx, "metrics_history", namespace)
+	pods, err := dg.queryExec.RouteToPods(ctx, "metrics_history", namespace, "")
 	if err != nil {
 		return map[string]interface{}{"note": "metrics unavailable"}
 	}

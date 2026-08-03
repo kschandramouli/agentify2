@@ -35,6 +35,14 @@ type Pod struct {
 	// Metadata
 	CreatedAt time.Time `dynamodbav:"created_at" json:"created_at"`
 	UpdatedAt time.Time `dynamodbav:"updated_at" json:"updated_at"`
+
+	// Multi-tenancy (ADR 0024) — metadata only, not part of the DynamoDB key
+	// (that stays the single ID string below). Cluster isolation is achieved
+	// by PodID embedding ClusterID into the ID itself, not by these fields;
+	// they exist for introspection (e.g. an admin listing which cluster a
+	// pod belongs to), not for routing.
+	TenantID  string `dynamodbav:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	ClusterID string `dynamodbav:"cluster_id,omitempty" json:"cluster_id,omitempty"`
 }
 
 // ShardRef is a reference to a child pod (for index pods).

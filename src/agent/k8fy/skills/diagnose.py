@@ -13,6 +13,11 @@ Pre-fetch sequence (all parallel via asyncio.gather):
   6. get_service_dependencies                           — the already-mined graph
      for this namespace (service_topology.py), so Claude can consider upstream/
      downstream services, not just the one being asked about
+  7. live_list_pods per resolved fleet cluster (ROADMAP P16 / ADR 0023) — a
+     live snapshot from every cluster resolve_service_clusters finds running
+     this service, relayed through agentify-discovery's persistent
+     connection (ROADMAP P18 use case #9). Empty for deployments with no
+     registered fleet clusters — a no-op, not a behavior change.
 
 After the fetch, up to _MAX_TOPOLOGY_PODS pods' logs (not conditioned on crash
 state — routine logs mention routine downstream calls more than crash traces
@@ -31,7 +36,7 @@ from typing import Any, Dict, List
 from k8fy.agent import ADVISOR_MODEL, DIAGNOSE_REASONING_SCHEMA, K8fyAgent
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import DIAGNOSE_PROMPT
-from k8fy.service_topology import fetch_service_dependencies, mine_service_dependencies
+from k8fy.service_topology import fetch_service_dependencies, mine_service_dependencies, resolve_service_clusters
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
 
@@ -156,6 +161,36 @@ class DiagnoseSkill(K8fyAgent):
         #    namespace (service_topology.py), so Claude can consider upstream/
         #    downstream services, not just the one being asked about.
         tasks["service_dependencies"] = fetch_service_dependencies(namespace, self.backend_url)
+
+        # 7b. Fleet-cluster scoping (ROADMAP P16 / ADR 0023, extended to the
+        #     ingested-data path by ADR 0024): resolve which cluster(s) run
+        #     this service via the Hub's cluster_services registry
+        #     (populated by agentify-discovery's inventory push), then:
+        #       - prefetch a LIVE snapshot from each match through the
+        #         persistent-connection relay (ROADMAP P18 use case #9), and
+        #       - ALSO prefetch a cluster-scoped get_service_health (ADR
+        #         0024's ingested-data cluster scoping) — the ingested store
+        #         may already have per-cluster data for a cluster that also
+        #         runs the older k8fy-adapter, and it's cheap to check.
+        #     Both go through the same self._fetch()/process_tool_call path
+        #     every other tool here uses — cluster_id in the args is all
+        #     _dispatch_live_diagnostic / HandleAgentFetch need to route
+        #     either remotely or to the right shard. correlation.md:
+        #     diagnostic intent fans out across every matching signal and
+        #     lets Tier-2 synthesize/surface disagreement, so EVERY resolved
+        #     cluster gets tasks, not just one. For deployments with no
+        #     registered fleet clusters (the common case today), resolution
+        #     returns [] and this whole step is a no-op — the unscoped
+        #     "service_health" task above already covers that case unchanged.
+        if service_name:
+            for cluster_id in await resolve_service_clusters(namespace, service_name, self.backend_url):
+                tasks[f"live_pods.{cluster_id}"] = self._fetch(
+                    "live_list_pods", {"namespace": namespace, "cluster_id": cluster_id},
+                )
+                tasks[f"service_health.{cluster_id}"] = self._fetch(
+                    "get_service_health",
+                    {"service_name": service_name, "namespace": namespace, "cluster_id": cluster_id},
+                )
 
         # 8. Topology-mining log fetch — a few GENERAL (not crash-only) pods'
         #    logs, since routine operation logs mention routine downstream

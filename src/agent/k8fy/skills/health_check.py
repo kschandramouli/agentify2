@@ -8,6 +8,12 @@ Pre-fetch sequence:
   1. get_service_health(service_name, namespace)  — if service_name is known
   2. get_pod_events(pod_id, namespace)            — for every pod in the initial
      data that already shows restarts > 0 or ready=False
+  3. Fleet-cluster scoping (ROADMAP P16 / ADR 0023/0024): resolve which
+     cluster(s) run this service, and if any, prefetch a cluster-scoped
+     get_service_health (ADR 0024) plus a live snapshot via live_list_pods
+     (ROADMAP P18 use case #9) per resolved cluster — same pattern as
+     DiagnoseSkill. A no-op for deployments with no registered fleet
+     clusters (resolution returns []).
 
 These are the only two cases where the agentic loop would have called extra
 tools anyway. Pre-fetching them in parallel before the Claude call saves the
@@ -21,6 +27,7 @@ from typing import Any, Dict, List
 from k8fy.agent import K8fyAgent, HEALTH_REASONING_SCHEMA
 from k8fy.prompt_manager import get_prompt
 from k8fy.prompts import HEALTH_SKILL_PROMPT
+from k8fy.service_topology import resolve_service_clusters
 from k8fy.tools import TOOLS
 from models.response import AgentResponse
 
@@ -72,6 +79,21 @@ class HealthSkill(K8fyAgent):
                 "get_pod_events",
                 {"pod_id": pod_id, "namespace": namespace},
             )
+
+        # Fleet-cluster scoping (ROADMAP P16 / ADR 0023/0024) — same pattern
+        # as DiagnoseSkill: every resolved cluster gets a cluster-scoped
+        # get_service_health and a live_list_pods snapshot, routed through
+        # the existing self._fetch()/process_tool_call path. No-op when no
+        # fleet clusters are registered for this service.
+        if service_name:
+            for cluster_id in await resolve_service_clusters(namespace, service_name, self.backend_url):
+                tasks[f"service_health.{cluster_id}"] = self._fetch(
+                    "get_service_health",
+                    {"service_name": service_name, "namespace": namespace, "cluster_id": cluster_id},
+                )
+                tasks[f"live_pods.{cluster_id}"] = self._fetch(
+                    "live_list_pods", {"namespace": namespace, "cluster_id": cluster_id},
+                )
 
         if not tasks:
             return {}

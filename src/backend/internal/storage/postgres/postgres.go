@@ -342,6 +342,38 @@ func (c *Client) initSchema(ctx context.Context) error {
 		END IF;
 	END $$;
 
+	-- Service->cluster registry (ROADMAP P16 / ADR 0023): which cluster(s)
+	-- run a given (namespace, service), populated deterministically by
+	-- agentify-discovery's inventory push (POST /api/cluster-inventory) —
+	-- same point-lookup + current-state + derived-authority shape as
+	-- Integration/current_state (storage-strategy.md), so a small Postgres
+	-- table, not a new store engine. Full delete-then-insert per push per
+	-- (tenant, cluster) — same "full replace reflects live truth" semantics
+	-- UpdateIntegrationNamespaces already uses.
+	CREATE TABLE IF NOT EXISTS cluster_services (
+		tenant_id  TEXT NOT NULL,
+		cluster_id TEXT NOT NULL,
+		namespace  TEXT NOT NULL,
+		service    TEXT NOT NULL,
+		updated_at TIMESTAMP DEFAULT NOW(),
+		PRIMARY KEY (tenant_id, cluster_id, namespace, service)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cluster_services_lookup ON cluster_services(tenant_id, namespace, service);
+
+	ALTER TABLE IF EXISTS cluster_services ENABLE ROW LEVEL SECURITY;
+	ALTER TABLE IF EXISTS cluster_services FORCE ROW LEVEL SECURITY;
+
+	DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_policies
+			WHERE tablename = 'cluster_services' AND policyname = 'tenant_isolation'
+		) THEN
+			EXECUTE 'CREATE POLICY tenant_isolation ON cluster_services
+				USING (tenant_id = current_setting(''app.current_tenant_id'', true))';
+		END IF;
+	END $$;
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -380,7 +412,14 @@ func (c *Client) CurrentStateStore() *CurrentState {
 
 // --- Relational (append-only) store: Client itself ---
 
-// Store inserts an event row (append-only).
+// Store inserts an event row (append-only). tenant_id/cluster_id (ADR 0024)
+// come from data["tenant_id"]/data["cluster_id"] — set server-side by
+// Ingester.storeEvent from its already-resolved (never client-trusted)
+// values, same convention as event_namespace/type/source above. Empty
+// cluster_id (every ingest call that hasn't presented a collector
+// credential) writes '' — unchanged from today's behavior in practice,
+// since isolation is actually provided by pod_id (ADR 0024's PodID helper),
+// not by filtering on these columns; they're written for observability.
 func (c *Client) Store(ctx context.Context, podID string, data map[string]interface{}) (string, error) {
 	id, ok := data["id"].(string)
 	if !ok {
@@ -392,17 +431,22 @@ func (c *Client) Store(ctx context.Context, podID string, data map[string]interf
 	if !ok {
 		return "", fmt.Errorf("missing timestamp in data")
 	}
+	tenantID, _ := data["tenant_id"].(string)
+	if tenantID == "" {
+		tenantID = DefaultTenantID
+	}
+	clusterID, _ := data["cluster_id"].(string)
 	payloadJSON, err := marshalPayload(data)
 	if err != nil {
 		return "", err
 	}
 
 	const q = `
-	INSERT INTO events (id, pod_id, event_namespace, event_type, timestamp, payload)
-	VALUES ($1, $2, $3, $4, $5, $6)
+	INSERT INTO events (id, pod_id, event_namespace, event_type, timestamp, payload, tenant_id, cluster_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	RETURNING id`
 	var returnedID string
-	if err := c.db.QueryRowContext(ctx, q, id, podID, namespace, eventType, timestamp, payloadJSON).Scan(&returnedID); err != nil {
+	if err := c.db.QueryRowContext(ctx, q, id, podID, namespace, eventType, timestamp, payloadJSON, tenantID, clusterID).Scan(&returnedID); err != nil {
 		c.logger.Error("failed to store event", "error", err)
 		return "", err
 	}
@@ -833,6 +877,23 @@ func (c *Client) DeleteIntegration(ctx context.Context, id string) error {
 	return err
 }
 
+// UpdateIntegrationNamespaces overwrites just the namespaces column for one
+// Integration row — used by the fleet collector's inventory push (ADR 0022 /
+// ROADMAP P18 use case #1) to auto-populate Namespaces from what the
+// collector actually sees in its own cluster, distinct from
+// UpdateIntegration's full-row admin-form replace (the collector never knows
+// Name/AdapterURL/etc., only namespaces).
+func (c *Client) UpdateIntegrationNamespaces(ctx context.Context, id string, namespaces []string) error {
+	nsJSON, err := json.Marshal(namespaces)
+	if err != nil {
+		return fmt.Errorf("marshal namespaces: %w", err)
+	}
+	_, err = c.db.ExecContext(ctx,
+		`UPDATE integrations SET namespaces=$1, updated_at=NOW() WHERE id=$2`,
+		nsJSON, id)
+	return err
+}
+
 // --- Current-state ("kv") store ---
 
 // CurrentState is the current-state store: latest value per (pod_id, entity_key).
@@ -842,7 +903,11 @@ type CurrentState struct {
 	logger *slog.Logger
 }
 
-// Store upserts the latest state for an entity (latest-wins).
+// Store upserts the latest state for an entity (latest-wins). tenant_id/
+// cluster_id (ADR 0024) come from data["tenant_id"]/data["cluster_id"] —
+// same server-side-resolved convention as Client.Store; isolation is
+// actually provided by pod_id (ADR 0024's PodID helper), these columns are
+// written for observability, not filtered on for correctness.
 func (s *CurrentState) Store(ctx context.Context, podID string, data map[string]interface{}) (string, error) {
 	entityKey, _ := data["entity_key"].(string)
 	if entityKey == "" {
@@ -854,21 +919,28 @@ func (s *CurrentState) Store(ctx context.Context, podID string, data map[string]
 	namespace, _ := data["event_namespace"].(string)
 	eventType, _ := data["type"].(string)
 	source, _ := data["source"].(string)
+	tenantID, _ := data["tenant_id"].(string)
+	if tenantID == "" {
+		tenantID = DefaultTenantID
+	}
+	clusterID, _ := data["cluster_id"].(string)
 	payloadJSON, err := marshalPayload(data)
 	if err != nil {
 		return "", err
 	}
 
 	const q = `
-	INSERT INTO current_state (pod_id, entity_key, event_namespace, event_type, source, payload, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, NOW())
+	INSERT INTO current_state (pod_id, entity_key, event_namespace, event_type, source, payload, tenant_id, cluster_id, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
 	ON CONFLICT (pod_id, entity_key) DO UPDATE SET
 		event_namespace = EXCLUDED.event_namespace,
 		event_type      = EXCLUDED.event_type,
 		source          = EXCLUDED.source,
 		payload         = EXCLUDED.payload,
+		tenant_id       = EXCLUDED.tenant_id,
+		cluster_id      = EXCLUDED.cluster_id,
 		updated_at      = NOW()`
-	if _, err := s.db.ExecContext(ctx, q, podID, entityKey, namespace, eventType, source, payloadJSON); err != nil {
+	if _, err := s.db.ExecContext(ctx, q, podID, entityKey, namespace, eventType, source, payloadJSON, tenantID, clusterID); err != nil {
 		s.logger.Error("failed to upsert current_state", "error", err)
 		return "", err
 	}
@@ -960,6 +1032,17 @@ func (s *CurrentState) TrackedEntities(ctx context.Context) ([]string, error) {
 			continue
 		}
 		ns := strings.TrimPrefix(podID, "k8fy.live-state.")
+		// ADR 0024: a cluster-scoped shard is "k8fy.live-state.{clusterID}.{namespace}"
+		// instead of "k8fy.live-state.{namespace}" — take the segment after the
+		// last dot as the actual K8s namespace (neither a clusterID nor a K8s
+		// namespace can itself contain a dot), so a fleet cluster's data doesn't
+		// show up as a bogus "{clusterID}.{namespace}" namespace in the
+		// autocomplete. This flattens away which cluster an entity came from —
+		// acceptable for this listing (still just namespace/service pairs), not
+		// resolved further here.
+		if idx := strings.LastIndex(ns, "."); idx >= 0 {
+			ns = ns[idx+1:]
+		}
 		if ns == "" || entityKey == "" {
 			continue
 		}
@@ -1570,4 +1653,74 @@ func (c *Client) ListServiceDependencies(ctx context.Context, tenantID, namespac
 		result = append(result, d)
 	}
 	return result, rows.Err()
+}
+
+// ── Service->cluster registry (ROADMAP P16 / ADR 0023) ──────────────────────
+
+// UpsertClusterServices replaces the full known-service set for one
+// (tenantID, clusterID) — a full delete-then-insert per push, matching
+// UpdateIntegrationNamespaces's "reflects live cluster truth" semantics
+// rather than an incremental diff: a service that disappeared from the
+// collector's scan should disappear from the registry on the next push, not
+// linger. byNamespace maps namespace -> that namespace's service names.
+func (c *Client) UpsertClusterServices(ctx context.Context, tenantID, clusterID string, byNamespace map[string][]string) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM cluster_services WHERE tenant_id = $1 AND cluster_id = $2`,
+		tenantID, clusterID); err != nil {
+		return fmt.Errorf("clear stale cluster services: %w", err)
+	}
+	for namespace, services := range byNamespace {
+		for _, service := range services {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO cluster_services (tenant_id, cluster_id, namespace, service, updated_at)
+				 VALUES ($1, $2, $3, $4, NOW())`,
+				tenantID, clusterID, namespace, service); err != nil {
+				return fmt.Errorf("insert cluster service %s/%s: %w", namespace, service, err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// ResolveServiceClusters returns every clusterID (within tenantID) known to
+// run (namespace, service) — 0 (unknown), 1 (the common case), or N when the
+// same service name exists in more than one of the tenant's clusters. RLS
+// (not this query's WHERE clause) is what actually enforces the tenant
+// boundary, same convention as ListServiceDependencies.
+func (c *Client) ResolveServiceClusters(ctx context.Context, tenantID, namespace, service string) ([]string, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; always rolled back, never committed
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT cluster_id FROM cluster_services WHERE namespace = $1 AND service = $2`,
+		namespace, service)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	clusterIDs := []string{}
+	for rows.Next() {
+		var clusterID string
+		if err := rows.Scan(&clusterID); err != nil {
+			return nil, err
+		}
+		clusterIDs = append(clusterIDs, clusterID)
+	}
+	return clusterIDs, rows.Err()
 }
