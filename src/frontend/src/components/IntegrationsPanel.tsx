@@ -3,6 +3,7 @@ import {
   Integration,
   IntegrationInput,
   listIntegrations,
+  getIntegration,
   createIntegration,
   updateIntegration,
   deleteIntegration,
@@ -93,7 +94,12 @@ function NamespacesField({
         />
         <button type="button" className="int-btn int-btn--sm" onClick={addManual}>Add</button>
       </div>
-      <em>Namespaces this integration is responsible for.</em>
+      <em>
+        Namespaces this integration is responsible for. If a fleet collector
+        (agentify-discovery) is reporting for this cluster, it refreshes this
+        list automatically on its own schedule — saving this form afterward
+        will overwrite whatever it last pushed with your selection here.
+      </em>
     </label>
   );
 }
@@ -263,6 +269,26 @@ export function IntegrationsPanel() {
       .catch(e => { setError(String(e)); setLoading(false); });
   }
 
+  // Re-fetch this one integration right before editing rather than reusing
+  // the (possibly stale) copy from the last list load — a fleet collector's
+  // background inventory push (ROADMAP P18 use case #1) can update
+  // Namespaces at any time, and the edit form's full-row PUT would otherwise
+  // silently overwrite whatever it last pushed with a stale snapshot. This
+  // narrows the race window; it doesn't eliminate it (the admin can still
+  // take a while to fill out the form) — see the NamespacesField note.
+  async function handleEdit(item: Integration) {
+    setError(null);
+    try {
+      const fresh = await getIntegration(item.id);
+      setIntegrations(prev => prev?.map(i => i.id === fresh.id ? fresh : i) ?? prev);
+      setMode({ editing: fresh });
+    } catch {
+      // Refetch failed (e.g. transient network blip) — fall back to the
+      // list's cached copy rather than blocking the edit entirely.
+      setMode({ editing: item });
+    }
+  }
+
   async function handleSave(input: IntegrationInput) {
     setSaving(true);
     setError(null);
@@ -339,7 +365,7 @@ export function IntegrationsPanel() {
                   key={i.id}
                   integration={i}
                   discoveredNamespaces={discoveredNamespaces}
-                  onEdit={item => setMode({ editing: item })}
+                  onEdit={handleEdit}
                   onDelete={handleDelete}
                 />
               ))}
