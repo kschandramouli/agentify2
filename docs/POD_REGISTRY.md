@@ -8,6 +8,15 @@
 
 ## What is it?
 
+**This entire file describes a Hub-only concept.** The pod registry lives
+inside the Hub process (DynamoDB or in-memory, see below); Discovery
+(`agentify-discovery`, the per-cluster fleet collector) never reads or
+writes it directly — it only ever POSTs data to Hub endpoints
+(`/api/cluster-inventory`, `/api/service-dependencies`), and it's the Hub's
+own ingestion path that turns those pushes into registry entries. If you're
+looking for what Discovery itself does, see `docs/AGENT_INTEGRATION.md`'s
+"Fleet clusters & live drill-down" section instead.
+
 The pod registry is the **runtime source of truth** for what pods exist in
 the context-mesh — logical storage shards, not Kubernetes pods (see
 [glossary.md](../context-mesh/glossary.md) if that distinction is new). It

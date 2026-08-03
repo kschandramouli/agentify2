@@ -71,44 +71,71 @@ design for `DiagnoseSkill` that no longer exists in the code. Only the
 
 ### Fleet clusters & live drill-down (ROADMAP P16/P18, ADR 0022–0024)
 
-A tenant can own more than one Kubernetes cluster (a "fleet"). Each cluster
-runs `agentify-discovery`, a deterministic, non-agentic collector — never a
-second copy of this agent — that:
-- pushes namespace/service inventory and a mined service-dependency graph to
-  the Hub on a timer (`POST /api/cluster-inventory`, `/api/service-dependencies`), and
-- holds open a **persistent outbound WebSocket** to the Hub
-  (`GET /api/collector/connect`) for on-demand "live" requests — the Hub
-  relays a request over that connection and returns the collector's answer,
-  never the other way around (no standing credential lets the Hub reach
-  into a cluster).
+A tenant can own more than one Kubernetes cluster (a "fleet"). Two
+different processes split the work — neither is a second copy of the
+other, and it matters which one a given operation actually runs on:
 
-**How a skill uses this:** `resolve_service_clusters(namespace, service,
-backend_url)` (`src/agent/k8fy/service_topology.py`) asks the Hub's
-`GET /api/resolve-cluster` which fleet cluster(s) run a given service — 0
-matches (the common case for a single-cluster deployment) is a no-op; 1 or
-more matches means the skill adds one prefetch task **per resolved
-cluster**, per [correlation.md](../context-mesh/policies/correlation.md)'s
+- **Discovery (`agentify-discovery`)** — one Deployment **inside each
+  fleet cluster**. Deterministic, non-agentic, never calls Claude. Every
+  operation it performs is a read against *its own* cluster's K8s API,
+  followed by either a push or a relay response to the Hub:
+  - **Push (periodic, plain HTTP):** lists namespaces/services/workloads,
+    mines a service-dependency graph from pod logs, `POST`s both to
+    `/api/cluster-inventory` and `/api/service-dependencies`.
+  - **Relay (on-demand, over its one persistent connection):** when the Hub
+    forwards a `live_*` request, Discovery dispatches it locally
+    (`live_tools.py` — reads pods/logs/events/Secrets directly from its own
+    cluster) and sends the result back over the same connection.
+  - Discovery **initiates** the one connection it holds (`GET
+    /api/collector/connect`) and never accepts an inbound one — there is no
+    standing credential that would let the Hub (or anything else) reach
+    into a cluster on its own.
+
+- **Hub** — the one central Go backend. It never talks to a cluster
+  directly:
+  - Authenticates each push/connection via `resolveTenantContext` and a
+    presented `CollectorToken`.
+  - Persists what Discovery pushes (`Integration.Namespaces`,
+    `cluster_services`, `service_dependencies` — see
+    [STORAGE_BACKENDS.md](STORAGE_BACKENDS.md)).
+  - Answers `GET /api/resolve-cluster` (which cluster runs a service) from
+    that persisted data — **not** a live call to any cluster.
+  - Holds the connection registry (`CollectorHub`) and relays
+    `POST /api/live-fetch` requests to whichever Discovery instance is
+    registered for the requested `cluster_id`, then returns its answer to
+    the agent.
+
+**How a skill uses this:** the agent calls `resolve_service_clusters(namespace,
+service, backend_url)` (`src/agent/k8fy/service_topology.py`), which is a
+**Hub** call (`GET /api/resolve-cluster`) — Discovery is never contacted
+directly by the agent. 0 matches (the common case for a single-cluster
+deployment) is a no-op; 1 or more matches means the skill adds one prefetch
+task **per resolved cluster**, per [correlation.md](../context-mesh/policies/correlation.md)'s
 existing fan-out rule (diagnostic intent fans out across every matching
 signal; Tier-2 synthesizes and surfaces disagreement rather than picking a
 winner). `DiagnoseSkill` and `HealthSkill` both do this today; `CertAuditSkill`
 does the same for `live_get_certificates`.
 
-**Two ways a tool call can be "live":**
+**Two ways a tool call can be "live" — same agent-side call, different
+execution location:**
 - `live_list_pods` / `live_get_pod_logs` / `live_get_events` /
-  `live_describe_pod` / `live_get_certificates` — reach a cluster's
-  real-time K8s API. Pass `cluster_id` to relay through
-  `agentify-discovery`'s persistent connection instead of this agent pod's
-  own in-cluster ServiceAccount; omit it to query the agent's own cluster
-  directly (unchanged, original behavior). `live_get_certificates` has
-  **no** local implementation — it always requires `cluster_id`.
+  `live_describe_pod` / `live_get_certificates` — the agent calls the Hub
+  (`POST /api/live-fetch`) with `cluster_id`; the Hub relays it and
+  **Discovery executes the actual K8s read** in that cluster. Omit
+  `cluster_id` and the read happens locally instead — this agent pod's own
+  in-cluster ServiceAccount, no Hub/Discovery hop at all (unchanged,
+  original behavior). `live_get_certificates` has **no** local
+  implementation — it always requires `cluster_id`, i.e. it always runs on
+  Discovery, never on the agent pod itself.
 - `get_service_health` / `get_pod_events` / `get_metrics_history` /
-  `get_change_history` / `get_certificates` — the *ingested*-store tools
-  now also accept an optional `cluster_id` (ADR 0024): the Hub builds a
-  cluster-scoped pod ID (`models.PodID`, e.g.
+  `get_change_history` / `get_certificates` — the *ingested*-store tools.
+  These **never reach Discovery at all**, live or otherwise — passing
+  `cluster_id` (ADR 0024) only changes which pod ID **the Hub** reads from
+  its own Postgres store (`models.PodID`, e.g.
   `"k8fy.live-state.cluster-42.payments"` instead of
-  `"k8fy.live-state.payments"`) so two clusters' identically-named
-  namespaces never collide. Omitted `cluster_id` behaves exactly as before
-  this ADR.
+  `"k8fy.live-state.payments"`), so two clusters' identically-named
+  namespaces never collide in the same rows. Omitted `cluster_id` behaves
+  exactly as before this ADR.
 
 ### Data Flow
 
@@ -244,10 +271,11 @@ If the agent service is unavailable:
 - Response has `status: "partial"` and `confidence: 0.5`
 - User gets data but without Claude's reasoning
 
-If a fleet cluster's collector is disconnected, `live_*` tool calls degrade
-to a clear error (`"cluster not connected"`, HTTP 502 from
-`POST /api/live-fetch`) rather than blocking — the skill's other prefetch
-tasks still complete and Claude reasons over whatever landed.
+If a fleet cluster's **Discovery** instance is disconnected from **the
+Hub**, `live_*` tool calls degrade to a clear error (`"cluster not
+connected"`, HTTP 502 from the Hub's `POST /api/live-fetch`) rather than
+blocking — the skill's other prefetch tasks still complete and Claude
+reasons over whatever landed.
 
 ## Testing
 
@@ -308,12 +336,18 @@ make test-integration   # Run tests (includes query testing)
 - Backend will fall back to returning raw data
 
 **A `live_*` tool call returns "cluster not connected":**
-- The target cluster's `agentify-discovery` collector isn't holding an open
-  connection to the Hub — check its pod logs and confirm `COLLECTOR_TOKEN`
-  matches the `Integration` row's `collector_token` (see
-  [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md))
-- `live_get_certificates` specifically also needs the collector's
-  ClusterRole to have the `secrets: list, get` grant added in ADR 0024
+- This error comes from **the Hub** (`CollectorHub.RequestLive` finding no
+  registered connection for that `cluster_id`) — but the fix is almost
+  always on **Discovery**'s side: check that specific cluster's
+  `agentify-discovery` pod logs and confirm its `COLLECTOR_TOKEN` matches
+  the `Integration` row's `collector_token` (see
+  [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md)) —
+  a mismatch means Discovery's connection attempt was rejected before it
+  ever registered.
+- `live_get_certificates` specifically also needs **Discovery**'s
+  ClusterRole to have the `secrets: list, get` grant added in ADR 0024 —
+  this is a Discovery-side RBAC issue, not something the Hub can work
+  around.
 
 **Two clusters' data looks merged/wrong for the same namespace name:**
 - Confirm the caller actually resolved and passed `cluster_id` — omitting it

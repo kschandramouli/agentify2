@@ -839,6 +839,16 @@ this will force-replace the existing `payments` profile.
 
 ## P16 — Multi-cluster connector (proposed 2026-07-21)
 
+> **Terminology note (added 2026-08-03):** this section predates the
+> Discovery/Hub naming settled in ADR 0022/glossary.md, so it still says
+> "collector"/"adapter" in places below (left as originally written, for
+> history). Read **collector** as **Discovery** (`agentify-discovery`, runs
+> once per cluster) and every endpoint/table named here
+> (`cluster_services`, `GET /api/resolve-cluster`, `models.PodID`) as
+> **Hub**-side — Discovery only ever pushes to the Hub or answers a
+> Hub-relayed live request; it never resolves clusters or scopes pod IDs
+> itself.
+
 **Context:** the ask is to keep adding cluster connections (integration +
 authn/authz) over time, not just one hardcoded adapter. This is **more built
 than it looks**: `Integration` (`internal/models/integration.go`) already has
@@ -973,11 +983,12 @@ to "the collector's own auth mechanism."
 
 **Context:** [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md) decided
 *that* the fleet model inverts to push-based, multi-tenant reporting, and
-that the collector must genuinely work across every K8s distribution, not
-just EKS. This item is the concrete *what to build*.
+that Discovery (the per-cluster collector this item builds) must genuinely
+work across every K8s distribution, not just EKS. This item is the concrete
+*what to build*.
 
-**Shape:**
-- **Collector (per cluster, deterministic, not agentic, one long-running
+**Shape — every bullet below is labeled by which side runs it:**
+- **Discovery (per cluster, deterministic, not agentic, one long-running
   Deployment):** no Claude/LLM calls, one process per onboarded cluster —
   not split into a separate CronJob + API server, so there's one manifest,
   one RBAC ServiceAccount, one thing to upgrade and monitor per cluster. An
@@ -1003,15 +1014,16 @@ just EKS. This item is the concrete *what to build*.
   connector phase, service-topology mining) to require and filter by both
   `tenant_id` and `cluster_id` (ADR 0022 Decision #1/#2/#3) — same
   handlers, now behind the shared tenant-resolution middleware instead of
-  open namespace-only scoping. Natural next signals to add to the same
-  ingest shape: namespace/service/deployment inventory, ingress/entry-point
-  mapping, health/cert/metrics summaries, RBAC/NetworkPolicy posture — see
-  "Use cases unlocked" below.
-- **Connectivity: outbound-only from the collector, always** (ADR 0022
-  Decision #7, corrected from an earlier inbound-callback draft). The
-  collector dials out to the Hub and holds the connection open; the Hub
-  never dials into a cluster. Both periodic push and on-demand "fetch X
-  now" requests multiplex over that one connection.
+  open namespace-only scoping. This — and everything else in this bullet —
+  runs on the Hub; Discovery only ever calls it. Natural next signals to
+  add to the same ingest shape: namespace/service/deployment inventory,
+  ingress/entry-point mapping, health/cert/metrics summaries,
+  RBAC/NetworkPolicy posture — see "Use cases unlocked" below.
+- **Connectivity: outbound-only from Discovery, always** (ADR 0022
+  Decision #7, corrected from an earlier inbound-callback draft). Discovery
+  dials out to the Hub and holds the connection open; the Hub never dials
+  into a cluster. Both periodic push and on-demand "fetch X now" requests
+  multiplex over that one connection.
 - **Credential model:** one bearer credential per (tenant, cluster) pair —
   `Integration.CollectorToken`, a field **separate** from the pre-existing
   `Integration.Token` (corrected from an earlier draft that said this would
@@ -1021,44 +1033,48 @@ just EKS. This item is the concrete *what to build*.
   outbound token also grants inbound push access). The mechanism is
   cloud-agnostic (works identically on any distribution); how the Hub
   stores/rotates its own copy is a Hub-side detail (ADR 0022 Decision #5),
-  not a collector requirement. Resolved server-side by `resolveTenantContext`
-  (`src/backend/internal/api/handlers.go`) — the collector itself carries no
-  separate `cluster_id`/`tenant_id` config (see ADR 0022's 2026-08-03
-  amendment).
+  not a Discovery-side requirement. Resolved server-side by
+  `resolveTenantContext` (`src/backend/internal/api/handlers.go`) — Discovery
+  itself carries no separate `cluster_id`/`tenant_id` config (see ADR 0022's
+  2026-08-03 amendment).
 
 **Use cases unlocked, roughly in build order:**
 1. **Namespace/Service/Deployment inventory — shipped 2026-08-03**
    (`src/adapters/discovery/inventory.py`, `k8s_client.py`'s
    `list_deployments`/`list_statefulsets`/`list_daemonsets`): each scan cycle,
-   `agentify-discovery` now also lists every namespace's `Service`s,
+   **Discovery** (`agentify-discovery`) lists every namespace's `Service`s,
    `Deployment`s, `StatefulSet`s, and `DaemonSet`s via the portable core
-   `apps/v1` API and pushes the resulting **active-namespace list** (any
-   namespace with at least one of those objects) to a new tenant/cluster-
-   scoped `POST /api/cluster-inventory` endpoint, which overwrites the
-   matching `Integration.Namespaces` — auto-discovery instead of the manual
-   checkbox entry `IntegrationsPanel.tsx` currently requires, closing the gap
-   flagged when that form's namespace field was made editable earlier. Full
-   replace per push (reflects live cluster truth — a decommissioned
-   namespace disappears on the next cycle, not left stale). **Known gap, not
-   solved here:** `IntegrationsPanel.tsx`'s manual namespace editor still
-   does a full replace on save via `PUT /admin/integrations/{id}`, so an
-   admin saving that form after auto-discovery has run would clobber the
-   collector-pushed list — same class of deferred-UX gap as use case #2's
-   onboarding follow-up, flagged as a manual follow-up, not blocking.
+   `apps/v1` API — entirely in-cluster reads — and pushes the resulting
+   **active-namespace list** (any namespace with at least one of those
+   objects) to a new tenant/cluster-scoped **Hub** endpoint,
+   `POST /api/cluster-inventory`, which overwrites the matching
+   `Integration.Namespaces` — auto-discovery instead of the manual checkbox
+   entry `IntegrationsPanel.tsx` currently requires, closing the gap flagged
+   when that form's namespace field was made editable earlier. Full replace
+   per push (reflects live cluster truth — a decommissioned namespace
+   disappears on the next cycle, not left stale). **Known gap, not solved
+   here:** `IntegrationsPanel.tsx`'s manual namespace editor still does a
+   full replace on save via `PUT /admin/integrations/{id}` (a Hub endpoint),
+   so an admin saving that form after Discovery's auto-discovery has run
+   would clobber the Discovery-pushed list — same class of deferred-UX gap
+   as use case #2's onboarding follow-up, flagged as a manual follow-up, not
+   blocking.
 2. **Service-dependency mining — shipped 2026-08-03 as `agentify-discovery`**
    (`src/adapters/discovery/`): a standalone Deployment reusing
    `extract_service_mentions`'s logic off the portable pod-logs API,
-   per-cluster, pushing real tenant/cluster-scoped edges via the
+   per-cluster — this mining happens entirely inside Discovery, in-cluster —
+   pushing real tenant/cluster-scoped edges to the Hub via the
    `Integration.CollectorToken` credential — not just from inside the
    monolithic agent process anymore. Known-services are read directly from
-   this cluster's own `Service` objects, not the Hub's (untenanted)
-   `GET /admin/tracked` — see the ADR 0022 amendment. `from_service` is
-   resolved via K8s Service-selector-to-pod-label matching (the same
-   mechanism K8s itself uses for Service endpoints), not a pod-name
-   heuristic. Deferred from this slice: cluster onboarding UX (token
-   minting is via the existing admin API only, no UI yet) and the
-   `agentify-discovery-secret`/Secrets Manager wiring for the CI deploy
-   pipeline — both flagged as manual follow-ups, not blocking.
+   this cluster's own `Service` objects (a Discovery-side, in-cluster read),
+   not the Hub's (untenanted) `GET /admin/tracked` — see the ADR 0022
+   amendment. `from_service` is resolved via K8s Service-selector-to-pod-
+   label matching (the same mechanism K8s itself uses for Service
+   endpoints), not a pod-name heuristic. Deferred from this slice: cluster
+   onboarding UX (token minting is via the existing Hub admin API only, no
+   UI yet) and the `agentify-discovery-secret`/Secrets Manager wiring for
+   the CI deploy pipeline — both flagged as manual follow-ups, not
+   blocking.
 3. **Ingress/entry-point mapping** — `Ingress`/`Gateway`+`HTTPRoute`/
    OpenShift `Route`, whichever exists — "where does traffic into this
    cluster actually originate," directly relevant to the traffic-flow
@@ -1091,20 +1107,24 @@ just EKS. This item is the concrete *what to build*.
    does its RBAC surface look like) — a bigger scope increase than the
    others (new signal category), tracked here but not assumed to ship with
    the first version of the collector.
-9. **On-demand live drill-down — shipped 2026-08-03** (`src/backend/
-   internal/api/collector_hub.go`'s `CollectorHub` + `HandleCollectorConnect`/
-   `HandleLiveFetch`; `src/adapters/discovery/live_relay.py` +
-   `live_tools.py`): the collector now also holds open a **second**,
-   purpose-built persistent WebSocket to the Hub (`GET /api/collector/
-   connect`, same `CollectorToken` handshake as the push endpoints) —
-   periodic push (use cases #1/#2) stays plain HTTP POST, unchanged; see the
-   ADR 0022 amendment for why these weren't unified onto one connection.
-   The agent's four `live_*` tools (`src/agent/k8fy/tools.py`) gained an
-   optional `cluster_id` argument: omitted, they behave exactly as before
-   (direct in-cluster call); set, `POST /api/live-fetch` relays the request
-   to that cluster's collector over its open connection and returns the
-   answer — "show me live state in cluster B right now" from chat, without
-   a standing central credential for the fleet (P17's rejected shape).
+9. **On-demand live drill-down — shipped 2026-08-03** (Hub side:
+   `src/backend/internal/api/collector_hub.go`'s `CollectorHub` +
+   `HandleCollectorConnect`/`HandleLiveFetch`; Discovery side:
+   `src/adapters/discovery/live_relay.py` + `live_tools.py`): Discovery now
+   also holds open a **second**, purpose-built persistent WebSocket to the
+   Hub (`GET /api/collector/connect`, same `CollectorToken` handshake as the
+   push endpoints) — periodic push (use cases #1/#2) stays plain HTTP POST,
+   unchanged; see the ADR 0022 amendment for why these weren't unified onto
+   one connection. The agent's four `live_*` tools (`src/agent/k8fy/
+   tools.py`, running in the agent, which calls the Hub) gained an optional
+   `cluster_id` argument: omitted, they behave exactly as before (direct
+   in-cluster call — only meaningful for the single-cluster deployment the
+   agent itself runs beside); set, the **Hub's** `POST /api/live-fetch`
+   relays the request to that cluster's Discovery over its open connection,
+   Discovery executes the actual K8s API call in-cluster, and the answer
+   flows back through the Hub to the agent — "show me live state in
+   cluster B right now" from chat, without a standing central credential
+   for the fleet (P17's rejected shape).
    **Known gap, not solved here:** `cluster_id` must be supplied explicitly
    (via `GET /admin/integrations`) — this does not build "which cluster is
    service X in" auto-routing, which is [P16](#p16--multi-cluster-connector-proposed-2026-07-21),

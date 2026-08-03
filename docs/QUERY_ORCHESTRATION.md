@@ -9,6 +9,15 @@
 
 ## Overview
 
+**Everything in this file runs on the Hub and never contacts Discovery.**
+`cluster_id` here only selects *which rows of the Hub's own Postgres store*
+to read (via a cluster-scoped pod ID) — it is not a live call out to that
+cluster. For the operations that *do* reach into a fleet cluster in real
+time, see `docs/AGENT_INTEGRATION.md`'s "Fleet clusters & live drill-down"
+section and `SEQUENCE_FLOWS.md` diagram 6 instead — those go through
+`CollectorHub`/`POST /api/live-fetch`, a completely separate code path from
+`QueryExecutor`.
+
 Two distinct entry points route through `QueryExecutor`, for different
 purposes:
 

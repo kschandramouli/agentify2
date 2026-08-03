@@ -5,6 +5,18 @@
 > results, and returns an answer. This file is the **human/Claude-readable
 > specification** of that behavior. The live pod map itself is the
 > `pod-registry` (a runtime artifact the system maintains, not this file).
+>
+> **Everything described in this file runs on the Hub.** The orchestrator is
+> one component of the single central Go backend process — it never runs
+> per cluster and never contacts Discovery (`agentify-discovery`) directly.
+> The only place a fleet cluster enters this picture is the optional
+> `cluster_id` segment a pod ID can carry (see below): that's a routing key
+> into the Hub's *own* Postgres store, resolved ahead of time by a separate
+> step (`GET /api/resolve-cluster`, ADR 0023). Live, real-time reach into a
+> cluster (kubectl-style checks, on-demand pod state) is a different code
+> path entirely — `CollectorHub`/`POST /api/live-fetch`, documented in
+> `docs/AGENT_INTEGRATION.md` and `docs/SEQUENCE_FLOWS.md` diagram 6 — not
+> part of the routing decision this file describes.
 
 ## Responsibilities
 

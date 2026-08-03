@@ -247,21 +247,28 @@ kubectl get ingress -n agentify
 
 ### Optional — join a multi-cluster fleet (ROADMAP P18/P16)
 
-Only needed if this cluster reports into a shared Hub alongside other
-clusters. Requires the `agentify-discovery-secret` created in Step 7.
+**Where each piece runs:** the Hub (`backend.yaml`, deployed once in Step 8
+above) is the one central process every cluster in the fleet reports into.
+`discovery.yaml` below deploys **Discovery** (`agentify-discovery`) — a
+*separate* Deployment **inside this specific cluster** — one per fleet
+cluster you onboard, not a replacement for or a second copy of the Hub.
+Only needed if this cluster should report into a shared Hub alongside
+others. Requires the `agentify-discovery-secret` created in Step 7.
 
 ```bash
 kubectl apply -f infra/kubernetes/discovery.yaml
 kubectl rollout status deployment/agentify-discovery -n agentify
 ```
 
-**Security note (ADR 0024):** `agentify-discovery`'s ClusterRole grants
-`secrets: list, get` cluster-wide — the collector's `live_get_certificates`
-capability needs to read `kubernetes.io/tls` Secrets for expiry, but RBAC
-itself can't scope by Secret *type*, only by resource kind. The collector
-enforces the type filter client-side (`fieldSelector=type=kubernetes.io/tls`)
-and never returns raw cert/key bytes, but a compromised collector pod would
-have read access to every Secret in the cluster. Review before onboarding a
+**Security note (ADR 0024):** Discovery's ClusterRole grants
+`secrets: list, get` cluster-wide **in this cluster only** — its
+`live_get_certificates` capability needs to read `kubernetes.io/tls`
+Secrets for expiry, but RBAC itself can't scope by Secret *type*, only by
+resource kind. Discovery enforces the type filter client-side
+(`fieldSelector=type=kubernetes.io/tls`) and never returns raw cert/key
+bytes to the Hub, but a compromised Discovery pod would have read access to
+every Secret in *that* cluster (the Hub never holds this credential itself —
+it only ever receives Discovery's already-filtered answers). Review before onboarding a
 cluster with sensitive Secrets outside the TLS-cert use case.
 
 ---

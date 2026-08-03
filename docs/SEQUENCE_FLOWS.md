@@ -145,37 +145,43 @@ signal per match — [correlation.md](../context-mesh/policies/correlation.md)'s
 existing rule (fan out, let Tier-2 synthesize/surface disagreement), not a
 new mechanism.
 
+Three distinct actors, deliberately kept as three separate lanes below (an
+earlier version of this diagram conflated the Hub's `/api/agent/fetch` and
+`/api/resolve-cluster`/`/api/live-fetch` handlers into two different
+participants — they're the same one Go process; every "Hub" arrow below
+lands in it):
+
 ```mermaid
 sequenceDiagram
     participant Router as SkillRouter
-    participant Skill  as DiagnoseSkill
-    participant BE     as Backend API
-    participant Hub    as Hub (Go backend)
-    participant Coll   as agentify-discovery<br/>(fleet cluster's collector)
+    participant Skill  as DiagnoseSkill<br/>(Python agent)
+    participant Hub    as Hub<br/>(the one Go backend process)
+    participant Disc   as Discovery<br/>(agentify-discovery, INSIDE the fleet cluster)
     participant Anthropic as Anthropic API<br/>claude-opus-4-8
 
     Router->>Skill: dispatch("diagnose", data, context)
 
     Note over Skill: [Pattern A] parallel pre-fetch (asyncio.gather)
 
-    par Core signals (unscoped — this deployment's own cluster)
-        Skill->>BE: get_service_health / get_pod_events /<br/>get_metrics_history / get_change_history /<br/>get_logs / get_service_dependencies
-        BE-->>Skill: ingested-store results
-    and Fleet resolution (ADR 0023)
+    par Core signals (unscoped — reads the Hub's own Postgres store)
+        Skill->>Hub: POST /api/agent/fetch<br/>get_service_health / get_pod_events /<br/>get_metrics_history / get_change_history /<br/>get_logs / get_service_dependencies
+        Hub-->>Skill: ingested-store results (no Discovery involved)
+    and Fleet resolution (ADR 0023 — Hub-only, reads cluster_services)
         Skill->>Hub: GET /api/resolve-cluster?namespace=..&service=..
         Hub-->>Skill: {cluster_ids: [...]}  (empty for single-cluster deployments — no-op)
     end
 
     opt cluster_ids non-empty
         loop once per resolved cluster_id
-            par
-                Skill->>BE: get_service_health {..., cluster_id}
-                Note over BE: cluster-scoped pod ID (ADR 0024)<br/>k8fy.live-state.{cluster_id}.{namespace}
-                BE-->>Skill: cluster-scoped ingested result
-            and
+            par Ingested, cluster-scoped (still Hub-only — Discovery not contacted)
+                Skill->>Hub: POST /api/agent/fetch<br/>get_service_health {..., cluster_id}
+                Note over Hub: builds a cluster-scoped pod ID (ADR 0024)<br/>k8fy.live-state.{cluster_id}.{namespace}<br/>— reads its own Postgres, nothing more
+                Hub-->>Skill: cluster-scoped ingested result
+            and Live, relayed to Discovery
                 Skill->>Hub: POST /api/live-fetch {cluster_id, tool: live_list_pods}
-                Hub->>Coll: relay over persistent connection (ADR 0022 Decision #7)
-                Coll-->>Hub: live K8s snapshot
+                Hub->>Disc: relay over Discovery's persistent connection (ADR 0022 Decision #7)
+                Note over Disc: executes the actual K8s read,<br/>in its own cluster, right now
+                Disc-->>Hub: live K8s snapshot
                 Hub-->>Skill: live_list_pods result
             end
         end
@@ -238,40 +244,42 @@ sequenceDiagram
 
 ---
 
-## 6. Fleet collector persistent connection (ROADMAP P18 use case #9, ADR 0022 Decision #7)
+## 6. Discovery ↔ Hub persistent connection (ROADMAP P18 use case #9, ADR 0022 Decision #7)
 
-No LLM anywhere in this diagram — `agentify-discovery` is deterministic.
-This is the mechanism Diagram 4's "Fleet resolution" box relies on: a
-collector connects once and stays connected; the Hub relays requests over
-that connection rather than ever dialing into a cluster (which usually
-isn't reachable — NAT, private VPC, firewall).
+No LLM anywhere in this diagram — Discovery is deterministic, full stop.
+This is the mechanism Diagram 4's "Fleet resolution"/live-relay boxes rely
+on: Discovery connects to the Hub once and stays connected; the Hub relays
+requests over that connection rather than ever dialing into a cluster
+(which usually isn't reachable from the Hub — NAT, private VPC, firewall).
+**Everything in this diagram happens either inside the cluster (Discovery)
+or inside the one central process (Hub)** — there's no third location.
 
 ```mermaid
 sequenceDiagram
-    participant Coll as agentify-discovery<br/>(runs inside the fleet cluster)
-    participant Hub  as Hub (Go backend)<br/>CollectorHub
+    participant Disc as Discovery<br/>(agentify-discovery, runs INSIDE the fleet cluster)
+    participant Hub  as Hub<br/>(the one Go backend process — CollectorHub lives here)
     participant Agent as Python agent<br/>(DiagnoseSkill/HealthSkill/CertAuditSkill)
 
-    Note over Coll,Hub: Connection setup (once, reconnects with backoff on drop)
-    Coll->>Hub: GET /api/collector/connect<br/>Authorization: Bearer {COLLECTOR_TOKEN}
+    Note over Disc,Hub: Connection setup — Discovery always dials out; Hub never dials in (once, reconnects with backoff on drop)
+    Disc->>Hub: GET /api/collector/connect<br/>Authorization: Bearer {COLLECTOR_TOKEN}
     Hub->>Hub: resolveTenantContext(token) → (tenant_id, cluster_id)
-    Hub-->>Coll: 101 Switching Protocols (WebSocket upgrade)
+    Hub-->>Disc: 101 Switching Protocols (WebSocket upgrade)
     Hub->>Hub: CollectorHub.Register(cluster_id, conn)
 
-    loop Every SCAN_INTERVAL_SECONDS (independent of the connection above)
-        Coll->>Hub: POST /api/cluster-inventory (namespaces + services)
-        Coll->>Hub: POST /api/service-dependencies (mined edges)
+    loop Every SCAN_INTERVAL_SECONDS — Discovery-initiated, independent of the connection above
+        Disc->>Hub: POST /api/cluster-inventory (namespaces + services)
+        Disc->>Hub: POST /api/service-dependencies (mined edges)
     end
 
-    Note over Agent,Coll: On-demand relay (as many times as needed, over the one open connection)
+    Note over Agent,Disc: On-demand relay (as many times as needed, over the one open connection) — Agent only ever talks to the Hub
     Agent->>Hub: POST /api/live-fetch {cluster_id, tool: "live_list_pods", args}
     Hub->>Hub: liveFetchAllowedTools[tool]? then CollectorHub.RequestLive(cluster_id, ...)
-    Hub->>Coll: {"id": "...", "type": "request", "tool": "live_list_pods", "args": {...}}<br/>(over the already-open connection)
-    Coll->>Coll: live_tools.dispatch(tool, args)<br/>— reads the K8s API directly, own RBAC only
-    Coll-->>Hub: {"id": "...", "type": "response", "result": {...}}
+    Hub->>Disc: {"id": "...", "type": "request", "tool": "live_list_pods", "args": {...}}<br/>(over the already-open connection)
+    Disc->>Disc: live_tools.dispatch(tool, args)<br/>— reads its OWN cluster's K8s API directly, own RBAC only
+    Disc-->>Hub: {"id": "...", "type": "response", "result": {...}}
     Hub-->>Agent: 200 {result}
 
-    Note over Hub: If no connection is registered for cluster_id,<br/>or the collector doesn't answer within 15s,<br/>Hub returns 502/504 immediately — never blocks indefinitely
+    Note over Hub: If no connection is registered for cluster_id,<br/>or Discovery doesn't answer within 15s,<br/>Hub returns 502/504 immediately — never blocks indefinitely
 ```
 
 **Why this shape:** periodic push (inventory/dependencies) stays plain HTTP

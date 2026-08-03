@@ -8,6 +8,15 @@
 
 ## Overview
 
+**This Postgres instance lives behind the Hub only** — it is not deployed
+per cluster, and Discovery (`agentify-discovery`) never connects to it
+directly. Discovery pushes data to Hub *endpoints*
+(`/api/cluster-inventory`, `/api/service-dependencies`); the Hub's own
+handlers are what write the rows described below. Keep that distinction in
+mind reading `cluster_services`/`service_dependencies` further down — the
+`cluster_id` column values come from Discovery's pushes, but the table
+itself, and every query against it, is 100% Hub-side.
+
 Every pod-mesh store type is backed by **one Postgres instance** (RDS in
 production). The trait→store-family classification in
 [storage-strategy.md](../context-mesh/policies/storage-strategy.md) still

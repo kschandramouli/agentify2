@@ -12,11 +12,12 @@
 ## What is it?
 
 Event ingestion is the gateway for all data flowing into agentify's
-Postgres-backed store. It:
+Postgres-backed store — entirely **Hub-side** machinery (see "Who calls
+this today" below for which external processes push into it). It:
 1. Accepts canonical events at `POST /api/ingest`
-2. Resolves the pushing collector/adapter's tenant/cluster identity from its
-   bearer credential (or defaults to the single-deployment sentinel if none
-   is presented)
+2. Resolves the pushing adapter's tenant/cluster identity from its bearer
+   credential (or defaults to the single-deployment sentinel if none is
+   presented)
 3. Classifies events by traits (storage-strategy policy) and routes to a pod
 4. Creates the pod (and its parent index pod, for sharded families) if it
    doesn't exist yet
@@ -41,16 +42,22 @@ Postgres-backed store. It:
 
 ## Who calls this today
 
+Everything above (`Ingest`, `routeAndCreatePod`, `storeEvent`,
+`HandleIngestEvent`) runs **on the Hub** — there are exactly two external
+callers, and they use this endpoint very differently:
+
 - **`src/adapters/k8fy/`** (the original K8fy adapter, Python — see
-  [K8FY_ADAPTER.md](K8FY_ADAPTER.md)) — its `Emitter` already sends a Bearer
-  token (`BACKEND_AUTH_TOKEN`) with every push; as of ADR 0024 that token is
-  actually checked and, if it matches an `Integration`'s `collector_token`,
-  resolves real `(tenant_id, cluster_id)`. No adapter code change was needed
-  for this — only the Hub-side check was missing.
-- **`src/adapters/discovery/`** (`agentify-discovery`, the newer fleet
-  collector) doesn't call `/api/ingest` at all — it pushes to
-  `/api/cluster-inventory` and `/api/service-dependencies` instead (see
-  ROADMAP P18).
+  [K8FY_ADAPTER.md](K8FY_ADAPTER.md)) — **does** call `/api/ingest`. Its
+  `Emitter` already sends a Bearer token (`BACKEND_AUTH_TOKEN`) with every
+  push; as of ADR 0024 the Hub actually checks that token and, if it
+  matches an `Integration`'s `collector_token`, resolves real
+  `(tenant_id, cluster_id)`. No adapter code change was needed for this —
+  only the Hub-side check was missing.
+- **`src/adapters/discovery/`** (`agentify-discovery`, i.e. **Discovery**,
+  the newer fleet collector) **never** calls `/api/ingest` — it pushes to
+  the Hub's `/api/cluster-inventory` and `/api/service-dependencies`
+  instead (see ROADMAP P18), which don't go through the ingestion/pod-mesh
+  path this doc describes at all.
 
 ## Credential resolution (ADR 0022/0024)
 

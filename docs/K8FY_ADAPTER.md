@@ -17,13 +17,18 @@ Kubernetes and agentify's ingested-data store. It:
 4. Emits to the backend's `POST /api/ingest`
 5. Serves on-demand pod logs and namespace discovery over its own small HTTP endpoint
 
-**Relationship to `agentify-discovery`:** this adapter and the newer fleet
-collector (ROADMAP P18, see `docs/AGENT_INTEGRATION.md`) are two separate
-per-cluster components with overlapping concerns (both need K8s RBAC read
-access, both report to the central backend). [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md)
-Decision #9 flags this as a real smell whose natural end state is one
-per-cluster deployable doing both jobs — explicitly **not resolved**, since
-merging them means migrating every existing adapter deployment.
+**Relationship to Discovery (`agentify-discovery`):** this adapter and
+Discovery (ROADMAP P18, see `docs/AGENT_INTEGRATION.md`) are two separate
+components that both run **per cluster**, with overlapping concerns — both
+need K8s RBAC read access inside that cluster, both push data outbound to
+**the Hub** (this adapter to `/api/ingest`; Discovery to
+`/api/cluster-inventory`/`/api/service-dependencies`/the persistent
+connection). Neither one runs anywhere near the Hub itself; both are purely
+in-cluster, outbound-only pushers. [ADR 0022](../context-mesh/decisions/0022-multi-tenant-fleet-hub.md)
+Decision #9 flags having two such components as a real smell whose natural
+end state is one per-cluster deployable doing both jobs — explicitly **not
+resolved**, since merging them means migrating every existing adapter
+deployment.
 
 ## Components (all Python, `src/adapters/k8fy/`)
 
@@ -91,11 +96,11 @@ kubectl logs -n agentify -l app=k8fy-adapter -f
 ## Event flow
 
 ```
-K8sWatcher observes K8s (watch stream or scrape tick)
+[this cluster] K8sWatcher observes K8s (watch stream or scrape tick)
   ├─ normalizer.normalize_*_event() → canonical dict
-  └─ Emitter.emit() → POST /api/ingest (Bearer BACKEND_AUTH_TOKEN)
+  └─ Emitter.emit() → POST /api/ingest (Bearer BACKEND_AUTH_TOKEN)  ─────▶  crosses into the Hub
 
-Backend ingestion (see EVENT_INGESTION.md)
+[the Hub] ingestion (see EVENT_INGESTION.md) — none of this runs in the cluster
   ├─ resolveTenantContext(r) → (tenant_id, cluster_id)
   ├─ Classify traits → store type (kv for live-state/certs, relational for events/metrics)
   ├─ Route to a cluster-aware pod ID (models.PodID, ADR 0024)
