@@ -152,12 +152,12 @@ function IntegrationForm({
         />
       </label>
       <label className="int-field">
-        <span>Adapter URL *</span>
+        <span>Discovery URL *</span>
         <input
           type="url"
           value={form.adapter_url}
           onChange={e => set("adapter_url", e.target.value)}
-          placeholder="http://k8fy-adapter:8080"
+          placeholder="http://agentify-discovery:8300"
           required
         />
       </label>
@@ -231,7 +231,7 @@ function IntegrationRow({
       </div>
       {discoveredNamespaces.length > 0 && (
         <div className="int-row__watching int-row__watching--discovered">
-          <span className="int-row__watching-label">Discovered by adapter:</span>
+          <span className="int-row__watching-label">Discovered by agentify-discovery:</span>
           {discoveredNamespaces.map(ns => (
             <code key={ns} className="int-ns-chip int-ns-chip--muted">{ns}</code>
           ))}
@@ -326,8 +326,8 @@ export function IntegrationsPanel() {
       <div className="int-panel__header">
         <h2>Integrations</h2>
         <p className="int-panel__desc">
-          Each integration connects agentify to a K8fy adapter. Namespaces watched by the
-          adapter are discovered automatically — assign the ones this integration is
+          Each integration connects agentify to an agentify-discovery collector. Namespaces
+          watched by it are discovered automatically — assign the ones this integration is
           responsible for below.
         </p>
         {mode === "list" && (

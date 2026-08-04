@@ -111,11 +111,11 @@ TOOLS = [
             "(OOMKilled, panic/stack trace, connection refused, failing probe). "
             "Automatically tries the log platform (Glue/Athena) first when configured "
             "and falls back to the live cluster — you never need to decide which; call "
-            "this instead of get_pod_logs/live_get_pod_logs unless you specifically need "
-            "the cached store or a live snapshot. Set previous=true to read the last "
-            "crashed container instance when the live cluster answers (ignored when the "
-            "log platform answers, which retains history itself). Logs are best-effort "
-            "redacted and not stored."
+            "this instead of live_get_pod_logs unless you specifically need a live "
+            "snapshot. Set previous=true to read the last crashed container instance "
+            "when the live cluster answers (ignored when the log platform answers, "
+            "which retains history itself). Logs are best-effort redacted and not "
+            "stored."
         ),
         "input_schema": {
             "type": "object",
@@ -127,28 +127,6 @@ TOOLS = [
                 "tail_lines": {"type": "integer", "description": "Lines from the end (default 200, capped server-side)."},
             },
             "required": ["namespace", "pod"],
-        },
-    },
-    {
-        "name": "get_pod_logs",
-        "description": (
-            "Fetch a bounded, redacted tail of a pod's logs from the k8fy-adapter's "
-            "cached store specifically — prefer get_logs unless you need this cached "
-            "snapshot in particular. Set previous=true to read the last crashed "
-            "container instance — that is where a CrashLoopBackOff reason usually is. "
-            "Logs are best-effort redacted and not stored; quote the relevant failure "
-            "line in your answer."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pod_id": {"type": "string", "description": "Pod identifier"},
-                "namespace": {"type": "string", "description": "Kubernetes namespace"},
-                "container": {"type": "string", "description": "Container name (optional; defaults to the pod's container)."},
-                "previous": {"type": "boolean", "description": "Read the previous (crashed) container instance."},
-                "tail_lines": {"type": "integer", "description": "Lines from the end (default 100, capped server-side)."},
-            },
-            "required": ["pod_id", "namespace"],
         },
     },
     {

@@ -1,6 +1,8 @@
-"""Tests for k8s_client.py's ingress/entry-point mapping additions
-(ROADMAP P18 use case #3): list_ingresses, list_gateways, list_httproutes,
-list_routes, and discover_api_capabilities's group-probing.
+"""Tests for k8s_client.py: the ingress/entry-point mapping additions
+(ROADMAP P18 use case #3 — list_ingresses, list_gateways, list_httproutes,
+list_routes, discover_api_capabilities's group-probing) and the watch/scrape
+primitives merged in from the retired k8fy adapter (ADR 0027 —
+watch_resource, list_container_restarts, parse_cert_expiry).
 
 Same httpx.MockTransport pattern as test_inventory.py/test_service_topology.py,
 plus a k8s_headers() monkeypatch so _k8s_get doesn't need a real mounted
@@ -9,6 +11,7 @@ service-account token file.
 
 import httpx
 import pytest
+from cryptography import x509
 
 from discovery import k8s_client
 
@@ -244,3 +247,100 @@ async def test_discover_api_capabilities_both_absent_on_vanilla_k8s(monkeypatch)
     caps = await k8s_client.discover_api_capabilities()
     assert caps["gateway_api"] is False
     assert caps["openshift_route"] is False
+
+
+# ── watch_resource / list_container_restarts / parse_cert_expiry
+# (ADR 0027, merged from the retired k8fy adapter) ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_watch_resource_yields_parsed_events(monkeypatch):
+    body = (
+        b'{"type": "ADDED", "object": {"metadata": {"name": "pod-a"}}}\n'
+        b'{"type": "MODIFIED", "object": {"metadata": {"name": "pod-a"}}}\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("watch") == "1"
+        return httpx.Response(200, content=body)
+    _mock(monkeypatch, handler)
+
+    events = [event async for event in k8s_client.watch_resource("/api/v1/pods")]
+    assert [e["type"] for e in events] == ["ADDED", "MODIFIED"]
+    assert events[0]["object"]["metadata"]["name"] == "pod-a"
+
+
+@pytest.mark.asyncio
+async def test_watch_resource_raises_on_connection_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+    _mock(monkeypatch, handler)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        async for _ in k8s_client.watch_resource("/api/v1/pods"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_list_container_restarts_one_entry_per_container(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [{
+            "metadata": {"name": "pod-a"},
+            "status": {"containerStatuses": [
+                {"name": "app", "restartCount": 3},
+                {"name": "sidecar", "restartCount": 0},
+            ]},
+        }]})
+    _mock(monkeypatch, handler)
+
+    result = await k8s_client.list_container_restarts("payments")
+    assert result == [
+        {"pod_id": "pod-a", "namespace": "payments", "container": "app", "restarts": 3},
+        {"pod_id": "pod-a", "namespace": "payments", "container": "sidecar", "restarts": 0},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_container_restarts_returns_empty_on_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+    _mock(monkeypatch, handler)
+
+    assert await k8s_client.list_container_restarts("payments") == []
+
+
+def _self_signed_cert_pem(common_name: str, days_from_now: int) -> bytes:
+    """Same synthetic-cert helper as test_live_tools.py — no live cluster or
+    real TLS secrets available in this environment."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    import base64 as _base64
+    import datetime as _datetime
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    now = _datetime.datetime.now(_datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - _datetime.timedelta(days=abs(days_from_now) + 1))
+        .not_valid_after(now + _datetime.timedelta(days=days_from_now))
+        .sign(key, hashes.SHA256())
+    )
+    return _base64.b64encode(cert.public_bytes(serialization.Encoding.PEM)).decode("ascii")
+
+
+def test_parse_cert_expiry_returns_expiry_and_common_name():
+    cert_b64 = _self_signed_cert_pem("payment-api.payments.svc", days_from_now=45)
+    expires_at, dns_names = k8s_client.parse_cert_expiry(cert_b64)
+    assert expires_at is not None
+    assert dns_names == ["payment-api.payments.svc"]  # CN fallback, no SAN extension
+
+
+def test_parse_cert_expiry_returns_none_on_malformed_data():
+    expires_at, dns_names = k8s_client.parse_cert_expiry("not-valid-base64-pem")
+    assert expires_at is None
+    assert dns_names == []

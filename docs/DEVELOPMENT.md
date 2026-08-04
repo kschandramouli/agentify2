@@ -82,12 +82,13 @@ Two options, both already used elsewhere in this repo:
 
 ## Running the fleet collector locally (optional)
 
-`agentify-discovery` (`src/adapters/discovery/`) and the original K8fy
-adapter (`src/adapters/k8fy/`) both need a real or fake Kubernetes API to do
-anything useful — not part of the basic backend+agent quick start. See
-[K8FY_ADAPTER.md](K8FY_ADAPTER.md) and [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)'s
-"Fleet clusters & live drill-down" section if you need to run either
-locally.
+`agentify-discovery` (`src/adapters/discovery/`) — the per-cluster
+collector; [ADR 0027](../context-mesh/decisions/0027-merge-k8fy-adapter-into-discovery.md)
+merged the original k8fy-adapter's ingestion role into it, so this is now
+the only such component — needs a real or fake Kubernetes API to do
+anything useful, so it's not part of the basic backend+agent quick start.
+See [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)'s "Fleet clusters & live
+drill-down" section if you need to run it locally.
 
 ---
 
@@ -168,9 +169,9 @@ make test-coverage   # writes coverage.html
 
 Every test above uses mock data or the real (but Kubernetes-independent)
 Postgres/registry stack — fast, deterministic, works offline. To validate
-against a real cluster, run `k8fy-adapter` or `agentify-discovery` against
-one directly (see "Running the fleet collector locally" above) rather than
-through this test suite.
+against a real cluster, run `agentify-discovery` against one directly (see
+"Running the fleet collector locally" above) rather than through this test
+suite.
 
 ---
 

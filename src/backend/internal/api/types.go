@@ -120,6 +120,19 @@ type ServiceDependencyStore interface {
 type ClusterServiceStore interface {
 	UpsertClusterServices(ctx context.Context, tenantID, clusterID string, byNamespace map[string][]string) error
 	ResolveServiceClusters(ctx context.Context, tenantID, namespace, service string) ([]string, error)
+	ListClusterServices(ctx context.Context, tenantID string) (map[string][]string, error)
+}
+
+// NamespaceEntry is one discovered namespace, returned by the namespace-sync
+// endpoints (HandleSyncNamespaces, HandleTrackedEntities's live-seed
+// fallback). Was populated by the retired k8fy adapter's live
+// DiscoverNamespaces() call (ADR 0027); now built from
+// ClusterServiceStore.ListClusterServices — same JSON shape, so the
+// frontend's SyncResult type (src/frontend/src/api.ts) needed no change.
+type NamespaceEntry struct {
+	Namespace    string   `json:"namespace"`
+	Services     []string `json:"services"`
+	ServiceCount int      `json:"service_count"`
 }
 
 // ClusterIngressStore is the entry-point-mapping registry interface (ROADMAP

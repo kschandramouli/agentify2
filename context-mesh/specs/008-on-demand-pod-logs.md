@@ -3,6 +3,20 @@
 > Lets the agent pull a **bounded, redacted tail** of a crashing pod's logs at
 > diagnosis time — without storing logs. Realizes [ADR 0014](../decisions/0014-on-demand-ephemeral-log-fetch.md).
 
+> **Superseded (2026-08-04) — the adapter-log-server half of this spec.**
+> [ADR 0027](../decisions/0027-merge-k8fy-adapter-into-discovery.md) retired
+> the standalone adapter's inbound `POST /logs` HTTP server and the `get_pod_logs`
+> tool/`AdapterClient.FetchLogs` path described below outright — not
+> ported, not deprecated-in-place. The capability lives on through
+> `live_get_pod_logs`, relayed over agentify-discovery's existing
+> persistent outbound connection (no inbound port, no separate
+> `ADAPTER_AUTH_TOKEN`); `get_logs`'s router already prefers that path.
+> The redaction/scope/behavior sections below (bounded tail, `RedactText`
+> scrub, never persisted, `previous=true` for crash logs) still describe
+> today's behavior faithfully — only the transport and interface changed.
+> Left in place rather than rewritten so the original interface this
+> spec shipped against stays legible.
+
 ## Goal
 
 When events/metrics show *that* and *when* a pod crashed but not *why*, fetch the

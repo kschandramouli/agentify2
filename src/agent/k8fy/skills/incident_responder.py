@@ -19,7 +19,7 @@ from models.response import AgentResponse
 
 _INCIDENT_RESPONDER_TOOLS = [
     t for t in TOOLS
-    if t["name"] in {"get_similar_incidents", "get_change_history", "get_pod_logs"}
+    if t["name"] in {"get_similar_incidents", "get_change_history", "get_logs"}
 ]
 
 logger = logging.getLogger(__name__)
@@ -66,10 +66,9 @@ class IncidentResponderSkill(K8fyAgent):
                 {"namespace": namespace, "deployment": service_name},
             )
 
-        # get_logs (not get_pod_logs directly) so this reads the Glue/Athena
-        # test harness first when configured, falling back to the live
-        # cluster — still a deterministic function call, not an LLM decision
-        # (log_router.py).
+        # get_logs — reads the Glue/Athena test harness first when configured,
+        # falling back to the live cluster — still a deterministic function
+        # call, not an LLM decision (log_router.py).
         for pod_id in _crashing_pod_ids(data):
             tasks[f"logs.{pod_id}"] = self._fetch(
                 "get_logs",

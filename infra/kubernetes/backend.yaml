@@ -31,8 +31,6 @@ spec:
           value: "dynamodb"
         - name: AGENT_SERVICE_URL
           value: "http://agentify-agent:8001"
-        - name: ADAPTER_URL
-          value: "http://k8fy-adapter:8200"
         # DB credentials from Secrets Manager secret agentify/dev/db
         # Loaded via init container or External Secrets Operator; shown here as
         # individual env vars for clarity.
@@ -61,11 +59,6 @@ spec:
             secretKeyRef:
               name: agentify-db-secret
               key: password
-        - name: ADAPTER_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: agentify-adapter-secret
-              key: token
         - name: REDACTION_ENABLED
           value: "true"
         - name: EVENTS_RETENTION_DAYS
@@ -77,8 +70,8 @@ spec:
         # Phase-3 remediation (ADR 0020 / spec 011 Use Cases 1+2) — every write
         # action is proposed first and only executed after explicit human
         # approval; both loops default off. REMEDIATION_AUTH_TOKEN should be
-        # sourced from a Secret (same pattern as ADAPTER_AUTH_TOKEN above) once
-        # a paying deployment turns this on.
+        # sourced from a Secret (same secretKeyRef pattern as DB_PASSWORD
+        # above) once a paying deployment turns this on.
         - name: AUTONOMOUS_REMEDIATION_ENABLED
           value: "false"
         - name: DEPLOY_GUARDIAN_ENABLED

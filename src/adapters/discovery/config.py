@@ -31,7 +31,12 @@ def load_from_env() -> Config:
         scan_interval_seconds=_int_env("SCAN_INTERVAL_SECONDS", 60),
         max_pods_per_namespace=_int_env("MAX_PODS_PER_NAMESPACE", 5),
         log_tail_lines=_int_env("LOG_TAIL_LINES", 200),
-        namespace_exclude=_list_env("NAMESPACE_EXCLUDE", "kube-system,kube-public,kube-node-lease"),
+        namespace_exclude=_list_env(
+            "NAMESPACE_EXCLUDE",
+            # Union of the two prior defaults (this package's own + the
+            # retired k8fy adapter's broader _SYSTEM_NAMESPACES, ADR 0027).
+            "kube-system,kube-public,kube-node-lease,cert-manager,monitoring,ingress-nginx",
+        ),
         health_port=_int_env("HEALTH_PORT", 8300),
     )
 

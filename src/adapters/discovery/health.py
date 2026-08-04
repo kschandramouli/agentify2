@@ -1,8 +1,7 @@
 """health.py — a stdlib liveness/readiness endpoint for agentify-discovery.
 
-A stdlib HTTP server is used deliberately, same justification as
-src/adapters/k8fy/logserver.py: a single internal route does not justify
-pulling an ASGI framework into this image.
+A stdlib HTTP server is used deliberately: a single internal route does not
+justify pulling an ASGI framework into this image.
 """
 
 import json

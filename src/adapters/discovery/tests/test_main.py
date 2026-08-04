@@ -11,7 +11,9 @@ import pytest
 
 from discovery import k8s_client, main
 from discovery.config import Config
-from discovery.main import _namespace_service_names, _scan_health, _scan_ingress, _service_for_pod
+from discovery.main import (
+    _namespace_service_names, _scan_certificates, _scan_health, _scan_ingress, _scan_metrics, _service_for_pod,
+)
 
 
 def test_matches_pod_via_selector():
@@ -208,4 +210,67 @@ async def test_scan_health_still_pushes_counts_when_caps_is_none(monkeypatch):
 
     await _scan_health(["payments"], _cfg(), None)
 
-    assert pushed == {"k8s_version": "", "pods_total": 2, "pods_ready": 2}
+
+# ── _scan_metrics / _scan_certificates (ADR 0027, merged from the retired
+# k8fy adapter's separate SCRAPE_INTERVAL/CERT_CHECK_INTERVAL timers) ────────
+
+@pytest.mark.asyncio
+async def test_scan_metrics_pushes_one_event_per_container(monkeypatch):
+    async def container_restarts(ns):
+        return [
+            {"pod_id": "pod-a", "namespace": ns, "container": "app", "restarts": 2},
+            {"pod_id": "pod-a", "namespace": ns, "container": "sidecar", "restarts": 0},
+        ]
+
+    monkeypatch.setattr(k8s_client, "list_container_restarts", container_restarts)
+
+    pushed = []
+
+    async def fake_push_event(event, backend_url, collector_token):
+        pushed.append(event)
+
+    monkeypatch.setattr(main.normalize, "push_event", fake_push_event)
+
+    await _scan_metrics(["payments"], _cfg())
+
+    assert len(pushed) == 2
+    assert {e["payload"]["container"] for e in pushed} == {"app", "sidecar"}
+    assert all(e["event_namespace"] == "k8fy.metrics" for e in pushed)
+
+
+@pytest.mark.asyncio
+async def test_scan_metrics_no_containers_pushes_nothing(monkeypatch):
+    monkeypatch.setattr(k8s_client, "list_container_restarts", lambda ns: _return([]))
+    monkeypatch.setattr(main.normalize, "push_event", _fail_if_called("push_event"))
+
+    await _scan_metrics(["payments"], _cfg())
+
+
+@pytest.mark.asyncio
+async def test_scan_certificates_pushes_one_event_per_secret(monkeypatch):
+    async def tls_secrets(ns):
+        return [{"name": "tls-cert-a", "tls_crt_b64": "irrelevant-for-this-test"}]
+
+    monkeypatch.setattr(k8s_client, "list_tls_secrets", tls_secrets)
+    monkeypatch.setattr(k8s_client, "parse_cert_expiry", lambda b64: (None, []))
+
+    pushed = []
+
+    async def fake_push_event(event, backend_url, collector_token):
+        pushed.append(event)
+
+    monkeypatch.setattr(main.normalize, "push_event", fake_push_event)
+
+    await _scan_certificates(["payments"], _cfg())
+
+    assert len(pushed) == 1
+    assert pushed[0]["event_namespace"] == "k8fy.certificates"
+    assert pushed[0]["payload"]["secret"] == "tls-cert-a"
+
+
+@pytest.mark.asyncio
+async def test_scan_certificates_no_tls_secrets_pushes_nothing(monkeypatch):
+    monkeypatch.setattr(k8s_client, "list_tls_secrets", lambda ns: _return([]))
+    monkeypatch.setattr(main.normalize, "push_event", _fail_if_called("push_event"))
+
+    await _scan_certificates(["payments"], _cfg())

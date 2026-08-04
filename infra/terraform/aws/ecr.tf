@@ -4,7 +4,7 @@
 # the EKS module automatically).
 
 locals {
-  ecr_repos = ["backend", "agent", "k8fy-adapter", "frontend"]
+  ecr_repos = ["backend", "agent", "discovery", "frontend"]
 }
 
 resource "aws_ecr_repository" "this" {

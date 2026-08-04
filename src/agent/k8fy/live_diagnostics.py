@@ -2,8 +2,10 @@
 ingested/cached store).
 
 These are the only functions that call the live Kubernetes API on demand —
-distinct from the rest of the tool set (tools.py), which reads data the
-k8fy-adapter has already ingested. Every function here is strictly read-only:
+distinct from the rest of the tool set (tools.py), which reads data
+agentify-discovery (ADR 0022/0027 — the per-cluster collector; absorbed the
+original k8fy-adapter's ingestion role) has already pushed into the ingested
+store. Every function here is strictly read-only:
 `get`/`list` on pods, pod logs, and events. None of them can mutate anything,
 and none of them implement `pods/exec` (shell into a container) — that is a
 fundamentally different, much higher-risk capability and is intentionally not

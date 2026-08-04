@@ -415,7 +415,9 @@ export interface SyncResult {
   total: number;
 }
 
-// Trigger a live sync from the adapter — discovers all K8s namespaces/services.
+// Trigger a sync from the cluster_services registry (populated by
+// agentify-discovery's periodic inventory push, ADR 0027) — discovers all
+// K8s namespaces/services.
 export function syncNamespaces(): Promise<SyncResult> {
   return postJSON<SyncResult>("/admin/sync", {});
 }

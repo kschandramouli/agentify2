@@ -5,8 +5,8 @@ This is the log-platform side of the get_logs router (log_router.py): tried
 first for every namespace whenever ATHENA_WORKGROUP/DATABASE/TABLE are
 configured (see config/settings.py), falling back to the live Kubernetes API
 on empty results or errors. It's a genuinely separate data source from
-everything else in this codebase — it queries data the k8fy-adapter never
-ingested, via AWS Athena/Glue, using the agent's IRSA role (already granted
+everything else in this codebase — it queries data agentify-discovery never
+ingests either, via AWS Athena/Glue, using the agent's IRSA role (already granted
 athena:*/glue:*/s3:GetObject in infra/terraform/aws/logging.tf's
 log_query_access policy — no new IAM needed).
 

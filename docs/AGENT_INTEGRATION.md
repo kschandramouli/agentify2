@@ -90,6 +90,17 @@ other, and it matters which one a given operation actually runs on:
     forwards a `live_*` request, Discovery dispatches it locally
     (`live_tools.py` — reads pods/logs/events/Secrets directly from its own
     cluster) and sends the result back over the same connection.
+  - **Watch + push (continuous, `POST /api/ingest`):** since
+    [ADR 0027](../context-mesh/decisions/0027-merge-k8fy-adapter-into-discovery.md)
+    merged the original k8fy-adapter's ingestion role into Discovery,
+    it also runs long-lived K8s watch streams (`watch.py`) over pods/
+    services/Deployments — emitting fine-grained `k8fy.live-state`/
+    `k8fy.events` change events as they happen — plus two more scan-cycle
+    steps (`_scan_metrics`, `_scan_certificates`) that sample container
+    restart counts and TLS certificate expiry (`k8fy.metrics`/
+    `k8fy.certificates`). All of it authenticates with the same
+    `COLLECTOR_TOKEN` as the pushes above — there is no longer a second,
+    separate credential for this data path.
   - Discovery **initiates** the one connection it holds (`GET
     /api/collector/connect`) and never accepts an inbound one — there is no
     standing credential that would let the Hub (or anything else) reach

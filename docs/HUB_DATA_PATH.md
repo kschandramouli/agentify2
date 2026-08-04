@@ -53,18 +53,20 @@ Postgres-backed store. It:
 
 ### Who calls this today
 
-- **`src/adapters/k8fy/`** (the original K8fy adapter, Python — see
-  [K8FY_ADAPTER.md](K8FY_ADAPTER.md)) — **does** call `/api/ingest`. Its
-  `Emitter` already sends a Bearer token (`BACKEND_AUTH_TOKEN`) with every
-  push; as of ADR 0024 the Hub actually checks that token and, if it
-  matches an `Integration`'s `collector_token`, resolves real
-  `(tenant_id, cluster_id)`. No adapter code change was needed for this —
-  only the Hub-side check was missing.
-- **`src/adapters/discovery/`** (`agentify-discovery`, i.e. Discovery, the
-  newer fleet collector) **never** calls `/api/ingest` — it pushes to the
-  Hub's `/api/cluster-inventory`, `/api/cluster-ingress`, and
-  `/api/cluster-health` instead (see ROADMAP P18), none of which go
-  through the ingestion/pod-mesh path this section describes.
+- **`src/adapters/discovery/`** (`agentify-discovery`) is the only caller.
+  [ADR 0027](../context-mesh/decisions/0027-merge-k8fy-adapter-into-discovery.md)
+  merged the original k8fy-adapter's ingestion role into Discovery: its
+  watch streams (`watch.py`, continuous pod/service/Deployment change
+  events) and two scan-cycle steps (`_scan_metrics`, `_scan_certificates`,
+  periodic restart-count and TLS-expiry sampling) all normalize
+  (`normalize.py`) and push to `/api/ingest` via `push_event`, sending a
+  Bearer `COLLECTOR_TOKEN` with every request — the same credential
+  Discovery's other pushes and its live-relay connection already use (see
+  ADR 0022/0024 for how the Hub resolves it to a `(tenant_id, cluster_id)`).
+  Discovery **also** pushes to the Hub's `/api/cluster-inventory`,
+  `/api/cluster-ingress`, and `/api/cluster-health` (see ROADMAP P18) —
+  those go through a separate path from the ingestion/pod-mesh flow this
+  section describes.
 
 ### Credential resolution (ADR 0022/0024)
 
@@ -73,7 +75,7 @@ collector-facing endpoint uses:
 
 | Presented credential | Result |
 |---|---|
-| None | `(DefaultTenantID, "")` — today's single-cluster behavior, byte-for-byte unchanged. This is what keeps every adapter deployment that hasn't been given a `CollectorToken` working exactly as before. |
+| None | `(DefaultTenantID, "")` — today's single-cluster behavior, byte-for-byte unchanged. This is what keeps every agentify-discovery deployment that hasn't been given a `CollectorToken` working exactly as before. |
 | Doesn't match any `Integration.CollectorToken` | Rejected, 401 |
 | Matches an `Integration.CollectorToken` | That `Integration`'s `(tenant_id, cluster_id)` |
 

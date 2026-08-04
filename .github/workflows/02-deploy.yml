@@ -40,7 +40,7 @@ jobs:
 
       - name: Ensure ECR repos exist
         run: |
-          for repo in agentify/backend agentify/agent agentify/k8fy-adapter agentify/frontend agentify/discovery; do
+          for repo in agentify/backend agentify/agent agentify/frontend agentify/discovery; do
             aws ecr describe-repositories --repository-names "$repo" \
               --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 \
             || aws ecr create-repository --repository-name "$repo" \
@@ -75,15 +75,6 @@ jobs:
           tags: |
             ${{ secrets.ECR_REGISTRY }}/agentify/agent:${{ steps.meta.outputs.tag }}
             ${{ secrets.ECR_REGISTRY }}/agentify/agent:latest
-
-      - name: Build & push adapter
-        uses: docker/build-push-action@v5
-        with:
-          context: src/adapters/k8fy
-          push: true
-          tags: |
-            ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:${{ steps.meta.outputs.tag }}
-            ${{ secrets.ECR_REGISTRY }}/agentify/k8fy-adapter:latest
 
       - name: Build & push frontend
         uses: docker/build-push-action@v5
@@ -168,14 +159,6 @@ jobs:
             --from-literal=password=$(echo $DB | python3 -c "import sys,json;print(json.load(sys.stdin)['password'])") \
             --dry-run=client -o yaml | kubectl apply -f -
 
-          # Adapter auth token
-          ADAPTER_TOKEN=$(aws secretsmanager get-secret-value --secret-id agentify/dev/adapter \
-            --region $REGION --query SecretString --output text | \
-            python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
-          kubectl create secret generic agentify-adapter-secret -n agentify \
-            --from-literal=token=$ADAPTER_TOKEN \
-            --dry-run=client -o yaml | kubectl apply -f -
-
           # Anthropic API key
           ANTHROPIC_KEY=$(aws secretsmanager get-secret-value --secret-id agentify/dev/anthropic \
             --region $REGION --query SecretString --output text | \
@@ -203,7 +186,7 @@ jobs:
           TAG=${{ env.IMAGE_TAG }}
 
           # 1. Replace the ACCOUNT_ID placeholder with the actual ECR registry host.
-          for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml infra/kubernetes/k8fy-adapter.yaml \
+          for f in infra/kubernetes/backend.yaml infra/kubernetes/agent.yaml \
                    infra/kubernetes/discovery.yaml \
                    infra/kubernetes/payments-test/payment-api.yaml infra/kubernetes/payments-test/payment-worker.yaml \
                    infra/kubernetes/payments-test/payment-service.yaml; do
@@ -213,19 +196,17 @@ jobs:
           # 2. Pin images to the commit SHA (immutable tag).
           sed -i "s|${REGISTRY}/agentify/backend:latest|${REGISTRY}/agentify/backend:${TAG}|g" infra/kubernetes/backend.yaml
           sed -i "s|${REGISTRY}/agentify/agent:latest|${REGISTRY}/agentify/agent:${TAG}|g" infra/kubernetes/agent.yaml
-          sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
           sed -i "s|${REGISTRY}/agentify/discovery:latest|${REGISTRY}/agentify/discovery:${TAG}|g" infra/kubernetes/discovery.yaml
           sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/frontend.yaml
           sed -i "s|${REGISTRY}/agentify/frontend:latest|${REGISTRY}/agentify/frontend:${TAG}|g" infra/kubernetes/frontend.yaml
 
           # 3. Substitute IRSA role ARN placeholders from live IAM (no hardcoding).
+          # agentify-discovery has no IRSA role (ADR 0027 — in-cluster RBAC only).
           BACKEND_ROLE=$(aws iam get-role --role-name agentify-dev-backend --query 'Role.Arn' --output text)
           AGENT_ROLE=$(aws iam get-role   --role-name agentify-dev-agent   --query 'Role.Arn' --output text)
-          ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter  --query 'Role.Arn' --output text)
 
           sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn|${BACKEND_ROLE}|g" infra/kubernetes/backend.yaml
           sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn|${AGENT_ROLE}|g"     infra/kubernetes/agent.yaml
-          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
 
           echo "Manifests updated — sample backend image:"
           grep "image:" infra/kubernetes/backend.yaml | head -1
@@ -428,15 +409,14 @@ jobs:
         run: |
           kubectl apply -f infra/kubernetes/backend.yaml
           kubectl apply -f infra/kubernetes/agent.yaml
-          kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
-          # agentify-discovery (ADR 0022 / ROADMAP P18): applied, but deliberately
-          # not in "Wait for rollouts" below yet. Its Deployment references
-          # Secret agentify-discovery-secret / key collector_token, which has no
-          # corresponding AWS Secrets Manager entry or sync step yet (minting a
-          # real CollectorToken via POST/PUT /admin/integrations and wiring its
-          # Secrets Manager entry is still a manual, one-time step — see the
-          # agentify-discovery plan's "explicitly out of scope" section). Without
-          # that Secret the pod sits in ContainerCreating; applying it anyway is
+          # agentify-discovery (ADR 0022/0027 — the merged per-cluster collector,
+          # ROADMAP P18): applied, but deliberately not in "Wait for rollouts"
+          # below yet. Its Deployment references Secret agentify-discovery-secret
+          # / key collector_token, which has no corresponding AWS Secrets Manager
+          # entry or sync step (minting a real CollectorToken via POST/PUT
+          # /admin/integrations and applying its Secret is still a manual,
+          # one-time step — see infra/kubernetes/discovery.yaml). Without that
+          # Secret the pod sits in ContainerCreating; applying it anyway is
           # harmless, but gating this deploy job on its rollout would make every
           # future deploy fail until that manual step happens.
           kubectl apply -f infra/kubernetes/discovery.yaml
@@ -508,13 +488,13 @@ jobs:
 
           kubectl rollout status deployment/agentify-agent -n agentify --timeout=300s
 
-          kubectl rollout status deployment/k8fy-adapter      -n agentify --timeout=300s
           kubectl rollout status deployment/agentify-frontend -n agentify --timeout=120s
 
       - name: Seed namespace cache (post-deploy sync)
         # Port-forward the backend and call /admin/sync so discovered namespaces/services
         # are written into current_state immediately — without this the search autocomplete
-        # stays empty after a scale-up until the adapter re-emits all ingestion events.
+        # stays empty after a scale-up until agentify-discovery re-pushes its next
+        # cluster-inventory snapshot (ListClusterServices, ADR 0027).
         run: |
           kubectl port-forward -n agentify svc/agentify-backend 18080:8080 &
           PF_PID=$!
@@ -529,7 +509,7 @@ jobs:
             echo "Attempt $i: backend not ready yet, retrying..."
           done
           kill $PF_PID 2>/dev/null || true
-          $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until the adapter re-emits events"
+          $SYNCED || echo "Warning: namespace sync did not complete — autocomplete may be empty until agentify-discovery's next inventory push"
 
       - name: Run eval regression suite
         # Runs the k8fy-regression Langfuse dataset against the freshly deployed
@@ -685,7 +665,6 @@ jobs:
             echo "|---|---|"
             echo "| backend  | \`agentify/backend:${{ env.IMAGE_TAG }}\` |"
             echo "| agent    | \`agentify/agent:${{ env.IMAGE_TAG }}\` |"
-            echo "| adapter  | \`agentify/k8fy-adapter:${{ env.IMAGE_TAG }}\` |"
             echo "| discovery| \`agentify/discovery:${{ env.IMAGE_TAG }}\` |"
             echo "| frontend | \`agentify/frontend:${{ env.IMAGE_TAG }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

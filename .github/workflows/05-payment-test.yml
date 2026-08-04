@@ -71,28 +71,26 @@ jobs:
           echo "Pods:"
           kubectl get pods -n payments -o wide
 
-      - name: "Phase 1 — Redeploy adapter to watch 'payments' namespace"
+      - name: "Phase 1 — Speed up agentify-discovery's scan cycle for this test run"
         run: |
-          # The adapter manifest already points to 'payments' + CERT_CHECK_INTERVAL=30s
-          # Push IRSA annotation and ECR registry before applying.
-          REGISTRY=${{ secrets.ECR_REGISTRY }}
-          TAG=$(kubectl get deployment k8fy-adapter -n agentify \
-            -o jsonpath='{.spec.template.spec.containers[0].image}' | cut -d: -f2)
-          ADAPTER_ROLE=$(aws iam get-role --role-name agentify-dev-adapter --query 'Role.Arn' --output text)
+          # agentify-discovery already watches every namespace (minus
+          # NAMESPACE_EXCLUDE) cluster-wide by default, including 'payments' —
+          # unlike the retired k8fy-adapter there is no per-namespace pin to
+          # redeploy (ADR 0027 dropped that config knob entirely; Discovery's
+          # cluster-wide-with-exclude-list model is the superset). What used to
+          # be two separate fast-cadence knobs (SCRAPE_INTERVAL,
+          # CERT_CHECK_INTERVAL) are now one: SCAN_INTERVAL_SECONDS drives
+          # inventory/health/metrics/certificates together every cycle. Lower
+          # it for this test run so signals show up in seconds, not the
+          # default 60s.
+          kubectl set env deployment/agentify-discovery -n agentify SCAN_INTERVAL_SECONDS=20
+          kubectl rollout status deployment/agentify-discovery -n agentify --timeout=120s
+          echo "agentify-discovery scan cycle set to 20s for this test run"
 
-          sed -i "s|ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com|${REGISTRY}|g" infra/kubernetes/k8fy-adapter.yaml
-          sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
-          # Keep the same image tag currently running
-          sed -i "s|${REGISTRY}/agentify/k8fy-adapter:latest|${REGISTRY}/agentify/k8fy-adapter:${TAG}|g" infra/kubernetes/k8fy-adapter.yaml
-
-          kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
-          kubectl rollout status deployment/k8fy-adapter -n agentify --timeout=120s
-          echo "Adapter now watching 'payments' namespace (cert check every 30s)"
-
-      - name: "Phase 1 — Wait 60s for adapter to ingest initial health state"
+      - name: "Phase 1 — Wait for initial scan cycle"
         run: |
-          echo "Waiting 60s for initial scrape (pods + services)..."
-          sleep 60
+          echo "Waiting 45s for initial scan (inventory + health)..."
+          sleep 45
 
       - name: "Phase 1 — Validate: health check (Tier-1 fast path)"
         run: |
@@ -104,7 +102,7 @@ jobs:
           STATUS=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status',''))")
           echo "Status: $STATUS"
           if [ "$STATUS" = "no_data" ]; then
-            echo "⚠ No data yet — adapter may still be starting. Continuing..."
+            echo "⚠ No data yet — agentify-discovery may still be starting. Continuing..."
           else
             echo "✅ Health data received"
           fi
@@ -114,7 +112,8 @@ jobs:
         run: |
           echo "━━━ PHASE 2: Deploy event ━━━"
           # Bump image from nginx:1.25-alpine → nginx:1.26-alpine to trigger a rollout.
-          # The adapter's watch_deployments will emit a k8fy.events 'deploy' event.
+          # agentify-discovery's deployment watch (watch.py) will emit a
+          # k8fy.events 'deploy' event.
           # Uses the same log-test ECR mirror as Phase 1 (Docker Hub isn't
           # reachable from the 'payments' namespace's Fargate profile).
           REGISTRY=${{ secrets.ECR_REGISTRY }}
@@ -137,8 +136,8 @@ jobs:
           echo "━━━ PHASE 3: Restart trend ━━━"
           kubectl apply -f infra/kubernetes/payments-test/payment-worker.yaml
           echo "Worker deployed — will crash every ~5s to build restart trend."
-          echo "Waiting 3 min for restart count to climb (6+ scrape cycles at 30s)..."
-          sleep 180
+          echo "Waiting for restart count to climb (7+ scan cycles at 20s)..."
+          sleep 150
 
           echo "Current pod state:"
           kubectl get pods -n payments -o wide
@@ -167,8 +166,8 @@ jobs:
             -n payments --dry-run=client -o yaml | kubectl apply -f -
 
           echo "TLS secret created (expires in 5 days)"
-          echo "Waiting 35s for cert scrape (CERT_CHECK_INTERVAL=30s)..."
-          sleep 35
+          echo "Waiting 25s for cert scan (SCAN_INTERVAL_SECONDS=20s)..."
+          sleep 25
 
       - name: "Phase 4 — Validate: cert check"
         run: |
@@ -227,10 +226,9 @@ jobs:
           kubectl delete namespace payments --ignore-not-found=true
           echo "Payments namespace deleted."
 
-          # Restore adapter to watch default (or adjust as needed)
-          kubectl set env deployment/k8fy-adapter -n agentify \
-            K8S_NAMESPACE=payments CERT_CHECK_INTERVAL=300
-          echo "Adapter restored to CERT_CHECK_INTERVAL=300s"
+          # Restore agentify-discovery's scan cadence to its default
+          kubectl set env deployment/agentify-discovery -n agentify SCAN_INTERVAL_SECONDS=60
+          echo "agentify-discovery restored to SCAN_INTERVAL_SECONDS=60s"
 
       - name: "📋 Test Summary"
         if: always()

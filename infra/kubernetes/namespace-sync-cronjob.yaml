@@ -1,10 +1,11 @@
-# Namespace sync CronJob — runs every 2 hours.
+# Namespace sync CronJob — runs every 5 minutes.
 #
-# Calls POST /admin/sync on the backend which queries the adapter for live K8s
-# namespace/service data. This proactively registers namespaces in the pod
-# registry even before they emit any events, so the frontend search autocomplete
-# shows new services as soon as they are deployed — without waiting for the first
-# pod event to trigger discovery.
+# Calls POST /admin/sync on the backend, which reads the cluster_services
+# registry (populated by agentify-discovery's periodic inventory push, ADR
+# 0027) and seeds it into current_state. This proactively registers namespaces
+# in the pod registry even before they emit any events, so the frontend search
+# autocomplete shows new services as soon as they are deployed — without
+# waiting for the first pod event to trigger discovery.
 #
 # The same endpoint is exposed as a "Sync New Namespaces" button in the UI for
 # on-demand refresh.

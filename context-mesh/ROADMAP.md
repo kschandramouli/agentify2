@@ -41,7 +41,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P13** | Agentic use cases expansion | **Use Cases 1+2 done (2026-07-20)** — see below; 3/4/5 not started | [spec 011](specs/011-agentic-use-cases.md), [ADR 0020](decisions/0020-phase-3-remediation-with-approval-gate.md) |
 | **P14** | Split out two standalone agents: remediation executor (security isolation) + PR review agent (second domain) | **Next up (agreed 2026-07-20)** — see below | — |
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
-| **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
+| **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/handlers.go` (`HandleResolveCluster`) |
 | **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
 | **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03; #3 (ingress/entry-point mapping) and #5 (fleet-wide health/version snapshots) shipped 2026-08-04, #4 (cross-cluster dependency edges) confirmed 2026-08-04, all as `agentify-discovery`**; use cases #6-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
 
@@ -695,8 +695,11 @@ P9 is picked up.
 
 ## P15 — Pull-based log-platform connector (proposed 2026-07-21)
 
-**Context:** today's `get_pod_logs` fetches a bounded tail directly from the K8s
-API via the adapter, redacts it (denylist scrubber — freeform text can't use
+**Context:** today's `get_logs`/`live_get_pod_logs` fetches a bounded tail
+directly from the K8s API (as of [ADR 0027](decisions/0027-merge-k8fy-adapter-into-discovery.md),
+relayed through agentify-discovery's persistent connection — the standalone
+adapter and its `get_pod_logs` tool this section originally described are
+retired), redacts it (denylist scrubber — freeform text can't use
 the allowlist gate structured fields get), and discards it — never persisted
 (spec 008, [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md)). The
 ask: stop hitting cluster logs directly; integrate with wherever the org's
@@ -738,6 +741,17 @@ sees-it). No new Postgres tables, no new retention janitor.
 only — the ingest pipeline (Fluent Bit/Firehose + OpenSearch domain + index
 templates) is explicitly out of scope for this item; assumed to exist or be
 stood up separately:**
+
+> **Substrate note (2026-08-04):** the `AdapterClient`/`handlePodLogs`/
+> `internal/api/adapter_client.go` this design's `K8sAdapterLogSource`
+> bullet below was written against no longer exist —
+> [ADR 0027](decisions/0027-merge-k8fy-adapter-into-discovery.md) retired
+> them outright, replaced by `live_get_pod_logs` relayed through
+> agentify-discovery's persistent connection. Not rewritten in place since
+> this whole section is still an unbuilt proposal; whoever picks this up
+> should design `K8sAdapterLogSource` (or whatever it's renamed to) as a
+> thin wrapper over `live_get_pod_logs`/`get_logs`'s router
+> (`log_router.py`) instead, not over the deleted `AdapterClient`.
 
 - **Clarified Firehose's role:** it's a delivery mechanism (producer →
   buffer/batch → OpenSearch), not something queried at read time. Two
@@ -1155,7 +1169,16 @@ work across every K8s distribution, not just EKS. This item is the concrete
    LLM), pushing only genuine candidates to the Hub, which then runs the
    existing LLM-backed diagnose/webhook flow centrally. Distributes the
    polling load across the fleet instead of one central process polling
-   every cluster's metrics on a timer.
+   every cluster's metrics on a timer. **Reframed 2026-08-04:** investigating
+   how this would actually run "in the collector" surfaced that there were
+   two per-cluster collectors with overlapping concerns (the original
+   k8fy-adapter and Discovery) — resolved by
+   [ADR 0027](../decisions/0027-merge-k8fy-adapter-into-discovery.md)'s full
+   merge before this item started. There is now unambiguously one place
+   "in the collector" means: Discovery's scan cycle
+   (`src/adapters/discovery/main.py`), which already runs the metric/
+   certificate sampling this item would build the anomaly sweep alongside.
+   Still not started as its own item.
 7. **Cross-cluster blast-radius checks for P13** — Deployment Guardian can
    ask "does anything in another of this tenant's clusters depend on this
    service" before approving a risky rollout, using the same cross-cluster
@@ -1191,9 +1214,10 @@ work across every K8s distribution, not just EKS. This item is the concrete
 
 **Explicitly out of scope for this item:** ADR 0008/0007's coupled-decision
 follow-ups (per-tenant model routing/BYOK, per-tenant redaction policy) —
-tracked separately per ADR 0022 Decision #8; the k8fy-adapter/collector
-consolidation — tracked separately per ADR 0022 Decision #9. Neither is
-solved here.
+tracked separately per ADR 0022 Decision #8, not solved here. The
+k8fy-adapter/collector consolidation ADR 0022 Decision #9 flagged is
+**resolved** — see
+[ADR 0027](../decisions/0027-merge-k8fy-adapter-into-discovery.md).
 
 **Not started** — this is a design item, not yet a plan or code.
 

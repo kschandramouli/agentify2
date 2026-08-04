@@ -11,11 +11,15 @@ Decision #6), which a versioned client library would fight rather than help
 with.
 """
 
+import base64
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
+from cryptography import x509
 
 logger = logging.getLogger(__name__)
 
@@ -357,4 +361,95 @@ async def list_routes(namespace: str) -> List[Dict[str, str]]:
             "host": spec.get("host", ""),
             "backend_service": spec.get("to", {}).get("name", ""),
         })
+    return result
+
+
+# ── Watch streams + periodic scrape support (ADR 0027 — merged from the
+# retired src/adapters/k8fy adapter) ─────────────────────────────────────────
+
+async def watch_resource(path: str, params: Optional[Dict[str, str]] = None) -> AsyncIterator[Dict[str, Any]]:
+    """Async generator over a K8s watch stream (`?watch=1`) at `path`. Yields
+    parsed `{"type": "ADDED"|"MODIFIED"|"DELETED", "object": {...}}` dicts,
+    one per line, until the connection drops or the caller stops iterating.
+    Raises on connection failure — callers own reconnect/backoff (see
+    watch.py's run_forever, same discipline as live_relay.py's WebSocket
+    reconnect loop). No `resourceVersion` continuity: each (re)connect does a
+    fresh LIST-then-WATCH, same behavior the retired k8fy adapter had — this
+    is also what lets a freshly (re)started process re-populate current_state
+    from scratch via ADDED events for everything that currently exists.
+    """
+    headers = k8s_headers()
+    if not headers:
+        raise RuntimeError("service account token unavailable — agentify-discovery requires in-cluster credentials")
+    watch_params = {**(params or {}), "watch": "1"}
+    async with httpx.AsyncClient(timeout=None, verify=False) as client:
+        async with client.stream("GET", f"{K8S_API}{path}", headers=headers, params=watch_params) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line:
+                    yield json.loads(line)
+
+
+async def list_container_restarts(namespace: str) -> List[Dict[str, Any]]:
+    """List per-container restart counts in `namespace` as one entry per
+    container: `{"pod_id", "namespace", "container", "restarts"}`. Powers the
+    periodic metrics scan (ADR 0027) — the append-only k8fy.metrics samples
+    that make a restart trend over time readable (spec 006)."""
+    resp = await _k8s_get(f"/api/v1/namespaces/{quote(namespace)}/pods")
+    if resp.status_code != 200:
+        logger.warning("list container restarts failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    result = []
+    for item in items:
+        pod_id = item.get("metadata", {}).get("name", "")
+        if not pod_id:
+            continue
+        for cs in item.get("status", {}).get("containerStatuses", []) or []:
+            container = cs.get("name", "")
+            if not container:
+                continue
+            result.append({
+                "pod_id": pod_id, "namespace": namespace,
+                "container": container, "restarts": cs.get("restartCount", 0),
+            })
+    return result
+
+
+def parse_cert_expiry(cert_b64: str) -> Tuple[Optional[datetime], List[str]]:
+    """Decode a base64 PEM certificate and return (NotAfter UTC, DNS names).
+
+    DNS names come from the Subject Alternative Name extension first, falling
+    back to the Subject CN when no SAN extension is present. Returns
+    (None, []) on any parse error rather than raising — one bad secret must
+    never abort a whole namespace's cert scan. Kept independent of
+    live_tools.py's `_parse_cert_summary` (which returns a different, already
+    Claude-facing summary shape) rather than refactored to share it — same
+    x509-parsing primitives, deliberately not coupled to that function's
+    tested, narrower return contract.
+    """
+    try:
+        pem_bytes = base64.b64decode(cert_b64)
+        cert = x509.load_pem_x509_certificate(pem_bytes)
+
+        expires = getattr(cert, "not_valid_after_utc", None)
+        if expires is None:
+            expires = cert.not_valid_after.replace(tzinfo=timezone.utc)
+
+        dns_names: List[str] = []
+        try:
+            from cryptography.x509.oid import ExtensionOID
+            san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+            dns_names = [v.value for v in san.value if isinstance(v, x509.DNSName)]
+        except x509.ExtensionNotFound:
+            pass
+        if not dns_names:
+            cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+            if cn_attrs:
+                dns_names = [cn_attrs[0].value]
+
+        return expires, dns_names
+    except Exception as exc:  # noqa: BLE001 — malformed cert data must degrade, never crash the scan
+        logger.warning("failed to parse certificate: %s", exc)
+        return None, []
     return result

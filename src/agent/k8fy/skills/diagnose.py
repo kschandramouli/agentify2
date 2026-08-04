@@ -8,7 +8,7 @@ Pre-fetch sequence (all parallel via asyncio.gather):
   2. get_pod_events(pod_id, namespace)                  — for every pod in initial data
   3. get_metrics_history(namespace, service_name, asc)  — restart time-series
   4. get_change_history(namespace, service_name)        — deploy/rollout correlation
-  5. get_pod_logs(pod_id, namespace, previous=True)     — only for crashing pods
+  5. get_logs(namespace, pod, previous=True)            — only for crashing pods
      (restarts >= _CRASH_RESTART_THRESHOLD or phase in _CRASH_PHASES)
   6. get_service_dependencies                           — the already-mined graph
      for this namespace (service_topology.py), so Claude can consider upstream/
@@ -46,7 +46,7 @@ _DIAGNOSE_TOOLS = [
         "get_service_health",
         "query_pod",
         "get_pod_events",
-        "get_pod_logs",
+        "get_logs",
         "get_metrics_history",
         "get_change_history",
     }
@@ -131,10 +131,9 @@ class DiagnoseSkill(K8fyAgent):
         #    snapshot in `data` can be up to 30 s stale after a rollout, causing 404s.
         #    service_health is fetched above and reflects the current K8s state.
         #    Fall back to pod IDs from `data` if service_health hasn't landed yet.
-        #    get_logs (not get_pod_logs directly) so this reads the Glue/Athena
-        #    test harness first when configured, falling back to the live
-        #    cluster — still a deterministic function call, not an LLM
-        #    decision (log_router.py).
+        #    get_logs reads the Glue/Athena test harness first when
+        #    configured, falling back to the live cluster — still a
+        #    deterministic function call, not an LLM decision (log_router.py).
         log_pod_ids = _crashing_pod_ids(data)
         for pod_id in log_pod_ids:
             tasks[f"logs.{pod_id}"] = self._fetch(
@@ -170,8 +169,9 @@ class DiagnoseSkill(K8fyAgent):
         #         persistent-connection relay (ROADMAP P18 use case #9), and
         #       - ALSO prefetch a cluster-scoped get_service_health (ADR
         #         0024's ingested-data cluster scoping) — the ingested store
-        #         may already have per-cluster data for a cluster that also
-        #         runs the older k8fy-adapter, and it's cheap to check.
+        #         may already have per-cluster data pushed by that cluster's
+        #         own agentify-discovery watch stream (ADR 0027), and it's
+        #         cheap to check.
         #     Both go through the same self._fetch()/process_tool_call path
         #     every other tool here uses — cluster_id in the args is all
         #     _dispatch_live_diagnostic / HandleAgentFetch need to route

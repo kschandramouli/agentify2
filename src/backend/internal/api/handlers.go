@@ -29,7 +29,6 @@ type Handler struct {
 	ingester                 *ingestion.Ingester
 	queryExec                *orchestrator.QueryExecutor
 	agentClient              *AgentClient
-	adapterClient            *AdapterClient
 	redactor                 *governance.Redactor
 	integrationStore         IntegrationStore // nil when postgres is not provisioned
 	traceStore               TraceStore       // nil when postgres is not provisioned
@@ -55,7 +54,7 @@ func (h *Handler) integrationSecretName(id string) string {
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, clusterIngress ClusterIngressStore, clusterHealth ClusterHealthStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, clusterIngress ClusterIngressStore, clusterHealth ClusterHealthStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -64,7 +63,6 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		ingester:                 ingester,
 		queryExec:                queryExec,
 		agentClient:              NewAgentClient(agentServiceURL),
-		adapterClient:            NewAdapterClient(adapterURL, adapterToken),
 		redactor:                 redactor,
 		integrationStore:         integrations,
 		traceStore:               traces,
@@ -116,13 +114,15 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 //
 // tenantID/clusterID (ADR 0024) come from resolveTenantContext, same
 // CollectorToken credential the fleet-collector push endpoints already use
-// (src/adapters/k8fy/emitter.py already sends a Bearer token with every
-// ingest POST — BACKEND_AUTH_TOKEN — it was just never checked here).
-// Unlike the collector endpoints, an ABSENT credential is not rejected: it
-// defaults to (DefaultTenantID, "") so every existing k8fy-adapter
-// deployment that hasn't been given a CollectorToken keeps ingesting
-// exactly as before. An unrecognized (invalid) token is still rejected —
-// same as every other resolveTenantContext consumer.
+// (src/adapters/discovery/normalize.py's push_event sends it as a Bearer
+// token with every ingest POST — COLLECTOR_TOKEN, the single unified
+// collector credential since ADR 0027 merged the old k8fy-adapter's separate
+// BACKEND_AUTH_TOKEN into it). Unlike the collector endpoints, an ABSENT
+// credential is not rejected: it defaults to (DefaultTenantID, "") so every
+// single-cluster agentify-discovery deployment that hasn't been given a
+// CollectorToken keeps ingesting exactly as before. An unrecognized
+// (invalid) token is still rejected — same as every other
+// resolveTenantContext consumer.
 func (h *Handler) HandleIngestEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -334,13 +334,6 @@ func (h *Handler) HandleAgentFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Logs are not in storage: they are fetched live from the adapter, scrubbed,
-	// and returned without persisting (spec 008 / ADR 0014).
-	if req.Tool == "get_pod_logs" {
-		h.handlePodLogs(w, r, req.Args)
-		return
-	}
-
 	intent, namespace, key := mapToolToQuery(req.Tool, req.Args)
 
 	// cluster_id (ADR 0024) is an optional explicit arg — same shape as
@@ -395,56 +388,6 @@ func (h *Handler) HandleAgentFetch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"tool": req.Tool, "data": h.redactor.RedactFetch(data)})
 }
 
-// handlePodLogs fetches a bounded log tail from the adapter, scrubs it at the
-// egress boundary (best-effort text redaction — ADR 0014), and returns it without
-// persisting. A failure degrades to an empty/error payload so the agent loop
-// continues rather than crashing.
-func (h *Handler) handlePodLogs(w http.ResponseWriter, r *http.Request, args map[string]interface{}) {
-	podID := stringArg(args, "pod_id")
-	if podID == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"tool": "get_pod_logs",
-			"data": map[string]interface{}{"error": "pod_id required"},
-		})
-		return
-	}
-
-	tail := 100
-	switch v := args["tail_lines"].(type) {
-	case float64:
-		tail = int(v)
-	case int:
-		tail = v
-	}
-
-	resp, err := h.adapterClient.FetchLogs(r.Context(), LogRequest{
-		PodID:     podID,
-		Namespace: stringArg(args, "namespace"),
-		Container: stringArg(args, "container"),
-		Previous:  boolArg(args, "previous"),
-		TailLines: tail,
-	})
-	if err != nil {
-		h.logger.Warn("adapter log fetch failed", "pod_id", podID, "error", err)
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"tool": "get_pod_logs",
-			"data": map[string]interface{}{"error": "logs unavailable"},
-		})
-		return
-	}
-
-	out := map[string]interface{}{
-		"pod_id":    resp.PodID,
-		"container": resp.Container,
-		"previous":  resp.Previous,
-		"logs":      h.redactor.RedactText(resp.Logs), // scrub before the agent sees it
-	}
-	if resp.Error != "" {
-		out["error"] = resp.Error
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"tool": "get_pod_logs", "data": out})
-}
-
 // mapToolToQuery translates an agent tool name + args into a (intent, namespace,
 // entity-key) query triple aligned with the K8fy pod taxonomy (ADR 0005).
 func mapToolToQuery(tool string, args map[string]interface{}) (intent, namespace, key string) {
@@ -483,14 +426,6 @@ func stringArg(args map[string]interface{}, name string) string {
 		return v
 	}
 	return ""
-}
-
-// boolArg safely extracts a boolean argument from a decoded JSON map.
-func boolArg(args map[string]interface{}, name string) bool {
-	if v, ok := args[name].(bool); ok {
-		return v
-	}
-	return false
 }
 
 // writeJSON writes a JSON response with the given status code.
@@ -1116,10 +1051,11 @@ func (h *Handler) HandlePodRegistryGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(pod)
 }
 
-// seedNamespaceCache writes the given discovered namespaces into current_state so
-// TrackedEntities (and therefore the frontend autocomplete) reflects live data.
-// Returns the number of services seeded.
-func (h *Handler) seedNamespaceCache(ctx context.Context, namespaces []NamespaceEntry) int {
+// seedNamespaceCache writes the given namespace->services map into
+// current_state so TrackedEntities (and therefore the frontend autocomplete)
+// reflects it immediately, without waiting for a real ingestion event to
+// arrive. Returns the number of services seeded.
+func (h *Handler) seedNamespaceCache(ctx context.Context, byNamespace map[string][]string) int {
 	kv, err := h.orch.GetBackendFactory().GetBackend("kv")
 	if err != nil {
 		return 0
@@ -1129,12 +1065,12 @@ func (h *Handler) seedNamespaceCache(ctx context.Context, namespaces []Namespace
 		return 0
 	}
 	seeded := 0
-	for _, ns := range namespaces {
-		podID := "k8fy.live-state." + ns.Namespace
-		for _, svc := range ns.Services {
+	for namespace, services := range byNamespace {
+		podID := "k8fy.live-state." + namespace
+		for _, svc := range services {
 			if _, serr := seeder.Store(ctx, podID, map[string]interface{}{
 				"entity_key":      svc,
-				"event_namespace": ns.Namespace,
+				"event_namespace": namespace,
 				"type":            "service_synced",
 				"source":          "sync",
 				"payload":         map[string]interface{}{"name": svc},
@@ -1146,77 +1082,50 @@ func (h *Handler) seedNamespaceCache(ctx context.Context, namespaces []Namespace
 	return seeded
 }
 
-// SeedNamespaceCache runs in a background goroutine (called at startup and on
-// demand when current_state is empty). It first checks whether current_state
-// already has data — if so it exits immediately, which is the normal case after
-// a pod restart where Postgres data survived the cycle. When current_state is
-// empty it polls the adapter every 15 s for up to 5 minutes until the adapter
-// responds, then seeds the cache.
-func (h *Handler) SeedNamespaceCache(ctx context.Context) {
-	// Skip if current_state already has entries — Postgres persists data across
-	// pod restarts so this is usually true after a scale-up.
-	if kv, kerr := h.orch.GetBackendFactory().GetBackend("kv"); kerr == nil {
-		if p, ok := kv.(trackedEntitiesProvider); ok {
-			if existing, eerr := p.TrackedEntities(ctx); eerr == nil && len(existing) > 0 {
-				h.logger.Info("startup namespace sync: current_state already populated, skipping",
-					"count", len(existing))
-				return
-			}
-		}
-	}
-
-	const retryInterval = 15 * time.Second // tighter than before (was 30 s)
-	const maxAttempts = 20                 // 5 minutes total
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		namespaces, err := h.adapterClient.DiscoverNamespaces(ctx)
-		if err != nil {
-			h.logger.Info("startup namespace sync: adapter not ready, will retry",
-				"attempt", attempt, "max", maxAttempts, "error", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(retryInterval):
-			}
-			continue
-		}
-		seeded := h.seedNamespaceCache(ctx, namespaces)
-		h.logger.Info("startup namespace sync complete",
-			"namespaces", len(namespaces), "services", seeded)
-		return
-	}
-	h.logger.Warn("startup namespace sync: adapter did not become available within 5 minutes")
-}
-
-// HandleSyncNamespaces calls the adapter to discover current K8s namespaces +
-// services, and returns them so the frontend search autocomplete can be updated
-// immediately. The CronJob calls the same endpoint on a schedule.
+// HandleSyncNamespaces re-derives the namespace/service list from
+// cluster_services (populated by Discovery's periodic inventory push, ADR
+// 0022 / ROADMAP P18 use case #1) and seeds current_state from it, so the
+// frontend search autocomplete can be updated immediately. The CronJob
+// (infra/kubernetes/namespace-sync-cronjob.yaml) calls the same endpoint on
+// a schedule; a "Sync New Namespaces" UI button calls it on demand.
+//
+// Prior to ADR 0027 this queried the k8fy adapter live; now it's a plain
+// Postgres read — Discovery already keeps cluster_services fresh on its own
+// schedule, so there's no live cluster call to make here at all.
 func (h *Handler) HandleSyncNamespaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	namespaces, err := h.adapterClient.DiscoverNamespaces(r.Context())
+	if h.clusterServiceStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"error": "cluster service store not configured",
+		})
+		return
+	}
+	byNamespace, err := h.clusterServiceStore.ListClusterServices(r.Context(), pgstore.DefaultTenantID)
 	if err != nil {
 		h.logger.Warn("namespace discovery failed", "error", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
-			"error": "adapter unavailable — namespace discovery requires adapter to be running",
+			"error": "namespace discovery failed",
 		})
 		return
 	}
 
-	// Flatten to namespace/service strings for the frontend autocomplete.
+	namespaces := make([]NamespaceEntry, 0, len(byNamespace))
 	suggestions := make([]string, 0)
-	for _, ns := range namespaces {
-		for _, svc := range ns.Services {
-			suggestions = append(suggestions, ns.Namespace+"/"+svc)
+	for namespace, services := range byNamespace {
+		namespaces = append(namespaces, NamespaceEntry{Namespace: namespace, Services: services, ServiceCount: len(services)})
+		for _, svc := range services {
+			suggestions = append(suggestions, namespace+"/"+svc)
 		}
-		if len(ns.Services) == 0 {
+		if len(services) == 0 {
 			// Namespace exists but no services yet — still useful to surface.
-			suggestions = append(suggestions, ns.Namespace+"/")
+			suggestions = append(suggestions, namespace+"/")
 		}
 	}
 
-	seeded := h.seedNamespaceCache(r.Context(), namespaces)
+	seeded := h.seedNamespaceCache(r.Context(), byNamespace)
 	h.logger.Info("seeded current_state from sync", "namespaces", len(namespaces), "services", seeded)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -1241,12 +1150,12 @@ type syncSeeder interface {
 // HandleTrackedEntities returns all known namespace/service pairs from the
 // live-state current_state table. Powers the frontend search autocomplete.
 //
-// After a scale-up the table may be empty until the adapter re-emits events.
-// Rather than returning [] silently, the handler falls back to a live adapter
-// call (3 s timeout) and seeds current_state in the same request, so the first
-// page load after a scale-up always returns real data. If the adapter is not
-// yet ready the response is [] and a background seed is queued so the 3 s
-// frontend re-poll (active while the list is empty) picks up the data shortly.
+// After a scale-up the table may be empty until Discovery's watch stream
+// (ADR 0027) re-populates it — which happens within seconds via the watch
+// API's initial LIST-then-WATCH semantics, not the 5-minute adapter-polling
+// workaround this fallback used to need. The fallback here now just re-reads
+// cluster_services (already fresh, no live call) so the very first request
+// after a scale-up doesn't have to wait even those few seconds.
 func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1272,21 +1181,15 @@ func (h *Handler) HandleTrackedEntities(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Empty current_state — try a live adapter call so the first request after
-	// a scale-up returns real data without the user having to wait.
-	if len(entities) == 0 {
-		syncCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		namespaces, aerr := h.adapterClient.DiscoverNamespaces(syncCtx)
-		cancel()
-		if aerr == nil && len(namespaces) > 0 {
-			h.seedNamespaceCache(r.Context(), namespaces)
+	// Empty current_state — fall back to cluster_services (already fresh via
+	// Discovery's own push schedule) so the first request after a scale-up
+	// returns real data without the user having to wait.
+	if len(entities) == 0 && h.clusterServiceStore != nil {
+		byNamespace, cerr := h.clusterServiceStore.ListClusterServices(r.Context(), pgstore.DefaultTenantID)
+		if cerr == nil && len(byNamespace) > 0 {
+			h.seedNamespaceCache(r.Context(), byNamespace)
 			entities, _ = provider.TrackedEntities(r.Context())
-			h.logger.Info("tracked entities: live-seeded from adapter", "count", len(entities))
-		} else {
-			// Adapter not ready yet — seed in the background so the frontend's
-			// 3 s re-poll (active while the list is empty) picks it up shortly.
-			go h.SeedNamespaceCache(context.Background())
-			h.logger.Info("tracked entities: adapter not ready, seeding in background", "error", aerr)
+			h.logger.Info("tracked entities: live-seeded from cluster_services", "count", len(entities))
 		}
 	}
 

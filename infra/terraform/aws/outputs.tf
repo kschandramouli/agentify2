@@ -16,8 +16,8 @@ output "ecr_agent_url" {
   value = aws_ecr_repository.this["agent"].repository_url
 }
 
-output "ecr_adapter_url" {
-  value = aws_ecr_repository.this["k8fy-adapter"].repository_url
+output "ecr_discovery_url" {
+  value = aws_ecr_repository.this["discovery"].repository_url
 }
 
 output "rds_endpoint" {
@@ -45,10 +45,6 @@ output "backend_irsa_role_arn" {
 
 output "agent_irsa_role_arn" {
   value = module.agent_irsa.iam_role_arn
-}
-
-output "adapter_irsa_role_arn" {
-  value = module.adapter_irsa.iam_role_arn
 }
 
 # ── P15 test log-platform (ADR 0021) ─────────────────────────────────────────

@@ -59,9 +59,9 @@ You have tools to fetch live data:
 - get_service_health   — pod/replica health and endpoint status
 - get_pod_events       — K8s events (OOMKilled, CrashLoopBackOff, etc.)
 - get_logs             — recent container logs (previous container if crashing).
-  PREFER THIS over get_pod_logs/live_get_pod_logs — it automatically tries
-  the log platform (Glue/Athena) first when configured, otherwise the live
-  cluster; you never need to decide which.
+  PREFER THIS over live_get_pod_logs — it automatically tries the log
+  platform (Glue/Athena) first when configured, otherwise the live cluster;
+  you never need to decide which.
 - get_metrics_history  — restart counts as a time-series
 - get_change_history   — recent deployments and rollout history
 - get_certificates     — TLS cert expiry for a namespace

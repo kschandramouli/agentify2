@@ -350,6 +350,18 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("payment-api clusters: want 2 matches, got %v", clusters)
 		}
 
+		// ListClusterServices (ADR 0027) — the reverse direction: every
+		// (namespace, service) pair for the tenant, deduped across clusters.
+		// This is what replaced the retired k8fy adapter's live
+		// DiscoverNamespaces() call for the Hub's own namespace-sync endpoints.
+		byNamespace, err := client.ListClusterServices(ctx, tenantID)
+		if err != nil {
+			t.Fatalf("list cluster services: %v", err)
+		}
+		if len(byNamespace["payments"]) != 2 {
+			t.Errorf("payments services: want [payment-api payment-worker], got %v", byNamespace["payments"])
+		}
+
 		// Unknown service -> empty, not an error.
 		clusters, err = client.ResolveServiceClusters(ctx, tenantID, "payments", "nonexistent")
 		if err != nil {

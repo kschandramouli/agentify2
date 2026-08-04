@@ -1,14 +1,18 @@
 """Entry point for agentify-discovery (ADR 0022 / ROADMAP P18).
 
-A deterministic, non-agentic, per-cluster collector: on each scan cycle it
-lists this cluster's namespaces, mines each namespace's pod logs for
-K8s-DNS-shaped service-to-service mentions (extract_service_mentions,
-adapted from src/agent/k8fy/service_topology.py), and pushes validated
-edges to the Hub's tenant-scoped ingest endpoint via push_dependency. One
-long-running Deployment per cluster, not a CronJob + separate API server
-(ADR 0022 Decision #6) — periodic push only in v1; the outbound-persistent-
-connection / on-demand drill-down design (Decision #7) is explicitly
-deferred, see the agentify-discovery plan.
+A deterministic, non-agentic, per-cluster collector. One long-running
+Deployment per cluster, not a CronJob + separate API server (ADR 0022
+Decision #6). Three independent background tasks (`_run_all`):
+- **Scan cycle** (`_run`, fixed `SCAN_INTERVAL_SECONDS` ticker): namespace/
+  service/deployment inventory, ingress/entry-point mapping, fleet health
+  snapshot, per-namespace log-mined service-dependency edges, periodic
+  metrics/cert scraping (ADR 0027).
+- **Live relay** (`live_relay.py`, ADR 0022 Decision #7 / ROADMAP P18 use
+  case #9): the persistent outbound connection for on-demand drill-down.
+- **Watch streams** (`watch.py`, ADR 0027): continuous pod/service/
+  deployment change events, merged in from the retired `src/adapters/k8fy`
+  adapter — this is what keeps `current_state`/`events` current in
+  real time between scan cycles, not the scan cycle itself.
 """
 
 import asyncio
@@ -18,7 +22,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-from . import k8s_client, live_relay
+from . import k8s_client, live_relay, normalize, watch
 from .config import Config, load_from_env
 from .health import serve_health
 from .health_snapshot import push_health
@@ -147,6 +151,37 @@ async def _scan_health(namespaces: List[str], cfg: Config, caps: Optional[Dict[s
     await push_health(k8s_version, pods_total, pods_ready, cfg.backend_url, cfg.collector_token)
 
 
+async def _scan_metrics(namespaces: List[str], cfg: Config) -> None:
+    """Periodic container-restart-count sampling (ADR 0027, merged from the
+    retired k8fy adapter's separate SCRAPE_INTERVAL timer — folded into this
+    scan cycle instead, one ticker driving everything per ADR 0022 Decision
+    #6). Each sample is its own append-only k8fy.metrics row (spec 006), so
+    the cadence coarsening from the old 30s default to SCAN_INTERVAL_SECONDS
+    (60s default) is the main behavior change — configurable if a faster
+    cadence turns out to matter."""
+    for ns in namespaces:
+        for sample in await k8s_client.list_container_restarts(ns):
+            event = normalize.normalize_metric_event(
+                sample["pod_id"], sample["namespace"], sample["container"], sample["restarts"],
+            )
+            await normalize.push_event(event, cfg.backend_url, cfg.collector_token)
+
+
+async def _scan_certificates(namespaces: List[str], cfg: Config) -> None:
+    """Periodic TLS certificate expiry scraping (ADR 0027, merged from the
+    retired k8fy adapter's separate CERT_CHECK_INTERVAL timer — folded into
+    this scan cycle the same way _scan_metrics is). Reuses list_tls_secrets
+    (already built for live_get_certificates, ADR 0024) and
+    k8s_client.parse_cert_expiry for the same x509 parsing, pushed as
+    k8fy.certificates ingested-store events (distinct from
+    live_get_certificates' on-demand, never-persisted answers)."""
+    for ns in namespaces:
+        for secret in await k8s_client.list_tls_secrets(ns):
+            expires_at, dns_names = k8s_client.parse_cert_expiry(secret["tls_crt_b64"])
+            event = normalize.normalize_certificate_event(secret["name"], ns, expires_at, dns_names)
+            await normalize.push_event(event, cfg.backend_url, cfg.collector_token)
+
+
 async def _scan_once(cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
     namespaces = await k8s_client.list_namespaces(exclude=set(cfg.namespace_exclude))
     try:
@@ -161,6 +196,14 @@ async def _scan_once(cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
         await _scan_health(namespaces, cfg, caps)
     except Exception:
         logger.exception("health scan failed")
+    try:
+        await _scan_metrics(namespaces, cfg)
+    except Exception:
+        logger.exception("metrics scan failed")
+    try:
+        await _scan_certificates(namespaces, cfg)
+    except Exception:
+        logger.exception("certificate scan failed")
     for ns in namespaces:
         try:
             await _scan_namespace(ns, cfg)
@@ -187,19 +230,25 @@ async def _run(cfg: Config, shutdown: asyncio.Event) -> None:
 
 
 async def _run_all(cfg: Config, shutdown: asyncio.Event) -> None:
-    """Runs the periodic scan-and-push loop and the on-demand live-relay
-    connection (ADR 0022 Decision #7 / ROADMAP P18 use case #9) as two
-    independent background tasks — a drop in one never affects the other.
-    Both already stop cleanly once `shutdown` is set.
+    """Runs the periodic scan-and-push loop, the on-demand live-relay
+    connection (ADR 0022 Decision #7 / ROADMAP P18 use case #9), and the
+    continuous watch streams (ADR 0027) as three independent background
+    tasks — a drop in one never affects the others. All three already stop
+    cleanly once `shutdown` is set.
     """
-    await asyncio.gather(_run(cfg, shutdown), live_relay.run_forever(cfg, shutdown))
+    await asyncio.gather(_run(cfg, shutdown), live_relay.run_forever(cfg, shutdown), watch.run_forever(cfg, shutdown))
 
 
 def main() -> None:
     _configure_logging()
     cfg = load_from_env()
     if not cfg.collector_token:
-        logger.warning("COLLECTOR_TOKEN is not set — every push will be rejected with 401")
+        logger.warning(
+            "COLLECTOR_TOKEN is not set — event ingestion (POST /api/ingest) still "
+            "works unscoped (ADR 0024's DefaultTenantID default), but every "
+            "fleet-only push (inventory/ingress/health/dependencies) and the live "
+            "drill-down connection will be rejected with 401"
+        )
     logger.info("agentify-discovery starting", extra={"backend_url": cfg.backend_url})
 
     threading.Thread(target=serve_health, args=(cfg.health_port,), name="health", daemon=True).start()

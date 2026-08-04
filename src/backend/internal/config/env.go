@@ -19,7 +19,6 @@ type Config struct {
 	DBPassword          string
 	DBName              string
 	AgentServiceURL     string
-	AdapterURL          string // K8fy adapter base URL for on-demand log fetch (spec 008)
 	VectorStoreType     string // "weaviate" | "pinecone"
 	VectorStoreEndpoint string // e.g., "http://localhost:8080" or pinecone URL
 	VectorStoreAPIKey   string // for Pinecone or other SaaS
@@ -34,10 +33,6 @@ type Config struct {
 	// Egress data governance (ADR 0007 / policies/data-governance.md)
 	RedactionEnabled      bool // allowlist-redact data sent toward the agent/model (default true)
 	RedactionPseudonymize bool // replace identifier values with stable hashes (default false)
-
-	// Adapter (on-demand log fetch — spec 008). Shared bearer token guards the
-	// adapter's /logs surface; empty disables auth (dev only).
-	AdapterAuthToken string
 
 	// Events-table retention (ADR 0015). Days=0 disables the janitor.
 	EventsRetentionDays            int
@@ -82,7 +77,6 @@ func LoadFromEnv() (*Config, error) {
 		DBPassword:          getEnv("DB_PASSWORD", ""),
 		DBName:              getEnv("DB_NAME", "agentify"),
 		AgentServiceURL:     getEnv("AGENT_SERVICE_URL", "http://localhost:8001"),
-		AdapterURL:          getEnv("ADAPTER_URL", "http://localhost:8200"),
 		VectorStoreType:     getEnv("VECTOR_STORE_TYPE", "weaviate"),
 		VectorStoreEndpoint: getEnv("VECTOR_STORE_ENDPOINT", "localhost:8080"),
 		VectorStoreAPIKey:   getEnv("VECTOR_STORE_API_KEY", ""),
@@ -92,8 +86,6 @@ func LoadFromEnv() (*Config, error) {
 
 		RedactionEnabled:      getEnvBool("REDACTION_ENABLED", true),
 		RedactionPseudonymize: getEnvBool("REDACTION_PSEUDONYMIZE", false),
-
-		AdapterAuthToken: getEnv("ADAPTER_AUTH_TOKEN", ""),
 
 		EventsRetentionDays:            getEnvInt("EVENTS_RETENTION_DAYS", 30),
 		EventsRetentionIntervalMinutes: getEnvInt("EVENTS_RETENTION_INTERVAL_MINUTES", 60),

@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Architecture: all workloads (backend, agent, adapter) run on a single EKS cluster.
+Architecture: all workloads (backend, agent, discovery) run on a single EKS cluster.
 The frontend is a static Vite build served from S3 + CloudFront.
 See [ADR 0017](../context-mesh/decisions/0017-all-on-eks-topology.md).
 
@@ -177,12 +177,12 @@ Replace the `REPLACE_WITH_TERRAFORM_OUTPUT_*` and `ACCOUNT_ID` placeholders in
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BACKEND_ROLE=$(cd infra/terraform/aws && terraform output -raw backend_irsa_role_arn)
 AGENT_ROLE=$(cd infra/terraform/aws && terraform output -raw agent_irsa_role_arn)
-ADAPTER_ROLE=$(cd infra/terraform/aws && terraform output -raw adapter_irsa_role_arn)
 
 sed -i "s|ACCOUNT_ID|${ACCOUNT_ID}|g" infra/kubernetes/*.yaml
 sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_backend_irsa_role_arn|${BACKEND_ROLE}|g" infra/kubernetes/backend.yaml
 sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_agent_irsa_role_arn|${AGENT_ROLE}|g" infra/kubernetes/agent.yaml
-sed -i "s|REPLACE_WITH_TERRAFORM_OUTPUT_adapter_irsa_role_arn|${ADAPTER_ROLE}|g" infra/kubernetes/k8fy-adapter.yaml
+# agentify-discovery has no IRSA role (ADR 0027 — in-cluster RBAC only, no
+# AWS API access needed), so discovery.yaml needs no role-ARN substitution.
 ```
 
 ---
@@ -203,20 +203,20 @@ kubectl create secret generic agentify-db-secret -n agentify \
   --from-literal=username=$(echo $DB_SECRET | jq -r .username) \
   --from-literal=password=$(echo $DB_SECRET | jq -r .password)
 
-# Adapter token
-ADAPTER_TOKEN=$(aws secretsmanager get-secret-value \
-  --secret-id agentify/dev/adapter --query SecretString --output text | jq -r .token)
-kubectl create secret generic agentify-adapter-secret -n agentify \
-  --from-literal=token=$ADAPTER_TOKEN
-
-# Fleet collector token (agentify-discovery, ROADMAP P18/P16, ADR 0022-0024) —
-# only needed if this cluster is joining a multi-cluster fleet. Mint the value
-# via POST/PUT /admin/integrations' collector_token field first (it becomes
-# that Integration row's credential — see ADR 0022), then sync it here:
+# agentify-discovery collector token (ADR 0022/0027) — this Secret must
+# exist for the pod to start at all (discovery.yaml's secretKeyRef has no
+# `optional: true`), but the token VALUE itself is optional: leave it empty
+# for a single-cluster deployment and ingestion still works unscoped,
+# exactly like the old k8fy-adapter's default. Only set a real value if this
+# cluster is joining a multi-cluster fleet (ROADMAP P16/P18) — mint it via
+# POST/PUT /admin/integrations' collector_token field first (it becomes that
+# Integration row's credential — see ADR 0022), store it at
+# agentify/dev/discovery yourself (no Terraform resource for this one; it's
+# minted at runtime, not known at `terraform apply` time), then sync it here:
 COLLECTOR_TOKEN=$(aws secretsmanager get-secret-value \
-  --secret-id agentify/dev/discovery --query SecretString --output text | jq -r .collector_token)
+  --secret-id agentify/dev/discovery --query SecretString --output text 2>/dev/null | jq -r '.collector_token // ""')
 kubectl create secret generic agentify-discovery-secret -n agentify \
-  --from-literal=collector_token=$COLLECTOR_TOKEN
+  --from-literal=collector_token="$COLLECTOR_TOKEN"
 
 # Anthropic API key
 ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
@@ -232,13 +232,21 @@ kubectl create secret generic agentify-anthropic-secret -n agentify \
 ```bash
 kubectl apply -f infra/kubernetes/backend.yaml
 kubectl apply -f infra/kubernetes/agent.yaml
-kubectl apply -f infra/kubernetes/k8fy-adapter.yaml
+kubectl apply -f infra/kubernetes/discovery.yaml
 kubectl apply -f infra/kubernetes/ingress.yaml
 
-kubectl rollout status deployment/agentify-backend -n agentify
-kubectl rollout status deployment/agentify-agent   -n agentify
-kubectl rollout status deployment/k8fy-adapter     -n agentify
+kubectl rollout status deployment/agentify-backend   -n agentify
+kubectl rollout status deployment/agentify-agent     -n agentify
+kubectl rollout status deployment/agentify-discovery -n agentify
 ```
+
+`agentify-discovery` (`discovery.yaml`) is the one per-cluster collector
+([ADR 0027](../context-mesh/decisions/0027-merge-k8fy-adapter-into-discovery.md)
+merged the old k8fy-adapter's ingestion role into it) — every cluster needs
+it running for `current_state`/`events` to populate at all, so it's part of
+the base deploy now, not optional. Requires the `agentify-discovery-secret`
+created in Step 7 (an empty `collector_token` is fine for a single-cluster
+deployment — see below).
 
 Get the ALB address:
 ```bash
@@ -249,15 +257,20 @@ kubectl get ingress -n agentify
 
 **Where each piece runs:** the Hub (`backend.yaml`, deployed once in Step 8
 above) is the one central process every cluster in the fleet reports into.
-`discovery.yaml` below deploys **Discovery** (`agentify-discovery`) — a
-*separate* Deployment **inside this specific cluster** — one per fleet
-cluster you onboard, not a replacement for or a second copy of the Hub.
-Only needed if this cluster should report into a shared Hub alongside
-others. Requires the `agentify-discovery-secret` created in Step 7.
+Every cluster runs its own `agentify-discovery` Deployment (deployed
+unconditionally in Step 8) — one per cluster, not a replacement for or a
+second copy of the Hub. What's actually optional here is giving that
+Deployment a **real** `COLLECTOR_TOKEN`: with an empty token (Step 7's
+default), Discovery still ingests into the Hub, just unscoped
+(`DefaultTenantID`), exactly like a single-cluster deployment always has.
+Set a real value only if this cluster should report into a shared Hub
+alongside others — mint it via POST/PUT `/admin/integrations`'
+`collector_token` field, store it and re-run Step 7's `agentify-discovery-secret`
+creation with the real value, then restart the Deployment:
 
 ```bash
-kubectl apply -f infra/kubernetes/discovery.yaml
-kubectl rollout status deployment/agentify-discovery -n agentify
+kubectl rollout restart deployment/agentify-discovery -n agentify
+kubectl rollout status  deployment/agentify-discovery -n agentify
 ```
 
 **Security note (ADR 0024):** Discovery's ClusterRole grants

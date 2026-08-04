@@ -26,10 +26,10 @@ type RemediationConfig struct {
 // separate, narrower credential than admin-console auth so the same endpoint
 // can be safely called by an authorized external service (Slack interactivity,
 // PagerDuty webhook) later without depending on how the console authenticates.
-// Mirrors the constant-time comparison used for ADAPTER_AUTH_TOKEN.
+// Mirrors the constant-time bearer-check pattern used for COLLECTOR_TOKEN.
 func (h *Handler) checkRemediationAuth(r *http.Request) bool {
 	if h.remediationConfig.AuthToken == "" {
-		return true // unauthenticated (dev only) — same posture as ADAPTER_AUTH_TOKEN unset
+		return true // unauthenticated (dev only) — same posture as an unset collector credential
 	}
 	const prefix = "Bearer "
 	auth := r.Header.Get("Authorization")

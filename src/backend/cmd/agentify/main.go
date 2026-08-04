@@ -139,7 +139,7 @@ func main() {
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, clusterIngressStore, clusterHealthStore, secretsMgr, cfg.IntegrationSecretsPrefix, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, clusterIngressStore, clusterHealthStore, secretsMgr, cfg.IntegrationSecretsPrefix, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.
@@ -198,12 +198,6 @@ func main() {
 			logger.Error("server error", "error", err)
 		}
 	}()
-
-	// Seed the namespace/service cache from the adapter on every startup.
-	// Runs in the background so it never delays serving traffic. Retries for
-	// up to 6 minutes so it works even when the adapter starts after the backend
-	// (common after a pause/resume cycle where all pods start simultaneously).
-	go handler.SeedNamespaceCache(janitorCtx)
 
 	// Graceful shutdown on SIGTERM / SIGINT
 	sigch := make(chan os.Signal, 1)

@@ -2,7 +2,7 @@
 # Each workload gets a least-privilege IAM role bound to its K8s ServiceAccount
 # via OIDC. No long-lived credentials in Pods.
 
-# Backend: needs DynamoDB (pod registry) + Secrets Manager (DB, adapter token)
+# Backend: needs DynamoDB (pod registry) + Secrets Manager (DB)
 module "backend_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
@@ -28,11 +28,10 @@ resource "aws_iam_policy" "backend_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
         Resource = [
           aws_secretsmanager_secret.db.arn,
-          aws_secretsmanager_secret.adapter.arn,
         ]
       },
       # Integration.Token secrets (ADR 0025): one dynamic, per-row secret per
@@ -102,8 +101,8 @@ resource "aws_iam_policy" "agent_secrets" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
         Resource = [
           aws_secretsmanager_secret.anthropic.arn,
           aws_secretsmanager_secret.langfuse.arn,
@@ -113,39 +112,10 @@ resource "aws_iam_policy" "agent_secrets" {
   })
 }
 
-# Adapter: Kubernetes API access is via RBAC (not IAM); it only needs the
-# adapter-token secret so the log server auth token can be loaded from SM.
-module "adapter_irsa" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.0"
-
-  role_name = "${local.name}-adapter"
-
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["agentify:k8fy-adapter"]
-    }
-  }
-
-  role_policy_arns = {
-    secrets = aws_iam_policy.adapter_secrets.arn
-  }
-}
-
-resource "aws_iam_policy" "adapter_secrets" {
-  name = "${local.name}-adapter-secrets"
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-        Resource = [aws_secretsmanager_secret.adapter.arn]
-      }
-    ]
-  })
-}
+# Discovery (the merged per-cluster collector, ADR 0027): Kubernetes API
+# access is via in-cluster RBAC, not IAM — it authenticates to the Hub with
+# COLLECTOR_TOKEN (agentify-discovery-secret), a plain K8s Secret, not
+# Secrets Manager. No IRSA role needed.
 
 # CI role (assumed by GitHub Actions via OIDC — no long-lived keys in CI)
 resource "aws_iam_openid_connect_provider" "github_actions" {
@@ -222,8 +192,8 @@ resource "aws_iam_role_policy" "ci" {
       },
       # IAM: read role ARNs for IRSA substitution in manifests during deploy
       {
-        Effect   = "Allow"
-        Action   = ["iam:GetRole"]
+        Effect = "Allow"
+        Action = ["iam:GetRole"]
         Resource = [
           "arn:aws:iam::${data.aws_caller_identity.this.account_id}:role/agentify-dev-*",
         ]
@@ -235,7 +205,6 @@ resource "aws_iam_role_policy" "ci" {
         Resource = [
           aws_secretsmanager_secret.db.arn,
           aws_secretsmanager_secret.anthropic.arn,
-          aws_secretsmanager_secret.adapter.arn,
         ]
       },
       # Secrets Manager: create + populate the Langfuse secret via terraform apply
@@ -274,8 +243,8 @@ resource "aws_iam_role_policy" "ci" {
         ]
       },
       {
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.this.account_id}:table/agentify-tfstate-lock"
       },
       # EKS: kubectl + pause/resume.
@@ -286,15 +255,15 @@ resource "aws_iam_role_policy" "ci" {
         Resource = module.eks.cluster_arn
       },
       {
-        Effect = "Allow"
-        Action = ["eks:UpdateNodegroupConfig", "eks:DescribeNodegroup"]
+        Effect   = "Allow"
+        Action   = ["eks:UpdateNodegroupConfig", "eks:DescribeNodegroup"]
         Resource = "arn:aws:eks:${var.aws_region}:${data.aws_caller_identity.this.account_id}:nodegroup/${local.name}/*/*"
       },
       # RDS: pause/resume. CreateDBSnapshot needs both the instance ARN and
       # the snapshot ARN (snapshot name is dynamic, hence the wildcard).
       {
-        Effect = "Allow"
-        Action = ["rds:StopDBInstance", "rds:StartDBInstance", "rds:DescribeDBInstances"]
+        Effect   = "Allow"
+        Action   = ["rds:StopDBInstance", "rds:StartDBInstance", "rds:DescribeDBInstances"]
         Resource = aws_db_instance.this.arn
       },
       {

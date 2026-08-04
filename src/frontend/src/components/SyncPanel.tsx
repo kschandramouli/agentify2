@@ -57,7 +57,7 @@ export function SyncPanel() {
         <div>
           <h2>Namespace Sync</h2>
           <p className="adm-panel__desc">
-            Namespaces and services the adapter has discovered.
+            Namespaces and services agentify-discovery has discovered.
             Run Sync to pull the latest state from the K8s cluster.
           </p>
         </div>
@@ -82,7 +82,7 @@ export function SyncPanel() {
 
       {!loading && nsNames.length === 0 && (
         <div className="adm-empty">
-          No namespaces discovered yet. Make sure the adapter is running and click Sync.
+          No namespaces discovered yet. Make sure agentify-discovery is running and click Sync.
         </div>
       )}
 

@@ -1806,6 +1806,43 @@ func (c *Client) ResolveServiceClusters(ctx context.Context, tenantID, namespace
 	return clusterIDs, rows.Err()
 }
 
+// ListClusterServices returns every (namespace, service) pair known for
+// tenantID as a namespace -> service-names map — the reverse direction of
+// ResolveServiceClusters (which pair maps to a cluster; this is every pair a
+// tenant has). ADR 0027: this is what replaced the retired k8fy-adapter's
+// live DiscoverNamespaces() call for the Hub's own namespace-autocomplete/
+// current_state-seeding endpoints — Discovery's existing cluster-inventory
+// push already keeps this table fresh, so those endpoints no longer need to
+// reach out to a collector live; they just re-read what's already here. RLS
+// (not this query's WHERE clause) enforces the tenant boundary, same
+// convention as ResolveServiceClusters.
+func (c *Client) ListClusterServices(ctx context.Context, tenantID string) (map[string][]string, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; always rolled back, never committed
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT namespace, service FROM cluster_services ORDER BY namespace, service`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := map[string][]string{}
+	for rows.Next() {
+		var namespace, service string
+		if err := rows.Scan(&namespace, &service); err != nil {
+			return nil, err
+		}
+		result[namespace] = append(result[namespace], service)
+	}
+	return result, rows.Err()
+}
+
 // ── Ingress/entry-point mapping (ROADMAP P18 use case #3) ───────────────────
 
 // IngressEndpoint is one (namespace, kind, name, host, backend_service) row

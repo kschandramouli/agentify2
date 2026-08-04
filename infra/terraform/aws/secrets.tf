@@ -6,8 +6,12 @@
 # Secrets created:
 #   agentify/dev/db          — Postgres connection details (auto-populated)
 #   agentify/dev/anthropic   — ANTHROPIC_API_KEY (fill manually)
-#   agentify/dev/adapter     — ADAPTER_AUTH_TOKEN (fill manually or generate)
 #   agentify/dev/langfuse    — LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY (fill manually)
+#
+# NOT here: COLLECTOR_TOKEN (agentify-discovery-secret) — a plain K8s Secret,
+# minted via POST/PUT /admin/integrations and applied to the cluster manually
+# (still a one-time step, not synced by CI; see infra/kubernetes/discovery.yaml),
+# not Secrets Manager (agentify-discovery has no IRSA role; see iam.tf).
 
 resource "aws_secretsmanager_secret" "db" {
   name                    = "${var.project}/${var.env}/db"
@@ -34,22 +38,6 @@ resource "aws_secretsmanager_secret" "anthropic" {
 resource "aws_secretsmanager_secret_version" "anthropic" {
   secret_id     = aws_secretsmanager_secret.anthropic.id
   secret_string = jsonencode({ api_key = var.anthropic_api_key })
-}
-
-# ADAPTER_AUTH_TOKEN — auto-generated; backend and adapter both read from here.
-resource "random_password" "adapter_token" {
-  length  = 40
-  special = false
-}
-
-resource "aws_secretsmanager_secret" "adapter" {
-  name                    = "${var.project}/${var.env}/adapter"
-  recovery_window_in_days = var.env == "prod" ? 7 : 0
-}
-
-resource "aws_secretsmanager_secret_version" "adapter" {
-  secret_id     = aws_secretsmanager_secret.adapter.id
-  secret_string = jsonencode({ token = random_password.adapter_token.result })
 }
 
 # Langfuse API keys — used by the agent for prompt management (k8fy/* prompts).

@@ -34,6 +34,13 @@ func (f *fakeClusterServiceStore) ResolveServiceClusters(ctx context.Context, te
 	return f.resolved[namespace+"/"+service], nil
 }
 
+func (f *fakeClusterServiceStore) ListClusterServices(ctx context.Context, tenantID string) (map[string][]string, error) {
+	if f.lastUpsert == nil {
+		return map[string][]string{}, nil
+	}
+	return f.lastUpsert, nil
+}
+
 // TestHandleClusterInventoryUpsert exercises the fleet collector's inventory
 // push (ADR 0022 / ROADMAP P18 use case #1, extended by ROADMAP P16 / ADR
 // 0023 to also carry per-namespace service names) — unlike

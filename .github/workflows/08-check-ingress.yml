@@ -170,13 +170,13 @@ jobs:
             echo "  ⚠ status=error — agent reached but Claude API call failed"
           fi
 
-      - name: Adapter logs (emit + watch errors)
+      - name: agentify-discovery logs (push + watch errors)
         run: |
-          echo "=== Adapter logs — last 50 lines ==="
-          kubectl logs -n agentify -l app=k8fy-adapter --tail=50 2>/dev/null || echo "(no logs)"
+          echo "=== agentify-discovery logs — last 50 lines ==="
+          kubectl logs -n agentify -l app=agentify-discovery --tail=50 2>/dev/null || echo "(no logs)"
           echo ""
-          echo "=== Adapter env vars (namespace + intervals) ==="
-          kubectl get deployment k8fy-adapter -n agentify \
+          echo "=== agentify-discovery env vars (scan interval + excludes) ==="
+          kubectl get deployment agentify-discovery -n agentify \
             -o jsonpath='{.spec.template.spec.containers[0].env}' | python3 -m json.tool
 
       - name: Test ingest endpoint directly
