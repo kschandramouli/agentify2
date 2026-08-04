@@ -132,6 +132,16 @@ type ClusterIngressStore interface {
 	ListClusterIngress(ctx context.Context, tenantID, namespace string) ([]pgstore.IngressEndpoint, error)
 }
 
+// ClusterHealthStore is the fleet-wide health/version snapshot interface
+// (ROADMAP P18 use case #5), populated by agentify-discovery's per-cycle
+// pod-readiness + K8s-version report. Store-only in this pass — no agent
+// tool or frontend fleet dashboard consumes ListClusterHealthSnapshots yet,
+// same deliberate scope boundary as ClusterIngressStore.
+type ClusterHealthStore interface {
+	UpsertClusterHealthSnapshot(ctx context.Context, tenantID, clusterID, k8sVersion string, podsTotal, podsReady int) error
+	ListClusterHealthSnapshots(ctx context.Context, tenantID string) ([]pgstore.ClusterHealthSnapshot, error)
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.

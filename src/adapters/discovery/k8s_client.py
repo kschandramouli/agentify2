@@ -138,6 +138,32 @@ async def list_pods(namespace: str) -> List[Dict[str, Any]]:
     return pods
 
 
+async def list_pod_health(namespace: str) -> Dict[str, int]:
+    """Aggregate pod readiness in `namespace` as `{"total": N, "ready": M}`
+    (ROADMAP P18 use case #5). A pod counts as ready when it has a `Ready`
+    condition with status "True" — the standard K8s pod-level readiness
+    signal (kubectl's own convention), not a per-container check. Missing
+    `status.conditions` (e.g. a pod still Pending) counts as not-ready,
+    never raises. Separate call from list_pods (same endpoint, different
+    extraction) rather than widening list_pods' shape, so log-topology
+    mining's existing consumers are untouched."""
+    resp = await _k8s_get(f"/api/v1/namespaces/{quote(namespace)}/pods")
+    if resp.status_code != 200:
+        logger.warning("list pod health failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return {"total": 0, "ready": 0}
+    items = resp.json().get("items", [])
+    total = 0
+    ready = 0
+    for item in items:
+        if not item.get("metadata", {}).get("name", ""):
+            continue
+        total += 1
+        conditions = item.get("status", {}).get("conditions", []) or []
+        if any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
+            ready += 1
+    return {"total": total, "ready": ready}
+
+
 async def list_tls_secrets(namespace: str) -> List[Dict[str, str]]:
     """List TLS Secrets in `namespace` as `{"name": ..., "tls_crt_b64": ...}`
     (ROADMAP P16/P18 use case unlocked by ADR 0024's live_get_certificates).

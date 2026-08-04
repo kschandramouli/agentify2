@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from . import k8s_client, live_relay
 from .config import Config, load_from_env
 from .health import serve_health
+from .health_snapshot import push_health
 from .ingress import build_ingress_entries, build_route_entries, correlate_gateway_routes, push_ingress
 from .inventory import push_inventory
 from .log_redaction import redact_log_text
@@ -128,6 +129,24 @@ async def _scan_ingress(namespaces: List[str], cfg: Config, caps: Optional[Dict[
         await push_ingress(entries, cfg.backend_url, cfg.collector_token)
 
 
+async def _scan_health(namespaces: List[str], cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
+    """Fleet-wide health/version snapshot (ROADMAP P18 use case #5). Sums
+    pod readiness across every namespace and pairs it with the K8s server
+    version discover_api_capabilities already fetched at startup. A missing
+    `caps` (capability check itself failed) still pushes the pod counts —
+    only the version string degrades to empty, same "don't block on missing
+    capability info" convention _scan_ingress established.
+    """
+    k8s_version = caps.get("gitVersion", "") if caps else ""
+    pods_total = 0
+    pods_ready = 0
+    for ns in namespaces:
+        counts = await k8s_client.list_pod_health(ns)
+        pods_total += counts["total"]
+        pods_ready += counts["ready"]
+    await push_health(k8s_version, pods_total, pods_ready, cfg.backend_url, cfg.collector_token)
+
+
 async def _scan_once(cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
     namespaces = await k8s_client.list_namespaces(exclude=set(cfg.namespace_exclude))
     try:
@@ -138,6 +157,10 @@ async def _scan_once(cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
         await _scan_ingress(namespaces, cfg, caps)
     except Exception:
         logger.exception("ingress scan failed")
+    try:
+        await _scan_health(namespaces, cfg, caps)
+    except Exception:
+        logger.exception("health scan failed")
     for ns in namespaces:
         try:
             await _scan_namespace(ns, cfg)

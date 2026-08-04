@@ -460,6 +460,50 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("want edges tagged cluster-a and cluster-b, got %v", gotClusters)
 		}
 	})
+
+	t.Run("ROADMAP P18 use case #5: cluster_health_snapshots overwrites in place, fleet-wide listing surfaces every cluster", func(t *testing.T) {
+		tenantID := uuid.New().String()
+
+		if err := client.UpsertClusterHealthSnapshot(ctx, tenantID, "cluster-a", "v1.29.0", 10, 8); err != nil {
+			t.Fatalf("upsert cluster-a: %v", err)
+		}
+		if err := client.UpsertClusterHealthSnapshot(ctx, tenantID, "cluster-b", "v1.30.0", 5, 5); err != nil {
+			t.Fatalf("upsert cluster-b: %v", err)
+		}
+
+		snapshots, err := client.ListClusterHealthSnapshots(ctx, tenantID)
+		if err != nil {
+			t.Fatalf("list snapshots: %v", err)
+		}
+		if len(snapshots) != 2 {
+			t.Fatalf("want both clusters' snapshots, got %d: %v", len(snapshots), snapshots)
+		}
+
+		// A second push to cluster-a overwrites its row in place — proves
+		// this is a single-row upsert, not an accumulating history.
+		if err := client.UpsertClusterHealthSnapshot(ctx, tenantID, "cluster-a", "v1.29.1", 12, 12); err != nil {
+			t.Fatalf("re-upsert cluster-a: %v", err)
+		}
+		snapshots, err = client.ListClusterHealthSnapshots(ctx, tenantID)
+		if err != nil {
+			t.Fatalf("list snapshots after re-upsert: %v", err)
+		}
+		if len(snapshots) != 2 {
+			t.Fatalf("re-upsert should overwrite, not add a row: want 2 snapshots, got %d", len(snapshots))
+		}
+		var clusterA *ClusterHealthSnapshot
+		for i := range snapshots {
+			if snapshots[i].ClusterID == "cluster-a" {
+				clusterA = &snapshots[i]
+			}
+		}
+		if clusterA == nil {
+			t.Fatal("cluster-a snapshot missing")
+		}
+		if clusterA.K8sVersion != "v1.29.1" || clusterA.PodsTotal != 12 || clusterA.PodsReady != 12 {
+			t.Errorf("cluster-a snapshot not overwritten: got %+v", clusterA)
+		}
+	})
 }
 
 // TestServiceDependencyTenantIsolation is the RLS test that actually

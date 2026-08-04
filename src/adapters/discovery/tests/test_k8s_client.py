@@ -79,6 +79,49 @@ async def test_list_ingresses_returns_empty_on_404(monkeypatch):
     assert await k8s_client.list_ingresses("payments") == []
 
 
+# ── list_pod_health ──────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_list_pod_health_counts_ready_via_ready_condition(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "/api/v1/namespaces/payments/pods" in str(request.url)
+        return httpx.Response(200, json={"items": [
+            {"metadata": {"name": "pod-a"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+            {"metadata": {"name": "pod-b"}, "status": {"conditions": [{"type": "Ready", "status": "False"}]}},
+            {"metadata": {"name": "pod-c"}, "status": {"conditions": [{"type": "PodScheduled", "status": "True"}]}},
+        ]})
+    _mock(monkeypatch, handler)
+
+    assert await k8s_client.list_pod_health("payments") == {"total": 3, "ready": 1}
+
+
+@pytest.mark.asyncio
+async def test_list_pod_health_missing_conditions_counts_as_not_ready(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": [{"metadata": {"name": "pending-pod"}, "status": {}}]})
+    _mock(monkeypatch, handler)
+
+    assert await k8s_client.list_pod_health("payments") == {"total": 1, "ready": 0}
+
+
+@pytest.mark.asyncio
+async def test_list_pod_health_empty_namespace(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": []})
+    _mock(monkeypatch, handler)
+
+    assert await k8s_client.list_pod_health("payments") == {"total": 0, "ready": 0}
+
+
+@pytest.mark.asyncio
+async def test_list_pod_health_returns_zeros_on_error(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+    _mock(monkeypatch, handler)
+
+    assert await k8s_client.list_pod_health("payments") == {"total": 0, "ready": 0}
+
+
 # ── list_gateways ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

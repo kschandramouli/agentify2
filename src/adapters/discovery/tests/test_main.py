@@ -11,7 +11,7 @@ import pytest
 
 from discovery import k8s_client, main
 from discovery.config import Config
-from discovery.main import _namespace_service_names, _scan_ingress, _service_for_pod
+from discovery.main import _namespace_service_names, _scan_health, _scan_ingress, _service_for_pod
 
 
 def test_matches_pod_via_selector():
@@ -170,3 +170,42 @@ async def test_scan_ingress_skips_push_when_no_entries(monkeypatch):
 
 async def _return(value):
     return value
+
+
+# ── _scan_health (ROADMAP P18 use case #5) ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_scan_health_sums_pod_counts_across_namespaces_and_uses_caps_version(monkeypatch):
+    counts = {"payments": {"total": 5, "ready": 4}, "checkout": {"total": 3, "ready": 3}}
+
+    async def pod_health(ns):
+        return counts[ns]
+
+    monkeypatch.setattr(k8s_client, "list_pod_health", pod_health)
+
+    pushed = {}
+
+    async def fake_push(k8s_version, pods_total, pods_ready, backend_url, token):
+        pushed.update(k8s_version=k8s_version, pods_total=pods_total, pods_ready=pods_ready)
+
+    monkeypatch.setattr(main, "push_health", fake_push)
+
+    await _scan_health(["payments", "checkout"], _cfg(), {"gitVersion": "v1.30.0"})
+
+    assert pushed == {"k8s_version": "v1.30.0", "pods_total": 8, "pods_ready": 7}
+
+
+@pytest.mark.asyncio
+async def test_scan_health_still_pushes_counts_when_caps_is_none(monkeypatch):
+    monkeypatch.setattr(k8s_client, "list_pod_health", lambda ns: _return({"total": 2, "ready": 2}))
+
+    pushed = {}
+
+    async def fake_push(k8s_version, pods_total, pods_ready, backend_url, token):
+        pushed.update(k8s_version=k8s_version, pods_total=pods_total, pods_ready=pods_ready)
+
+    monkeypatch.setattr(main, "push_health", fake_push)
+
+    await _scan_health(["payments"], _cfg(), None)
+
+    assert pushed == {"k8s_version": "", "pods_total": 2, "pods_ready": 2}

@@ -98,6 +98,7 @@ func main() {
 	var serviceDepsStore api.ServiceDependencyStore
 	var clusterServiceStore api.ClusterServiceStore
 	var clusterIngressStore api.ClusterIngressStore
+	var clusterHealthStore api.ClusterHealthStore
 	if relational, err := orch.GetBackendFactory().GetBackend("relational"); err == nil {
 		if store, ok := relational.(api.IntegrationStore); ok {
 			integrationStore = store
@@ -123,6 +124,9 @@ func main() {
 		if store, ok := relational.(api.ClusterIngressStore); ok {
 			clusterIngressStore = store
 		}
+		if store, ok := relational.(api.ClusterHealthStore); ok {
+			clusterHealthStore = store
+		}
 	}
 
 	// Phase-3 remediation config (ADR 0020 / spec 011 Use Cases 1+2). Every
@@ -135,7 +139,7 @@ func main() {
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, clusterIngressStore, secretsMgr, cfg.IntegrationSecretsPrefix, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, clusterIngressStore, clusterHealthStore, secretsMgr, cfg.IntegrationSecretsPrefix, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.

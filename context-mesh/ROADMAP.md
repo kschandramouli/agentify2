@@ -43,7 +43,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 | **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
-| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03; #3 (ingress/entry-point mapping) shipped 2026-08-04, all as `agentify-discovery`**; use cases #5-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
+| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03; #3 (ingress/entry-point mapping) and #5 (fleet-wide health/version snapshots) shipped 2026-08-04, #4 (cross-cluster dependency edges) confirmed 2026-08-04, all as `agentify-discovery`**; use cases #6-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
 
 ---
 
@@ -1128,10 +1128,28 @@ work across every K8s distribution, not just EKS. This item is the concrete
    written to consider upstream/downstream services) extends naturally to
    "downstream service lives in a different cluster," not just a different
    namespace in the same one.
-5. **Fleet-wide health/capacity/version snapshots** — extends P3c
-   (self-observability) from one pipeline to the whole fleet; feeds a
-   future fleet dashboard without the Hub needing live per-cluster access
-   for routine polling.
+5. **Fleet-wide health/version snapshots — shipped 2026-08-04** (Discovery:
+   `k8s_client.py`'s `list_pod_health`, `health_snapshot.py`, `main.py`'s
+   `_scan_health`; Hub: `cluster_health_snapshots` table,
+   `Upsert`/`ListClusterHealthSnapshots`,
+   `POST`/`GET /api/cluster-health`): each scan cycle, Discovery sums pod
+   readiness (the standard per-pod `Ready` condition) across every
+   namespace and pairs it with the K8s server version
+   `discover_api_capabilities` already fetches, pushing one snapshot that
+   overwrites the cluster's single row in place — a plain
+   `INSERT ... ON CONFLICT (cluster_id) DO UPDATE`, not the delete-then-
+   insert-a-row-set shape `cluster_services`/`cluster_ingress_endpoints`
+   use, since a snapshot only ever reflects the *current* state, not
+   history. Extends P3c (self-observability) from one pipeline to the whole
+   fleet; feeds a future fleet dashboard without the Hub needing live
+   per-cluster access for routine polling. **Store + a minimal read
+   endpoint only** in this pass, same boundary as use case #3: no agent
+   tool or frontend fleet dashboard consumes `GET /api/cluster-health` yet
+   (confirmed: no fleet/cluster-overview component exists in
+   `src/frontend/src/components/` today). **Capacity (node count/
+   allocatable CPU-mem) deliberately not included** — would need a new
+   `nodes` RBAC grant Discovery has never had and a wholly new API call —
+   flagged as a follow-up, not silently dropped.
 6. **Local anomaly pre-filtering for P4c** — the investigation-on-anomaly
    loop's deterministic sweep logic can run *in* the collector (cheap, no
    LLM), pushing only genuine candidates to the Hub, which then runs the

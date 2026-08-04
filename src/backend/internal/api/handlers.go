@@ -41,6 +41,7 @@ type Handler struct {
 	collectorHub             *CollectorHub          // fleet collectors' persistent connections (ADR 0022 Decision #7 / ROADMAP P18 use case #9)
 	clusterServiceStore      ClusterServiceStore    // service->cluster registry (ROADMAP P16 / ADR 0023); nil when postgres is not provisioned
 	clusterIngressStore      ClusterIngressStore    // entry-point-mapping registry (ROADMAP P18 use case #3); nil when postgres is not provisioned
+	clusterHealthStore       ClusterHealthStore     // fleet-wide health/version snapshot (ROADMAP P18 use case #5); nil when postgres is not provisioned
 	secretsManager           secrets.Manager        // Integration.Token storage (ADR 0025); nil = plaintext mode (today's default)
 	integrationSecretsPrefix string                 // secret-name prefix; only meaningful when secretsManager != nil
 	logger                   *slog.Logger
@@ -54,7 +55,7 @@ func (h *Handler) integrationSecretName(id string) string {
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, clusterIngress ClusterIngressStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, clusterIngress ClusterIngressStore, clusterHealth ClusterHealthStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -75,6 +76,7 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		collectorHub:             NewCollectorHub(),
 		clusterServiceStore:      clusterServices,
 		clusterIngressStore:      clusterIngress,
+		clusterHealthStore:       clusterHealth,
 		secretsManager:           secretsManager,
 		integrationSecretsPrefix: integrationSecretsPrefix,
 		logger:                   logger,
@@ -2033,6 +2035,111 @@ func (h *Handler) HandleClusterIngressList(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	writeJSON(w, http.StatusOK, clusterIngressListResponse{Entries: entries})
+}
+
+// clusterHealthUpsertRequest is the body accepted by POST /api/cluster-health.
+type clusterHealthUpsertRequest struct {
+	K8sVersion string `json:"k8s_version"`
+	PodsTotal  int    `json:"pods_total"`
+	PodsReady  int    `json:"pods_ready"`
+}
+
+// HandleClusterHealthUpsert records the fleet collector's health/version
+// snapshot (ROADMAP P18 use case #5) for its own cluster. Same auth shape as
+// HandleClusterIngressUpsert: an absent or unrecognized credential is always
+// rejected, since there's no cluster identity to attach a snapshot to
+// otherwise.
+func (h *Handler) HandleClusterHealthUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.clusterHealthStore == nil {
+		http.Error(w, "cluster health store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	tenantID, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if clusterID == "" {
+		http.Error(w, "a collector credential is required", http.StatusUnauthorized)
+		return
+	}
+	var req clusterHealthUpsertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := h.clusterHealthStore.UpsertClusterHealthSnapshot(r.Context(), tenantID, clusterID, req.K8sVersion, req.PodsTotal, req.PodsReady); err != nil {
+		h.logger.Warn("failed to upsert cluster health snapshot", "cluster_id", clusterID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// clusterHealthSnapshotEntry mirrors pgstore.ClusterHealthSnapshot's JSON
+// wire shape — kept as its own type for the same reason
+// ingressEndpointEntry is: decouples the wire contract from the storage
+// struct's field names/tags.
+type clusterHealthSnapshotEntry struct {
+	ClusterID  string    `json:"cluster_id"`
+	K8sVersion string    `json:"k8s_version"`
+	PodsTotal  int       `json:"pods_total"`
+	PodsReady  int       `json:"pods_ready"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// clusterHealthListResponse is the body returned by GET /api/cluster-health.
+type clusterHealthListResponse struct {
+	Snapshots []clusterHealthSnapshotEntry `json:"snapshots"`
+}
+
+// HandleClusterHealthList answers "what's the fleet's current health/version
+// picture?" (ROADMAP P18 use case #5), read from the
+// cluster_health_snapshots table HandleClusterHealthUpsert populates.
+// Store-only surface for now — no agent tool or frontend fleet dashboard
+// consumes this yet, same deliberate scope boundary noted where
+// ClusterHealthStore is declared. Same unauthenticated-agent-facing shape as
+// HandleClusterIngressList: resolves to DefaultTenantID via
+// resolveTenantContext, returns an empty list (200), never an error, when
+// nothing matches or the store isn't configured.
+func (h *Handler) HandleClusterHealthList(w http.ResponseWriter, r *http.Request) {
+	if h.clusterHealthStore == nil {
+		writeJSON(w, http.StatusOK, clusterHealthListResponse{Snapshots: []clusterHealthSnapshotEntry{}})
+		return
+	}
+	tenantID, _, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	rows, err := h.clusterHealthStore.ListClusterHealthSnapshots(r.Context(), tenantID)
+	if err != nil {
+		h.logger.Warn("failed to list cluster health snapshots", "error", err)
+		writeJSON(w, http.StatusOK, clusterHealthListResponse{Snapshots: []clusterHealthSnapshotEntry{}})
+		return
+	}
+	snapshots := make([]clusterHealthSnapshotEntry, 0, len(rows))
+	for _, row := range rows {
+		snapshots = append(snapshots, clusterHealthSnapshotEntry{
+			ClusterID: row.ClusterID, K8sVersion: row.K8sVersion,
+			PodsTotal: row.PodsTotal, PodsReady: row.PodsReady, UpdatedAt: row.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, clusterHealthListResponse{Snapshots: snapshots})
 }
 
 // resolveClusterResponse is the body returned by GET /api/resolve-cluster.

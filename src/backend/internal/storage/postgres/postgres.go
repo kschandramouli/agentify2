@@ -412,6 +412,37 @@ func (c *Client) initSchema(ctx context.Context) error {
 		END IF;
 	END $$;
 
+	-- Fleet-wide health/version snapshot (ROADMAP P18 use case #5): one row
+	-- per cluster, overwritten in place on every push (not a delete-then-
+	-- insert row set like cluster_services/cluster_ingress_endpoints above —
+	-- cluster_id is already a globally-unique Integration.ID, so it alone is
+	-- the primary key). Capacity (node count/allocatable CPU-mem) is
+	-- deliberately not part of this snapshot yet — needs a new nodes RBAC
+	-- grant, flagged as a follow-up, not built here.
+	CREATE TABLE IF NOT EXISTS cluster_health_snapshots (
+		cluster_id  TEXT PRIMARY KEY,
+		tenant_id   TEXT NOT NULL,
+		k8s_version TEXT NOT NULL DEFAULT '',
+		pods_total  INT NOT NULL DEFAULT 0,
+		pods_ready  INT NOT NULL DEFAULT 0,
+		updated_at  TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_cluster_health_snapshots_tenant ON cluster_health_snapshots(tenant_id);
+
+	ALTER TABLE IF EXISTS cluster_health_snapshots ENABLE ROW LEVEL SECURITY;
+	ALTER TABLE IF EXISTS cluster_health_snapshots FORCE ROW LEVEL SECURITY;
+
+	DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_policies
+			WHERE tablename = 'cluster_health_snapshots' AND policyname = 'tenant_isolation'
+		) THEN
+			EXECUTE 'CREATE POLICY tenant_isolation ON cluster_health_snapshots
+				USING (tenant_id = current_setting(''app.current_tenant_id'', true))';
+		END IF;
+	END $$;
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -455,7 +486,7 @@ func (c *Client) CurrentStateStore() *CurrentState {
 // Ingester.storeEvent from its already-resolved (never client-trusted)
 // values, same convention as event_namespace/type/source above. Empty
 // cluster_id (every ingest call that hasn't presented a collector
-// credential) writes '' — unchanged from today's behavior in practice,
+// credential) writes ” — unchanged from today's behavior in practice,
 // since isolation is actually provided by pod_id (ADR 0024's PodID helper),
 // not by filtering on these columns; they're written for observability.
 func (c *Client) Store(ctx context.Context, podID string, data map[string]interface{}) (string, error) {
@@ -863,7 +894,7 @@ func (c *Client) GetIntegration(ctx context.Context, id string) (*Integration, e
 
 // GetIntegrationByCollectorToken looks up the Integration a collector's push
 // credential belongs to — sql.ErrNoRows if the token is unrecognized (or
-// empty; empty never matches, since every row defaults collector_token to '').
+// empty; empty never matches, since every row defaults collector_token to ”).
 func (c *Client) GetIntegrationByCollectorToken(ctx context.Context, token string) (*Integration, error) {
 	var in Integration
 	var nsJSON []byte
@@ -1848,6 +1879,79 @@ func (c *Client) ListClusterIngress(ctx context.Context, tenantID, namespace str
 			return nil, err
 		}
 		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
+// ── Fleet-wide health/version snapshot (ROADMAP P18 use case #5) ────────────
+
+// ClusterHealthSnapshot is one cluster's most recent health/version report.
+type ClusterHealthSnapshot struct {
+	ClusterID  string
+	TenantID   string
+	K8sVersion string
+	PodsTotal  int
+	PodsReady  int
+	UpdatedAt  time.Time
+}
+
+// UpsertClusterHealthSnapshot replaces one cluster's current snapshot —
+// always reflects the most recent scan cycle, not history, so this is a
+// single-row overwrite-in-place (ON CONFLICT DO UPDATE), not the
+// delete-then-insert-a-row-set shape UpsertClusterServices/
+// UpsertClusterIngress use for their multi-row registries.
+func (c *Client) UpsertClusterHealthSnapshot(ctx context.Context, tenantID, clusterID, k8sVersion string, podsTotal, podsReady int) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO cluster_health_snapshots (cluster_id, tenant_id, k8s_version, pods_total, pods_ready, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW())
+		 ON CONFLICT (cluster_id) DO UPDATE SET
+		   tenant_id = EXCLUDED.tenant_id, k8s_version = EXCLUDED.k8s_version,
+		   pods_total = EXCLUDED.pods_total, pods_ready = EXCLUDED.pods_ready, updated_at = NOW()`,
+		clusterID, tenantID, k8sVersion, podsTotal, podsReady)
+	if err != nil {
+		return fmt.Errorf("upsert cluster health snapshot: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ListClusterHealthSnapshots returns every cluster's current snapshot for
+// tenantID — the fleet-wide view, no namespace filter (this is cluster-
+// level, not namespace-level). RLS (not this query's WHERE clause) is what
+// actually enforces the tenant boundary, same convention as
+// ListClusterIngress.
+func (c *Client) ListClusterHealthSnapshots(ctx context.Context, tenantID string) ([]ClusterHealthSnapshot, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; always rolled back, never committed
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT cluster_id, tenant_id, k8s_version, pods_total, pods_ready, updated_at FROM cluster_health_snapshots ORDER BY cluster_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := []ClusterHealthSnapshot{}
+	for rows.Next() {
+		var s ClusterHealthSnapshot
+		if err := rows.Scan(&s.ClusterID, &s.TenantID, &s.K8sVersion, &s.PodsTotal, &s.PodsReady, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, s)
 	}
 	return result, rows.Err()
 }
