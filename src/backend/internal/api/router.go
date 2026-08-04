@@ -72,6 +72,12 @@ func NewRouter(h *Handler, logger *slog.Logger) http.Handler {
 	// ROADMAP P18 use case #1) — auto-populates Integration.Namespaces.
 	mux.HandleFunc("POST /api/cluster-inventory", h.HandleClusterInventoryUpsert)
 
+	// Fleet collector's entry-point mapping push (ROADMAP P18 use case #3) —
+	// Ingress/Gateway+HTTPRoute/OpenShift Route, store-only for now (no agent
+	// tool reads the GET endpoint yet).
+	mux.HandleFunc("POST /api/cluster-ingress", h.HandleClusterIngressUpsert)
+	mux.HandleFunc("GET /api/cluster-ingress", h.HandleClusterIngressList)
+
 	// Fleet collector's persistent outbound connection + the agent's on-demand
 	// live-diagnostic relay over it (ADR 0022 Decision #7 / ROADMAP P18 use case #9).
 	mux.HandleFunc("GET /api/collector/connect", h.HandleCollectorConnect)

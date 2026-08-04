@@ -378,6 +378,40 @@ func (c *Client) initSchema(ctx context.Context) error {
 		END IF;
 	END $$;
 
+	-- Ingress/entry-point mapping (ROADMAP P18 use case #3): where traffic
+	-- into this cluster actually enters, per agentify-discovery's Ingress /
+	-- Gateway+HTTPRoute / OpenShift Route scan. Same flat-row,
+	-- full-delete-then-insert-per-push shape as cluster_services above --
+	-- kind distinguishes which K8s object produced a given row ("ingress" |
+	-- "httproute" | "route"); host/backend_service may each be empty when
+	-- only one side of a mapping is known (still recorded, not dropped).
+	CREATE TABLE IF NOT EXISTS cluster_ingress_endpoints (
+		tenant_id       TEXT NOT NULL,
+		cluster_id      TEXT NOT NULL,
+		namespace       TEXT NOT NULL,
+		kind            TEXT NOT NULL,
+		name            TEXT NOT NULL,
+		host            TEXT NOT NULL DEFAULT '',
+		backend_service TEXT NOT NULL DEFAULT '',
+		updated_at      TIMESTAMP DEFAULT NOW(),
+		PRIMARY KEY (tenant_id, cluster_id, namespace, kind, name, host, backend_service)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cluster_ingress_lookup ON cluster_ingress_endpoints(tenant_id, namespace, backend_service);
+
+	ALTER TABLE IF EXISTS cluster_ingress_endpoints ENABLE ROW LEVEL SECURITY;
+	ALTER TABLE IF EXISTS cluster_ingress_endpoints FORCE ROW LEVEL SECURITY;
+
+	DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM pg_policies
+			WHERE tablename = 'cluster_ingress_endpoints' AND policyname = 'tenant_isolation'
+		) THEN
+			EXECUTE 'CREATE POLICY tenant_isolation ON cluster_ingress_endpoints
+				USING (tenant_id = current_setting(''app.current_tenant_id'', true))';
+		END IF;
+	END $$;
+
 	-- Add the vector column + IVFFlat index only when pgvector is installed.
 	-- Silently skipped on embedded-postgres (CI tests) which don't ship pgvector.
 	DO $$
@@ -1739,4 +1773,81 @@ func (c *Client) ResolveServiceClusters(ctx context.Context, tenantID, namespace
 		clusterIDs = append(clusterIDs, clusterID)
 	}
 	return clusterIDs, rows.Err()
+}
+
+// ── Ingress/entry-point mapping (ROADMAP P18 use case #3) ───────────────────
+
+// IngressEndpoint is one (namespace, kind, name, host, backend_service) row
+// from a cluster's Ingress/Gateway+HTTPRoute/OpenShift Route scan. Host and
+// BackendService may each be empty when only one side of a mapping is known.
+type IngressEndpoint struct {
+	Namespace      string
+	Kind           string // "ingress" | "httproute" | "route"
+	Name           string
+	Host           string
+	BackendService string
+}
+
+// UpsertClusterIngress replaces the full entry-point set for one (tenantID,
+// clusterID) — a full delete-then-insert per push, same "reflects live
+// cluster truth" semantics as UpsertClusterServices: an Ingress/Route removed
+// from the cluster disappears from this table on the next push, not linger.
+func (c *Client) UpsertClusterIngress(ctx context.Context, tenantID, clusterID string, entries []IngressEndpoint) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("set tenant context: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM cluster_ingress_endpoints WHERE tenant_id = $1 AND cluster_id = $2`,
+		tenantID, clusterID); err != nil {
+		return fmt.Errorf("clear stale cluster ingress endpoints: %w", err)
+	}
+	for _, e := range entries {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO cluster_ingress_endpoints (tenant_id, cluster_id, namespace, kind, name, host, backend_service, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+			 ON CONFLICT (tenant_id, cluster_id, namespace, kind, name, host, backend_service) DO NOTHING`,
+			tenantID, clusterID, e.Namespace, e.Kind, e.Name, e.Host, e.BackendService); err != nil {
+			return fmt.Errorf("insert cluster ingress endpoint %s/%s/%s: %w", e.Namespace, e.Kind, e.Name, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ListClusterIngress returns every entry-point mapping (within tenantID) for
+// one namespace — 0..N rows, one per distinct (cluster, kind, name, host,
+// backend_service) combination. RLS (not this query's WHERE clause) is what
+// actually enforces the tenant boundary, same convention as ResolveServiceClusters.
+func (c *Client) ListClusterIngress(ctx context.Context, tenantID, namespace string) ([]IngressEndpoint, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; always rolled back, never committed
+
+	if err := setTenantContext(ctx, tx, tenantID); err != nil {
+		return nil, fmt.Errorf("set tenant context: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT namespace, kind, name, host, backend_service FROM cluster_ingress_endpoints WHERE namespace = $1`,
+		namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := []IngressEndpoint{}
+	for rows.Next() {
+		var e IngressEndpoint
+		if err := rows.Scan(&e.Namespace, &e.Kind, &e.Name, &e.Host, &e.BackendService); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }

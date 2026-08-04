@@ -25,24 +25,25 @@ import (
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
-	orch              *orchestrator.Router
-	ingester          *ingestion.Ingester
-	queryExec         *orchestrator.QueryExecutor
-	agentClient       *AgentClient
-	adapterClient     *AdapterClient
-	redactor          *governance.Redactor
-	integrationStore  IntegrationStore // nil when postgres is not provisioned
-	traceStore        TraceStore       // nil when postgres is not provisioned
-	pricingStore      PricingStore     // nil when postgres is not provisioned
-	chatStore         ChatStore        // nil when postgres is not provisioned
-	remediationStore  RemediationStore // nil when postgres is not provisioned
-	remediationConfig RemediationConfig
-	serviceDepsStore  ServiceDependencyStore // nil when postgres is not provisioned
-	collectorHub      *CollectorHub          // fleet collectors' persistent connections (ADR 0022 Decision #7 / ROADMAP P18 use case #9)
-	clusterServiceStore ClusterServiceStore  // service->cluster registry (ROADMAP P16 / ADR 0023); nil when postgres is not provisioned
-	secretsManager       secrets.Manager // Integration.Token storage (ADR 0025); nil = plaintext mode (today's default)
-	integrationSecretsPrefix string     // secret-name prefix; only meaningful when secretsManager != nil
-	logger            *slog.Logger
+	orch                     *orchestrator.Router
+	ingester                 *ingestion.Ingester
+	queryExec                *orchestrator.QueryExecutor
+	agentClient              *AgentClient
+	adapterClient            *AdapterClient
+	redactor                 *governance.Redactor
+	integrationStore         IntegrationStore // nil when postgres is not provisioned
+	traceStore               TraceStore       // nil when postgres is not provisioned
+	pricingStore             PricingStore     // nil when postgres is not provisioned
+	chatStore                ChatStore        // nil when postgres is not provisioned
+	remediationStore         RemediationStore // nil when postgres is not provisioned
+	remediationConfig        RemediationConfig
+	serviceDepsStore         ServiceDependencyStore // nil when postgres is not provisioned
+	collectorHub             *CollectorHub          // fleet collectors' persistent connections (ADR 0022 Decision #7 / ROADMAP P18 use case #9)
+	clusterServiceStore      ClusterServiceStore    // service->cluster registry (ROADMAP P16 / ADR 0023); nil when postgres is not provisioned
+	clusterIngressStore      ClusterIngressStore    // entry-point-mapping registry (ROADMAP P18 use case #3); nil when postgres is not provisioned
+	secretsManager           secrets.Manager        // Integration.Token storage (ADR 0025); nil = plaintext mode (today's default)
+	integrationSecretsPrefix string                 // secret-name prefix; only meaningful when secretsManager != nil
+	logger                   *slog.Logger
 }
 
 // integrationSecretName builds the deterministic Secrets Manager secret name
@@ -53,29 +54,30 @@ func (h *Handler) integrationSecretName(id string) string {
 }
 
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, clusterIngress ClusterIngressStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
 	return &Handler{
-		orch:                orch,
-		ingester:            ingester,
-		queryExec:           queryExec,
-		agentClient:         NewAgentClient(agentServiceURL),
-		adapterClient:       NewAdapterClient(adapterURL, adapterToken),
-		redactor:            redactor,
-		integrationStore:    integrations,
-		traceStore:          traces,
-		pricingStore:        pricing,
-		chatStore:           chat,
-		remediationStore:    remediation,
-		remediationConfig:   remediationCfg,
-		serviceDepsStore:    serviceDeps,
-		collectorHub:        NewCollectorHub(),
-		clusterServiceStore: clusterServices,
-		secretsManager:      secretsManager,
+		orch:                     orch,
+		ingester:                 ingester,
+		queryExec:                queryExec,
+		agentClient:              NewAgentClient(agentServiceURL),
+		adapterClient:            NewAdapterClient(adapterURL, adapterToken),
+		redactor:                 redactor,
+		integrationStore:         integrations,
+		traceStore:               traces,
+		pricingStore:             pricing,
+		chatStore:                chat,
+		remediationStore:         remediation,
+		remediationConfig:        remediationCfg,
+		serviceDepsStore:         serviceDeps,
+		collectorHub:             NewCollectorHub(),
+		clusterServiceStore:      clusterServices,
+		clusterIngressStore:      clusterIngress,
+		secretsManager:           secretsManager,
 		integrationSecretsPrefix: integrationSecretsPrefix,
-		logger:              logger,
+		logger:                   logger,
 	}
 }
 
@@ -1917,6 +1919,120 @@ func (h *Handler) HandleClusterInventoryUpsert(w http.ResponseWriter, r *http.Re
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// clusterIngressUpsertRequest is the body accepted by POST /api/cluster-ingress.
+type clusterIngressUpsertRequest struct {
+	Entries []ingressEndpointEntry `json:"entries"`
+}
+
+// ingressEndpointEntry mirrors pgstore.IngressEndpoint's JSON wire shape —
+// kept as its own type (rather than reusing pgstore.IngressEndpoint
+// directly) so the storage struct's field names/tags can change without
+// coupling to the wire contract, same separation every other *Request type
+// in this file already keeps from its pgstore counterpart.
+type ingressEndpointEntry struct {
+	Namespace      string `json:"namespace"`
+	Kind           string `json:"kind"`
+	Name           string `json:"name"`
+	Host           string `json:"host"`
+	BackendService string `json:"backend_service"`
+}
+
+// HandleClusterIngressUpsert records the fleet collector's entry-point
+// mapping (Ingress / Gateway+HTTPRoute / OpenShift Route — ROADMAP P18 use
+// case #3) for its own cluster. Same auth shape as
+// HandleClusterInventoryUpsert: an absent or unrecognized credential is
+// always rejected, since there's no cluster identity to attach entries to
+// otherwise.
+func (h *Handler) HandleClusterIngressUpsert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.clusterIngressStore == nil {
+		http.Error(w, "cluster ingress store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	tenantID, clusterID, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if clusterID == "" {
+		http.Error(w, "a collector credential is required", http.StatusUnauthorized)
+		return
+	}
+	var req clusterIngressUpsertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	entries := make([]pgstore.IngressEndpoint, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		entries = append(entries, pgstore.IngressEndpoint{
+			Namespace: e.Namespace, Kind: e.Kind, Name: e.Name, Host: e.Host, BackendService: e.BackendService,
+		})
+	}
+	if err := h.clusterIngressStore.UpsertClusterIngress(r.Context(), tenantID, clusterID, entries); err != nil {
+		h.logger.Warn("failed to update cluster ingress endpoints", "cluster_id", clusterID, "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// clusterIngressListResponse is the body returned by GET /api/cluster-ingress.
+type clusterIngressListResponse struct {
+	Entries []ingressEndpointEntry `json:"entries"`
+}
+
+// HandleClusterIngressList answers "what entry points map to this
+// namespace?" (ROADMAP P18 use case #3), read from the
+// cluster_ingress_endpoints table HandleClusterIngressUpsert populates.
+// Store-only surface for now — no agent tool consumes this yet, same
+// deliberate scope boundary noted where ClusterIngressStore is declared.
+// Same unauthenticated-agent-facing shape as HandleResolveCluster: resolves
+// to DefaultTenantID via resolveTenantContext, returns an empty list (200),
+// never an error, when nothing matches or the store isn't configured.
+func (h *Handler) HandleClusterIngressList(w http.ResponseWriter, r *http.Request) {
+	namespace := r.URL.Query().Get("namespace")
+	if namespace == "" {
+		http.Error(w, "namespace is required", http.StatusBadRequest)
+		return
+	}
+	if h.clusterIngressStore == nil {
+		writeJSON(w, http.StatusOK, clusterIngressListResponse{Entries: []ingressEndpointEntry{}})
+		return
+	}
+	tenantID, _, err := h.resolveTenantContext(r)
+	if errors.Is(err, errInvalidCredential) {
+		http.Error(w, "invalid credential", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		h.logger.Warn("tenant resolution failed", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	rows, err := h.clusterIngressStore.ListClusterIngress(r.Context(), tenantID, namespace)
+	if err != nil {
+		h.logger.Warn("failed to list cluster ingress endpoints", "namespace", namespace, "error", err)
+		writeJSON(w, http.StatusOK, clusterIngressListResponse{Entries: []ingressEndpointEntry{}})
+		return
+	}
+	entries := make([]ingressEndpointEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, ingressEndpointEntry{
+			Namespace: row.Namespace, Kind: row.Kind, Name: row.Name, Host: row.Host, BackendService: row.BackendService,
+		})
+	}
+	writeJSON(w, http.StatusOK, clusterIngressListResponse{Entries: entries})
 }
 
 // resolveClusterResponse is the body returned by GET /api/resolve-cluster.

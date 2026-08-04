@@ -122,6 +122,16 @@ type ClusterServiceStore interface {
 	ResolveServiceClusters(ctx context.Context, tenantID, namespace, service string) ([]string, error)
 }
 
+// ClusterIngressStore is the entry-point-mapping registry interface (ROADMAP
+// P18 use case #3), populated by agentify-discovery's Ingress/Gateway+
+// HTTPRoute/OpenShift Route scan. Store-only in this pass — no agent tool
+// consumes ListClusterIngress yet; it exists for admin/future use, same
+// deliberate scope boundary as the plan that added this interface.
+type ClusterIngressStore interface {
+	UpsertClusterIngress(ctx context.Context, tenantID, clusterID string, entries []pgstore.IngressEndpoint) error
+	ListClusterIngress(ctx context.Context, tenantID, namespace string) ([]pgstore.IngressEndpoint, error)
+}
+
 // IntegrationStore is the integration CRUD interface implemented by the Postgres
 // client. Using an interface keeps the handler decoupled from the storage package
 // and makes the nil-safe "not configured" path cheap.

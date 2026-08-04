@@ -374,6 +374,59 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("payment-worker should be gone after cluster-a's full replace, got %v", clusters)
 		}
 	})
+
+	t.Run("cluster_ingress_endpoints: upsert + list by namespace, full replace on re-push", func(t *testing.T) {
+		tenantID := uuid.New().String()
+
+		if err := client.UpsertClusterIngress(ctx, tenantID, "cluster-a", []IngressEndpoint{
+			{Namespace: "payments", Kind: "ingress", Name: "shop-ingress", Host: "shop.example.com", BackendService: "storefront"},
+			{Namespace: "payments", Kind: "httproute", Name: "shop-route", Host: "shop.example.com", BackendService: "storefront"},
+			{Namespace: "checkout", Kind: "route", Name: "checkout-route", Host: "checkout.apps.example.com", BackendService: "checkout-api"},
+		}); err != nil {
+			t.Fatalf("upsert cluster-a: %v", err)
+		}
+
+		entries, err := client.ListClusterIngress(ctx, tenantID, "payments")
+		if err != nil {
+			t.Fatalf("list payments: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("payments entries: want 2, got %v", entries)
+		}
+
+		// Different namespace's entries don't leak into this listing.
+		entries, err = client.ListClusterIngress(ctx, tenantID, "checkout")
+		if err != nil {
+			t.Fatalf("list checkout: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Name != "checkout-route" {
+			t.Errorf("checkout entries: want [checkout-route], got %v", entries)
+		}
+
+		// Unknown namespace -> empty, not an error.
+		entries, err = client.ListClusterIngress(ctx, tenantID, "nonexistent")
+		if err != nil {
+			t.Fatalf("list nonexistent: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("nonexistent entries: want empty, got %v", entries)
+		}
+
+		// A second push to cluster-a fully replaces its prior entry set — the
+		// httproute entry should disappear once cluster-a stops reporting it.
+		if err := client.UpsertClusterIngress(ctx, tenantID, "cluster-a", []IngressEndpoint{
+			{Namespace: "payments", Kind: "ingress", Name: "shop-ingress", Host: "shop.example.com", BackendService: "storefront"},
+		}); err != nil {
+			t.Fatalf("re-upsert cluster-a: %v", err)
+		}
+		entries, err = client.ListClusterIngress(ctx, tenantID, "payments")
+		if err != nil {
+			t.Fatalf("list payments after replace: %v", err)
+		}
+		if len(entries) != 1 || entries[0].Kind != "ingress" {
+			t.Errorf("payments entries after replace: want just the ingress entry, got %v", entries)
+		}
+	})
 }
 
 // TestServiceDependencyTenantIsolation is the RLS test that actually
@@ -513,10 +566,10 @@ func TestEventsWindowedQuery(t *testing.T) {
 	// Window 14:05–14:25, entity pod-x, chronological: expect the 14:10 and 14:20
 	// samples only (excludes 14:00 boundary-before, 14:30 after, and pod-y).
 	rows, err := client.Query(ctx, pod, map[string]interface{}{
-		"since": "2026-06-05T14:05:00Z",
-		"until": "2026-06-05T14:25:00Z",
+		"since":  "2026-06-05T14:05:00Z",
+		"until":  "2026-06-05T14:25:00Z",
 		"entity": "pod-x",
-		"order": "asc",
+		"order":  "asc",
 	})
 	if err != nil {
 		t.Fatalf("windowed query: %v", err)
@@ -555,8 +608,8 @@ func TestPurgeOlderThan(t *testing.T) {
 	// Use time.Now()-based timestamps so the test stays valid regardless of
 	// when it runs. The per-pod retention window for k8fy.metrics is 7 days,
 	// so "recent" must be within the last 7 days.
-	old1   := time.Now().Add(-60 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	old2   := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	old1 := time.Now().Add(-60 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	old2 := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	recent := time.Now().Add(-1 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	cutoff := time.Now().Add(-8 * 24 * time.Hour) // 8 days ago — between old and recent
 

@@ -118,6 +118,24 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["list", "get"]
+# Ingress/entry-point mapping (ROADMAP P18 use case #3). networking.k8s.io is
+# core-ish (present since K8s 1.19) so this rule is always meaningful.
+# gateway.networking.k8s.io and route.openshift.io are CRD-based and only
+# exist on some clusters (Gateway API, OpenShift respectively) — a rule
+# referencing an API group/resource that isn't registered on a given cluster
+# is simply inert, not an error, so this one rule set works unmodified across
+# EKS/vanilla K8s/OpenShift without per-distribution manifest variants (same
+# reasoning k8s_client.py's discover_api_capabilities uses to decide whether
+# to even call these APIs).
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["list", "get"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways", "httproutes"]
+  verbs: ["list", "get"]
+- apiGroups: ["route.openshift.io"]
+  resources: ["routes"]
+  verbs: ["list", "get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from . import k8s_client, live_relay
 from .config import Config, load_from_env
 from .health import serve_health
+from .ingress import build_ingress_entries, build_route_entries, correlate_gateway_routes, push_ingress
 from .inventory import push_inventory
 from .log_redaction import redact_log_text
 from .service_topology import extract_service_mentions, push_dependency
@@ -99,12 +100,44 @@ async def _scan_inventory(namespaces: List[str], cfg: Config) -> None:
         await push_inventory(namespace_services, cfg.backend_url, cfg.collector_token)
 
 
-async def _scan_once(cfg: Config) -> None:
+async def _scan_ingress(namespaces: List[str], cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
+    """Ingress/entry-point mapping (ROADMAP P18 use case #3). Ingress needs no
+    capability gate (core-ish, tolerates a missing API on its own); Gateway
+    API and OpenShift Route are only scanned when discover_api_capabilities
+    found the corresponding group, so a cluster without either CRD installed
+    never pays for a 404 per namespace per cycle.
+    """
+    gateway_api = bool(caps and caps.get("gateway_api"))
+    openshift_route = bool(caps and caps.get("openshift_route"))
+
+    gateways_by_key: Dict[Any, Dict[str, Any]] = {}
+    if gateway_api:
+        for ns in namespaces:
+            for gw in await k8s_client.list_gateways(ns):
+                gateways_by_key[(ns, gw["name"])] = gw
+
+    entries: List[Dict[str, str]] = []
+    for ns in namespaces:
+        entries.extend(build_ingress_entries(ns, await k8s_client.list_ingresses(ns)))
+        if gateway_api:
+            entries.extend(correlate_gateway_routes(ns, await k8s_client.list_httproutes(ns), gateways_by_key))
+        if openshift_route:
+            entries.extend(build_route_entries(ns, await k8s_client.list_routes(ns)))
+
+    if entries:
+        await push_ingress(entries, cfg.backend_url, cfg.collector_token)
+
+
+async def _scan_once(cfg: Config, caps: Optional[Dict[str, Any]]) -> None:
     namespaces = await k8s_client.list_namespaces(exclude=set(cfg.namespace_exclude))
     try:
         await _scan_inventory(namespaces, cfg)
     except Exception:
         logger.exception("inventory scan failed")
+    try:
+        await _scan_ingress(namespaces, cfg, caps)
+    except Exception:
+        logger.exception("ingress scan failed")
     for ns in namespaces:
         try:
             await _scan_namespace(ns, cfg)
@@ -115,11 +148,14 @@ async def _scan_once(cfg: Config) -> None:
 async def _run(cfg: Config, shutdown: asyncio.Event) -> None:
     caps = await k8s_client.discover_api_capabilities()
     if caps:
-        logger.info("connected to Kubernetes %s", caps.get("gitVersion", "unknown"))
+        logger.info(
+            "connected to Kubernetes %s (gateway_api=%s, openshift_route=%s)",
+            caps.get("gitVersion", "unknown"), caps.get("gateway_api"), caps.get("openshift_route"),
+        )
 
     while not shutdown.is_set():
         logger.info("scan cycle starting")
-        await _scan_once(cfg)
+        await _scan_once(cfg, caps)
         logger.info("scan cycle complete")
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=cfg.scan_interval_seconds)

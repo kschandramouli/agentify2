@@ -43,7 +43,7 @@ Redis → routed query → Opus 4.8 → correct health verdict). So the review's
 | **P15** | Pull-based log-platform connector (Splunk first, Elasticsearch/OpenSearch second) — replaces direct-cluster log fetch with a query-time read against wherever logs already land | Test harness (Fargate+Firehose+S3/Athena) built 2026-07-21/22 — connector code itself not started | [spec 008](specs/008-on-demand-pod-logs.md), [ADR 0014](decisions/0014-on-demand-ephemeral-log-fetch.md) (extends, does not revisit), [ADR 0021](decisions/0021-log-platform-test-infra.md) |
 | **P16** | Multi-cluster connector — wire the existing `Integration` model into runtime routing (currently admin-only bookkeeping) | Proposed (2026-07-21), revised 2026-08-02 for tenant-scoping (`Integration` gains `tenant_id`) — see below | `internal/models/integration.go`, `internal/api/adapter_client.go` |
 | **P17** | Multi-cluster access for the live-diagnostics tools | **Superseded 2026-08-02 by [ADR 0022](decisions/0022-multi-tenant-fleet-hub.md)** — the central-agent-pulls-via-STS design replaced by [P18](#p18--deterministic-per-cluster-fleet-collector--multi-tenant-hub-ingest-proposed-2026-08-02-revised-2026-08-02-replaces-p17)'s deterministic per-cluster collector; see below | `decisions/0022-multi-tenant-fleet-hub.md` |
-| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03 as `agentify-discovery`**; use cases #3/#5-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
+| **P18** | Deterministic per-cluster fleet collector + multi-tenant Hub ingest (replaces P17) | Proposed (2026-08-02) — **use cases #1 (namespace/service/deployment inventory), #2 (service-dependency mining), and #9 (on-demand live drill-down) shipped 2026-08-03; #3 (ingress/entry-point mapping) shipped 2026-08-04, all as `agentify-discovery`**; use cases #5-#8 not started — see below | `decisions/0022-multi-tenant-fleet-hub.md`, `src/adapters/discovery/`, `src/agent/k8fy/service_topology.py`, `src/backend/internal/api/collector_hub.go` |
 
 ---
 
@@ -1088,10 +1088,25 @@ work across every K8s distribution, not just EKS. This item is the concrete
    UI yet) and the `agentify-discovery-secret`/Secrets Manager wiring for
    the CI deploy pipeline — both flagged as manual follow-ups, not
    blocking.
-3. **Ingress/entry-point mapping** — `Ingress`/`Gateway`+`HTTPRoute`/
-   OpenShift `Route`, whichever exists — "where does traffic into this
-   cluster actually originate," directly relevant to the traffic-flow
-   question that started this whole thread.
+3. **Ingress/entry-point mapping — shipped 2026-08-04** (Discovery:
+   `k8s_client.py`'s `list_ingresses`/`list_gateways`/`list_httproutes`/
+   `list_routes` + `discover_api_capabilities`'s new group-probing,
+   `ingress.py`, `main.py`'s `_scan_ingress`; Hub:
+   `cluster_ingress_endpoints` table, `Upsert`/`ListClusterIngress`,
+   `POST`/`GET /api/cluster-ingress`): Discovery now scans `Ingress`
+   (`networking.k8s.io/v1`, always) plus Gateway API's `Gateway`+`HTTPRoute`
+   and OpenShift `Route` (each only when `discover_api_capabilities` found
+   the corresponding API group — a missing CRD is never treated as an
+   error) and pushes a flattened (namespace, kind, host, backend_service)
+   entry-point map to the Hub, tenant/cluster-scoped and RLS-isolated the
+   same way as `cluster_services`. **Store + a minimal read endpoint only**
+   in this pass, by design: no new Claude-callable tool consumes
+   `GET /api/cluster-ingress` yet — same "collect first, build the
+   consumer as a separate step" shape use case #1's inventory push
+   followed with P16's resolver. **Known simplification:** Ingress
+   host/backend flattening is a cross product of a rule's hosts against its
+   backends (not exact per-rule pairing, which `list_ingresses` doesn't
+   preserve) — fine for an entry-point *map*, not a precise routing table.
 4. **Cross-cluster dependency edges** — once `service_dependencies` carries
    `cluster_id`, the *existing* `get_service_dependencies` chat tool and
    `DiagnoseSkill` prefetch need **no code change** to start surfacing

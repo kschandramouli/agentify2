@@ -40,12 +40,32 @@ async def _k8s_get(path: str, params: Optional[Dict[str, str]] = None) -> httpx.
         return await client.get(f"{K8S_API}{path}", headers=headers, params=params or {})
 
 
+async def _group_exists(group: str) -> bool:
+    """Whether an API group is registered on this cluster (200 = yes, 404 or
+    any other non-200 = no). Used to decide whether it's worth calling a
+    CRD-based list function at all — Gateway API and OpenShift Route are
+    genuinely optional/distribution-specific, unlike core/apps/v1 groups."""
+    try:
+        resp = await _k8s_get(f"/apis/{group}")
+    except RuntimeError:
+        return False
+    return resp.status_code == 200
+
+
 async def discover_api_capabilities() -> Optional[Dict[str, Any]]:
     """Best-effort startup capability check (ADR 0022 Decision #6:
     "API-capability discovery at startup — query /version and /apis, never
-    assume a fixed surface"). Logged once at startup; nothing in v1 branches
-    on the result yet — kept thin until a future use case (e.g. ingress
-    mapping) actually needs a non-core API group.
+    assume a fixed surface"). Logged once at startup.
+
+    Also probes for the two optional, distribution-specific API groups
+    ingress mapping (ROADMAP P18 use case #3) needs — Gateway API
+    (`gateway.networking.k8s.io`) and OpenShift Route (`route.openshift.io`)
+    — under `"gateway_api"`/`"openshift_route"` booleans, so main.py's scan
+    loop can skip those list calls entirely on a cluster that doesn't have
+    them, rather than eating a 404 (and a log line) every namespace, every
+    scan cycle. Ingress itself (`networking.k8s.io/v1`) needs no such gate —
+    it's been core since K8s 1.19 and every list function already tolerates
+    a missing API gracefully via the same 404-returns-[] fallback.
     """
     try:
         resp = await _k8s_get("/version")
@@ -55,7 +75,10 @@ async def discover_api_capabilities() -> Optional[Dict[str, Any]]:
     if resp.status_code != 200:
         logger.warning("GET /version failed (%s): %s", resp.status_code, resp.text[:200])
         return None
-    return resp.json()
+    caps = resp.json()
+    caps["gateway_api"] = await _group_exists("gateway.networking.k8s.io/v1")
+    caps["openshift_route"] = await _group_exists("route.openshift.io/v1")
+    return caps
 
 
 async def list_namespaces(exclude: Optional[set] = None) -> List[str]:
@@ -178,3 +201,134 @@ async def get_pod_logs(namespace: str, pod: str, tail_lines: int = 200) -> str:
         logger.warning("get pod logs failed for %s/%s (%s): %s", namespace, pod, resp.status_code, resp.text[:200])
         return ""
     return resp.text
+
+
+# ── Ingress/entry-point mapping (ROADMAP P18 use case #3) ───────────────────
+# Ingress is core-ish (networking.k8s.io/v1, present since K8s 1.19) and
+# needs no capability gate. Gateway API and OpenShift Route are genuinely
+# optional/distribution-specific — main.py only calls list_gateways/
+# list_httproutes/list_routes when discover_api_capabilities() said the
+# corresponding group exists, but every function here still degrades
+# gracefully (returns []) on a 404 regardless, same as every list function
+# above.
+
+async def list_ingresses(namespace: str) -> List[Dict[str, Any]]:
+    """List Ingresses in `namespace` as
+    `{"name", "hosts": [...], "backend_services": [...]}` — one flattened
+    entry per Ingress object, not per host/backend pair (ingress.py does
+    that flattening); `hosts`/`backend_services` are deduplicated, order-
+    preserving lists gathered across every rule."""
+    resp = await _k8s_get(f"/apis/networking.k8s.io/v1/namespaces/{quote(namespace)}/ingresses")
+    if resp.status_code != 200:
+        logger.warning("list ingresses failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    result = []
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        spec = item.get("spec", {})
+        hosts: List[str] = []
+        backends: List[str] = []
+        for rule in spec.get("rules", []) or []:
+            host = rule.get("host", "")
+            if host and host not in hosts:
+                hosts.append(host)
+            for path in rule.get("http", {}).get("paths", []) or []:
+                svc = path.get("backend", {}).get("service", {}).get("name", "")
+                if svc and svc not in backends:
+                    backends.append(svc)
+        default_svc = spec.get("defaultBackend", {}).get("service", {}).get("name", "")
+        if default_svc and default_svc not in backends:
+            backends.append(default_svc)
+        result.append({"name": name, "hosts": hosts, "backend_services": backends})
+    return result
+
+
+async def list_gateways(namespace: str) -> List[Dict[str, Any]]:
+    """List Gateway API Gateways in `namespace` as
+    `{"name", "listeners": [{"name", "hostname", "port"}]}`. Only called when
+    discover_api_capabilities() found the gateway.networking.k8s.io group;
+    still returns [] on a 404 regardless, same as every list function here."""
+    resp = await _k8s_get(f"/apis/gateway.networking.k8s.io/v1/namespaces/{quote(namespace)}/gateways")
+    if resp.status_code != 200:
+        logger.warning("list gateways failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    result = []
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        listeners = [
+            {"name": l.get("name", ""), "hostname": l.get("hostname", ""), "port": l.get("port", 0)}
+            for l in item.get("spec", {}).get("listeners", []) or []
+        ]
+        result.append({"name": name, "listeners": listeners})
+    return result
+
+
+async def list_httproutes(namespace: str) -> List[Dict[str, Any]]:
+    """List Gateway API HTTPRoutes in `namespace` as
+    `{"name", "hostnames": [...], "parent_refs": [{"name", "namespace",
+    "section_name"}], "backend_services": [...]}`. `parent_refs["namespace"]`
+    defaults to `namespace` (this route's own) per the Gateway API spec when
+    the route doesn't set one explicitly — resolved here, not left for the
+    caller to default."""
+    resp = await _k8s_get(f"/apis/gateway.networking.k8s.io/v1/namespaces/{quote(namespace)}/httproutes")
+    if resp.status_code != 200:
+        logger.warning("list httproutes failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    result = []
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        spec = item.get("spec", {})
+        parent_refs = [
+            {
+                "name": ref.get("name", ""),
+                "namespace": ref.get("namespace") or namespace,
+                "section_name": ref.get("sectionName", ""),
+            }
+            for ref in spec.get("parentRefs", []) or []
+        ]
+        backends: List[str] = []
+        for rule in spec.get("rules", []) or []:
+            for ref in rule.get("backendRefs", []) or []:
+                svc = ref.get("name", "")
+                if svc and svc not in backends:
+                    backends.append(svc)
+        result.append({
+            "name": name,
+            "hostnames": spec.get("hostnames", []) or [],
+            "parent_refs": parent_refs,
+            "backend_services": backends,
+        })
+    return result
+
+
+async def list_routes(namespace: str) -> List[Dict[str, str]]:
+    """List OpenShift Routes in `namespace` as `{"name", "host",
+    "backend_service"}` — primary `spec.to.name` only; weighted
+    `alternateBackends` routing is out of scope for v1. Only called when
+    discover_api_capabilities() found the route.openshift.io group."""
+    resp = await _k8s_get(f"/apis/route.openshift.io/v1/namespaces/{quote(namespace)}/routes")
+    if resp.status_code != 200:
+        logger.warning("list routes failed for namespace=%s (%s): %s", namespace, resp.status_code, resp.text[:200])
+        return []
+    items = resp.json().get("items", [])
+    result = []
+    for item in items:
+        name = item.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        spec = item.get("spec", {})
+        result.append({
+            "name": name,
+            "host": spec.get("host", ""),
+            "backend_service": spec.get("to", {}).get("name", ""),
+        })
+    return result
