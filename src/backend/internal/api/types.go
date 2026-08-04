@@ -159,7 +159,7 @@ func integrationToResponse(in pgstore.Integration) IntegrationResponse {
 		AdapterURL:        in.AdapterURL,
 		Namespaces:        in.Namespaces,
 		Status:            in.Status,
-		HasToken:          in.Token != "",
+		HasToken:          in.Token != "" || in.TokenSecretARN != "",
 		HasCollectorToken: in.CollectorToken != "",
 		CreatedAt:         in.CreatedAt,
 		UpdatedAt:         in.UpdatedAt,

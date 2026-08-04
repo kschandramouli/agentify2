@@ -18,6 +18,7 @@ import (
 	"github.com/chan/agentify/backend/internal/ingestion"
 	"github.com/chan/agentify/backend/internal/models"
 	"github.com/chan/agentify/backend/internal/orchestrator"
+	"github.com/chan/agentify/backend/internal/secrets"
 	pgstore "github.com/chan/agentify/backend/internal/storage/postgres"
 	"github.com/chan/agentify/backend/internal/telemetry"
 )
@@ -39,11 +40,20 @@ type Handler struct {
 	serviceDepsStore  ServiceDependencyStore // nil when postgres is not provisioned
 	collectorHub      *CollectorHub          // fleet collectors' persistent connections (ADR 0022 Decision #7 / ROADMAP P18 use case #9)
 	clusterServiceStore ClusterServiceStore  // service->cluster registry (ROADMAP P16 / ADR 0023); nil when postgres is not provisioned
+	secretsManager       secrets.Manager // Integration.Token storage (ADR 0025); nil = plaintext mode (today's default)
+	integrationSecretsPrefix string     // secret-name prefix; only meaningful when secretsManager != nil
 	logger            *slog.Logger
 }
 
+// integrationSecretName builds the deterministic Secrets Manager secret name
+// for one Integration row's outbound token — stable across edits so an
+// update reuses (rather than accumulates) the same secret.
+func (h *Handler) integrationSecretName(id string) string {
+	return h.integrationSecretsPrefix + "/" + id
+}
+
 // NewHandler creates a new handler.
-func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, logger *slog.Logger) *Handler {
+func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterToken string, redactor *governance.Redactor, integrations IntegrationStore, traces TraceStore, pricing PricingStore, chat ChatStore, remediation RemediationStore, remediationCfg RemediationConfig, serviceDeps ServiceDependencyStore, clusterServices ClusterServiceStore, secretsManager secrets.Manager, integrationSecretsPrefix string, logger *slog.Logger) *Handler {
 	ingester := ingestion.NewIngester(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 	queryExec := orchestrator.NewQueryExecutor(orch.GetPodRegistry(), orch.GetBackendFactory(), logger)
 
@@ -63,6 +73,8 @@ func NewHandler(orch *orchestrator.Router, agentServiceURL, adapterURL, adapterT
 		serviceDepsStore:    serviceDeps,
 		collectorHub:        NewCollectorHub(),
 		clusterServiceStore: clusterServices,
+		secretsManager:      secretsManager,
+		integrationSecretsPrefix: integrationSecretsPrefix,
 		logger:              logger,
 	}
 }
@@ -563,6 +575,16 @@ func (h *Handler) HandleIntegrationCreate(w http.ResponseWriter, r *http.Request
 		Token:          req.Token,
 		CollectorToken: req.CollectorToken,
 	}
+	if h.secretsManager != nil && req.Token != "" {
+		arn, err := h.secretsManager.Store(r.Context(), h.integrationSecretName(id), req.Token)
+		if err != nil {
+			h.logger.Error("store integration token in secrets manager failed", "id", id, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		row.Token = ""
+		row.TokenSecretARN = arn
+	}
 	if err := h.integrationStore.CreateIntegration(r.Context(), row); err != nil {
 		h.logger.Error("create integration failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -626,6 +648,16 @@ func (h *Handler) HandleIntegrationUpdate(w http.ResponseWriter, r *http.Request
 		Token:          req.Token,
 		CollectorToken: req.CollectorToken,
 	}
+	if h.secretsManager != nil && req.Token != "" {
+		arn, err := h.secretsManager.Store(r.Context(), h.integrationSecretName(id), req.Token)
+		if err != nil {
+			h.logger.Error("store integration token in secrets manager failed", "id", id, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		row.Token = ""
+		row.TokenSecretARN = arn
+	}
 	if err := h.integrationStore.UpdateIntegration(r.Context(), row); err != nil {
 		h.logger.Error("update integration failed", "id", id, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -652,10 +684,24 @@ func (h *Handler) HandleIntegrationDelete(w http.ResponseWriter, r *http.Request
 		http.Error(w, "integration store not configured", http.StatusServiceUnavailable)
 		return
 	}
+	// Look up the row first (best-effort) so a live Secrets Manager entry can
+	// be cleaned up after the DB delete succeeds — never blocks the delete
+	// itself on a Secrets Manager error.
+	var secretARN string
+	if h.secretsManager != nil {
+		if existing, err := h.integrationStore.GetIntegration(r.Context(), id); err == nil {
+			secretARN = existing.TokenSecretARN
+		}
+	}
 	if err := h.integrationStore.DeleteIntegration(r.Context(), id); err != nil {
 		h.logger.Error("delete integration failed", "id", id, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
+	}
+	if secretARN != "" {
+		if err := h.secretsManager.Delete(r.Context(), secretARN); err != nil {
+			h.logger.Warn("delete integration secret failed (row already removed)", "id", id, "arn", secretARN, "error", err)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

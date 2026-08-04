@@ -34,6 +34,24 @@ resource "aws_iam_policy" "backend_secrets" {
           aws_secretsmanager_secret.db.arn,
           aws_secretsmanager_secret.adapter.arn,
         ]
+      },
+      # Integration.Token secrets (ADR 0025): one dynamic, per-row secret per
+      # onboarded cluster, created/rotated/deleted by the backend itself at
+      # admin-CRUD time — not known at `terraform apply` time like the
+      # static secrets above, so this is a prefix grant, not a fixed ARN
+      # list. Mirrors the CI role's Langfuse-secret grant below (the only
+      # other role in this file that both creates and reads secrets).
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:TagResource",
+          "secretsmanager:DeleteSecret",
+        ]
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.this.account_id}:secret:${var.project}/${var.env}/integrations/*"
       }
     ]
   })

@@ -915,8 +915,21 @@ anywhere (no `live_get_vault_status` tool, no Hub-side Vault cluster_id
 support) — flagged in `vault_cert.py` as a real gap if Vault-backed cert
 monitoring ever needs to span a fleet, not silently assumed away.
 
-**Still open, sub-problem (3):** `Integration.Token` is still plaintext
-Postgres, not Secrets-Manager-backed.
+**v3 done (2026-08-03, [ADR 0025](decisions/0025-integration-token-secrets-manager.md)):**
+sub-problem (3) is now also resolved. Gated on `INTEGRATION_SECRETS_PREFIX`
+(empty = every existing deployment's plaintext behavior, unchanged) — when
+set, new/updated `Integration.Token` values are stored in AWS Secrets
+Manager (`internal/secrets.Manager`) and only an ARN reference lives in
+Postgres (`token_secret_arn`, mutually exclusive with the plaintext `token`
+column). A one-time `cmd/migrate-integration-tokens` script moves
+pre-existing plaintext tokens over. `Integration.CollectorToken` (the
+*inbound* push credential, looked up by equality on every collector
+request) is explicitly not touched — a Secrets-Manager reference can't serve
+as that lookup key without a separate redesign. **All three P16
+sub-problems are now closed** — this token still has no runtime consumer
+(the per-Integration outbound `AdapterClient` remains unbuilt, see the
+"Original framing" note below), so what's closed here is the storage-hygiene
+gap, not a new capability.
 
 **Original framing (2026-07-21), preserved for context — since superseded by
 ADR 0022:** this was multi-**cluster**, not multi-**tenant** — ADR 0009

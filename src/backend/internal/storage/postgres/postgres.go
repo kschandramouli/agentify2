@@ -159,6 +159,10 @@ func (c *Client) initSchema(ctx context.Context) error {
 		created_at TIMESTAMP DEFAULT NOW(),
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
+	-- token_secret_arn (ADR 0025): when set, the real credential lives in AWS
+	-- Secrets Manager and the token column is left empty; when unset, token
+	-- still carries the plaintext value (today's behavior, unchanged).
+	ALTER TABLE IF EXISTS integrations ADD COLUMN IF NOT EXISTS token_secret_arn TEXT NOT NULL DEFAULT '';
 	-- Multi-turn chat sessions: persists conversation history across pod restarts.
 	CREATE TABLE IF NOT EXISTS chat_sessions (
 		id                 TEXT PRIMARY KEY,
@@ -760,8 +764,12 @@ func (c *Client) GetTracesSummary(ctx context.Context) (*TracesSummary, error) {
 // --- Integrations (admin CRUD) ---
 
 // Integration is the storage-layer representation of an admin integration.
-// Token is stored plaintext in Postgres for the prototype; in production it
-// should be a reference to a Secrets Manager secret ID.
+// Token is the outbound adapter credential; when Secrets Manager mode is
+// enabled (ADR 0025) it is left empty and TokenSecretARN points to the real
+// value instead. When Secrets Manager mode is off (no INTEGRATION_SECRETS_PREFIX
+// configured — the default), Token still carries the plaintext value exactly
+// as before, so every existing deployment is unaffected by this field's
+// addition.
 type Integration struct {
 	ID             string
 	Name           string
@@ -769,6 +777,7 @@ type Integration struct {
 	Namespaces     []string
 	Status         string
 	Token          string // outbound: this backend calling OUT to the adapter
+	TokenSecretARN string // outbound, Secrets-Manager mode only (ADR 0025); empty otherwise
 	CollectorToken string // inbound: a collector calling IN to this backend (ADR 0022)
 	TenantID       string
 	ClusterID      string
@@ -779,7 +788,7 @@ type Integration struct {
 // ListIntegrations returns all integrations ordered by creation time.
 func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	rows, err := c.db.QueryContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, token_secret_arn, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("list integrations: %w", err)
@@ -790,7 +799,7 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 	for rows.Next() {
 		var in Integration
 		var nsJSON []byte
-		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt); err != nil {
+		if err := rows.Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TokenSecretARN, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan integration: %w", err)
 		}
 		if err := json.Unmarshal(nsJSON, &in.Namespaces); err != nil {
@@ -806,9 +815,9 @@ func (c *Client) GetIntegration(ctx context.Context, id string) (*Integration, e
 	var in Integration
 	var nsJSON []byte
 	err := c.db.QueryRowContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, token_secret_arn, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations WHERE id = $1`, id).
-		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TokenSecretARN, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -825,9 +834,9 @@ func (c *Client) GetIntegrationByCollectorToken(ctx context.Context, token strin
 	var in Integration
 	var nsJSON []byte
 	err := c.db.QueryRowContext(ctx,
-		`SELECT id, name, adapter_url, namespaces, status, token, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
+		`SELECT id, name, adapter_url, namespaces, status, token, token_secret_arn, collector_token, tenant_id, COALESCE(cluster_id, ''), created_at, updated_at
 		 FROM integrations WHERE collector_token = $1 AND collector_token != ''`, token).
-		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
+		Scan(&in.ID, &in.Name, &in.AdapterURL, &nsJSON, &in.Status, &in.Token, &in.TokenSecretARN, &in.CollectorToken, &in.TenantID, &in.ClusterID, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -844,17 +853,23 @@ func (c *Client) CreateIntegration(ctx context.Context, in *Integration) error {
 		return fmt.Errorf("marshal namespaces: %w", err)
 	}
 	_, err = c.db.ExecContext(ctx,
-		`INSERT INTO integrations (id, name, adapter_url, namespaces, status, token, collector_token, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
-		in.ID, in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.CollectorToken)
+		`INSERT INTO integrations (id, name, adapter_url, namespaces, status, token, token_secret_arn, collector_token, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+		in.ID, in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.TokenSecretARN, in.CollectorToken)
 	return err
 }
 
 // UpdateIntegration replaces all mutable fields for an existing integration.
-// Preserves created_at. Token and CollectorToken are each updated only when
-// non-empty (empty = keep existing) — independent credentials, updated
-// independently, via SQL CASE rather than branching per-field in Go (which
-// would need 4 branches to cover both fields' empty/non-empty combinations).
+// Preserves created_at. CollectorToken is updated only when non-empty (empty
+// = keep existing), independent of the other credentials.
+//
+// Token and TokenSecretARN are mutually exclusive: only one of them ever
+// holds the real outbound credential at a time (ADR 0025). Supplying a
+// non-empty value for either clears the other, so a row transitioning from
+// plaintext to Secrets-Manager mode (or back) never ends up with a stale
+// plaintext token sitting alongside a live secret reference. Supplying both
+// empty keeps whichever one is currently set, same "empty = no change"
+// convention as CollectorToken.
 func (c *Client) UpdateIntegration(ctx context.Context, in *Integration) error {
 	nsJSON, err := json.Marshal(in.Namespaces)
 	if err != nil {
@@ -863,11 +878,12 @@ func (c *Client) UpdateIntegration(ctx context.Context, in *Integration) error {
 	_, err = c.db.ExecContext(ctx,
 		`UPDATE integrations SET
 		   name=$1, adapter_url=$2, namespaces=$3, status=$4,
-		   token = CASE WHEN $5 = '' THEN token ELSE $5 END,
-		   collector_token = CASE WHEN $6 = '' THEN collector_token ELSE $6 END,
+		   token = CASE WHEN $6 != '' THEN '' WHEN $5 = '' THEN token ELSE $5 END,
+		   token_secret_arn = CASE WHEN $5 != '' THEN '' WHEN $6 = '' THEN token_secret_arn ELSE $6 END,
+		   collector_token = CASE WHEN $7 = '' THEN collector_token ELSE $7 END,
 		   updated_at=NOW()
-		 WHERE id=$7`,
-		in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.CollectorToken, in.ID)
+		 WHERE id=$8`,
+		in.Name, in.AdapterURL, nsJSON, in.Status, in.Token, in.TokenSecretARN, in.CollectorToken, in.ID)
 	return err
 }
 

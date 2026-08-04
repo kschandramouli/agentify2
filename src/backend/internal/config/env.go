@@ -60,6 +60,12 @@ type Config struct {
 	DeployGuardianSettleSeconds       int
 	RemediationProposalTTLMinutes     int
 	RemediationAuthToken              string
+
+	// Integration.Token Secrets Manager mode (ADR 0025). Empty (default)
+	// keeps every existing deployment's plaintext-token behavior unchanged;
+	// setting this to e.g. "agentify/dev/integrations" stores new/updated
+	// outbound adapter tokens in AWS Secrets Manager instead.
+	IntegrationSecretsPrefix string
 }
 
 // LoadFromEnv loads configuration from environment variables.
@@ -108,6 +114,8 @@ func LoadFromEnv() (*Config, error) {
 		DeployGuardianSettleSeconds:       getEnvInt("DEPLOY_GUARDIAN_SETTLE_SECONDS", 30),
 		RemediationProposalTTLMinutes:     getEnvInt("REMEDIATION_PROPOSAL_TTL_MINUTES", 30),
 		RemediationAuthToken:              getEnv("REMEDIATION_AUTH_TOKEN", ""),
+
+		IntegrationSecretsPrefix: getEnv("INTEGRATION_SECRETS_PREFIX", ""),
 	}
 
 	// Validate required fields for production

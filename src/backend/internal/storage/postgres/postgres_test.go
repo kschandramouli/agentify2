@@ -218,6 +218,69 @@ func TestPostgresStores(t *testing.T) {
 		}
 	})
 
+	t.Run("ADR 0025: Token and TokenSecretARN are mutually exclusive across updates", func(t *testing.T) {
+		id := uuid.New().String()
+		in := &Integration{
+			ID: id, Name: "secrets-test", AdapterURL: "http://adapter", Namespaces: []string{},
+			Status: "active", Token: "plaintext-token",
+		}
+		if err := client.CreateIntegration(ctx, in); err != nil {
+			t.Fatalf("create integration: %v", err)
+		}
+		got, err := client.GetIntegration(ctx, id)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if got.Token != "plaintext-token" || got.TokenSecretARN != "" {
+			t.Fatalf("after create: want plaintext token, empty ARN; got token=%q arn=%q", got.Token, got.TokenSecretARN)
+		}
+
+		// Simulate the handler switching this row to Secrets-Manager mode:
+		// it supplies a new ARN and leaves Token empty. The plaintext token
+		// must be cleared, not just left stale alongside the new ARN.
+		in.TokenSecretARN = "arn:aws:secretsmanager:test:000000000000:secret:agentify/dev/integrations/" + id
+		in.Token = ""
+		if err := client.UpdateIntegration(ctx, in); err != nil {
+			t.Fatalf("update to secrets-manager mode: %v", err)
+		}
+		got, err = client.GetIntegration(ctx, id)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if got.Token != "" {
+			t.Errorf("token should be cleared once TokenSecretARN is set, got %q", got.Token)
+		}
+		if got.TokenSecretARN != in.TokenSecretARN {
+			t.Errorf("token_secret_arn: want %q, got %q", in.TokenSecretARN, got.TokenSecretARN)
+		}
+
+		// An update with both empty must preserve the current (ARN) state.
+		unrelated := &Integration{ID: id, Name: "secrets-test", AdapterURL: "http://adapter", Namespaces: []string{}, Status: "active"}
+		if err := client.UpdateIntegration(ctx, unrelated); err != nil {
+			t.Fatalf("no-op credential update: %v", err)
+		}
+		got, err = client.GetIntegration(ctx, id)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if got.TokenSecretARN != in.TokenSecretARN || got.Token != "" {
+			t.Errorf("empty-credential update should preserve existing ARN state; got token=%q arn=%q", got.Token, got.TokenSecretARN)
+		}
+
+		// Switching back to plaintext must clear the stale ARN.
+		unrelated.Token = "new-plaintext-token"
+		if err := client.UpdateIntegration(ctx, unrelated); err != nil {
+			t.Fatalf("update back to plaintext: %v", err)
+		}
+		got, err = client.GetIntegration(ctx, id)
+		if err != nil {
+			t.Fatalf("get integration: %v", err)
+		}
+		if got.Token != "new-plaintext-token" || got.TokenSecretARN != "" {
+			t.Errorf("switching back to plaintext should clear ARN; got token=%q arn=%q", got.Token, got.TokenSecretARN)
+		}
+	})
+
 	t.Run("ADR 0024: TrackedEntities extracts the real namespace from a cluster-scoped pod_id", func(t *testing.T) {
 		cs := client.CurrentStateStore()
 		mustStore(t, cs, "k8fy.live-state.orders", "order-worker-abc123-xz9y2", map[string]interface{}{

@@ -11,12 +11,14 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/chan/agentify/backend/internal/api"
 	apicfg "github.com/chan/agentify/backend/internal/config"
 	"github.com/chan/agentify/backend/internal/governance"
 	"github.com/chan/agentify/backend/internal/orchestrator"
 	"github.com/chan/agentify/backend/internal/retention"
+	"github.com/chan/agentify/backend/internal/secrets"
 	"github.com/chan/agentify/backend/internal/telemetry"
 )
 
@@ -35,9 +37,13 @@ func main() {
 
 	// Initialize the pod-registry backend. In "memory" mode we skip AWS entirely
 	// and run the registry in-process (local dev / no credentials); otherwise we
-	// connect a DynamoDB client.
+	// connect a DynamoDB client. The same AWS config is reused for the
+	// Secrets Manager client (ADR 0025) when INTEGRATION_SECRETS_PREFIX is set,
+	// so a deployment needs at most one AWS config load regardless of which
+	// of these two features it uses.
 	var dbClient *dynamodb.Client
-	if cfg.RegistryBackend == "memory" {
+	var secretsMgr secrets.Manager
+	if cfg.RegistryBackend == "memory" && cfg.IntegrationSecretsPrefix == "" {
 		logger.Info("registry backend: in-memory (AWS not used)")
 	} else {
 		awsCfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(cfg.AWSRegion))
@@ -45,7 +51,15 @@ func main() {
 			logger.Error("failed to load AWS config", "error", err)
 			os.Exit(1)
 		}
-		dbClient = dynamodb.NewFromConfig(awsCfg)
+		if cfg.RegistryBackend != "memory" {
+			dbClient = dynamodb.NewFromConfig(awsCfg)
+		} else {
+			logger.Info("registry backend: in-memory (AWS not used)")
+		}
+		if cfg.IntegrationSecretsPrefix != "" {
+			secretsMgr = secrets.NewAWSManager(secretsmanager.NewFromConfig(awsCfg))
+			logger.Info("integration token secrets manager enabled", "prefix", cfg.IntegrationSecretsPrefix)
+		}
 	}
 
 	// Initialize orchestrator with DynamoDB
@@ -117,7 +131,7 @@ func main() {
 
 	// Build the API handler once; the router and the proactive investigation loop
 	// (ADR 0016) share it.
-	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, logger)
+	handler := api.NewHandler(orch, cfg.AgentServiceURL, cfg.AdapterURL, cfg.AdapterAuthToken, redactor, integrationStore, traceStore, pricingStore, chatStore, remediationStore, remediationCfg, serviceDepsStore, clusterServiceStore, secretsMgr, cfg.IntegrationSecretsPrefix, logger)
 
 	// Proactive investigation loop (spec 009). Opt-in: requires INVESTIGATION_ENABLED
 	// and a webhook URL; otherwise the loop never starts.
