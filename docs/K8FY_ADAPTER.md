@@ -100,7 +100,7 @@ kubectl logs -n agentify -l app=k8fy-adapter -f
   ├─ normalizer.normalize_*_event() → canonical dict
   └─ Emitter.emit() → POST /api/ingest (Bearer BACKEND_AUTH_TOKEN)  ─────▶  crosses into the Hub
 
-[the Hub] ingestion (see EVENT_INGESTION.md) — none of this runs in the cluster
+[the Hub] ingestion (see HUB_DATA_PATH.md#event-ingestion) — none of this runs in the cluster
   ├─ resolveTenantContext(r) → (tenant_id, cluster_id)
   ├─ Classify traits → store type (kv for live-state/certs, relational for events/metrics)
   ├─ Route to a cluster-aware pod ID (models.PodID, ADR 0024)

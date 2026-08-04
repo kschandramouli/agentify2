@@ -63,7 +63,7 @@ The agent integration connects the backend's query orchestrator to Claude AI for
 `CertAuditSkill`, `DiagnoseSkill`, `ChangeHistorySkill`, `RestartTrendSkill`)
 — deterministic parallel pre-fetch of every predictable signal, followed by
 exactly one Claude call. No agentic tool-calling loop, no advisor/executor
-pairing. See [ADR 0017](../context-mesh/decisions/0017-pattern-a-skills-standardisation.md)
+pairing. See [ADR 0026](../context-mesh/decisions/0026-pattern-a-skills-standardisation.md)
 (2026-06-11) — this superseded an earlier Opus-advisor/Sonnet-executor
 design for `DiagnoseSkill` that no longer exists in the code. Only the
 `K8fyAgent` fallback (unrecognised intents) still runs a real agentic loop
@@ -79,9 +79,13 @@ other, and it matters which one a given operation actually runs on:
   fleet cluster**. Deterministic, non-agentic, never calls Claude. Every
   operation it performs is a read against *its own* cluster's K8s API,
   followed by either a push or a relay response to the Hub:
-  - **Push (periodic, plain HTTP):** lists namespaces/services/workloads,
-    mines a service-dependency graph from pod logs, `POST`s both to
-    `/api/cluster-inventory` and `/api/service-dependencies`.
+  - **Push (periodic, plain HTTP):** lists namespaces/services/workloads
+    (`/api/cluster-inventory`), mines a service-dependency graph from pod
+    logs (`/api/service-dependencies`), maps Ingress/Gateway+HTTPRoute/
+    OpenShift Route entry points (`/api/cluster-ingress`, ROADMAP P18 #3),
+    and reports a pod-readiness/K8s-version snapshot
+    (`/api/cluster-health`, ROADMAP P18 #5) — four independent pushes, one
+    scan failure never blocks another.
   - **Relay (on-demand, over its one persistent connection):** when the Hub
     forwards a `live_*` request, Discovery dispatches it locally
     (`live_tools.py` — reads pods/logs/events/Secrets directly from its own
@@ -97,7 +101,7 @@ other, and it matters which one a given operation actually runs on:
     presented `CollectorToken`.
   - Persists what Discovery pushes (`Integration.Namespaces`,
     `cluster_services`, `service_dependencies` — see
-    [STORAGE_BACKENDS.md](STORAGE_BACKENDS.md)).
+    [HUB_DATA_PATH.md](HUB_DATA_PATH.md#storage-backends)).
   - Answers `GET /api/resolve-cluster` (which cluster runs a service) from
     that persisted data — **not** a live call to any cluster.
   - Holds the connection registry (`CollectorHub`) and relays
@@ -316,12 +320,14 @@ make test-integration   # Run tests (includes query testing)
 ## Future Improvements
 
 1. **Dynamic Intent**: Let Claude infer intent from question instead of heuristics
-2. **Namespace/service → cluster auto-routing**: today `cluster_id` must be
-   resolved via `resolve_service_clusters` per-tool-call; P16's remaining
-   sub-problem 3 (`Integration.Token` off plaintext Postgres) is still open —
-   see [ROADMAP](../context-mesh/ROADMAP.md) P16
-3. **Remaining P18 fleet-collector use cases** (ingress mapping, fleet
-   health/capacity snapshots, RBAC/NetworkPolicy posture) — see ROADMAP P18
+2. **Namespace/service → cluster auto-routing**: today `cluster_id` must
+   still be resolved via `resolve_service_clusters` per-tool-call — P16 is
+   otherwise fully closed (all three sub-problems done, including
+   `Integration.Token` → Secrets Manager, [ADR 0025](../context-mesh/decisions/0025-integration-token-secrets-manager.md))
+3. **Remaining P18 fleet-collector use cases** — #6 (local anomaly
+   pre-filtering), #7 (cross-cluster blast-radius checks for P13), #8
+   (config/RBAC/NetworkPolicy posture). Use cases #1–#5 and #9 are shipped —
+   see [ROADMAP](../context-mesh/ROADMAP.md) P18
 4. **Scheduled Queries**: Support "alert me if X becomes unhealthy"
 
 ## Troubleshooting

@@ -3,7 +3,7 @@
 > Builds on [ADR 0006](../decisions/0006-two-tier-query-path.md) (Tier-2 agentic
 > path), [spec 005](005-root-cause-correlation.md) (diagnose intent), the P5
 > skills design in [ROADMAP.md](../ROADMAP.md#p5--supporting-tooling-when-scaling),
-> and [ADR 0017](../decisions/0017-pattern-a-skills-standardisation.md)
+> and [ADR 0026](../decisions/0026-pattern-a-skills-standardisation.md)
 > (Pattern A standardisation across all skills).
 
 ## Goal

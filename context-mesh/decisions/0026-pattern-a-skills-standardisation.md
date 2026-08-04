@@ -1,4 +1,7 @@
-# 0017 – Pattern A standardisation across all skill classes
+# 0026 – Pattern A standardisation across all skill classes
+
+> Renumbered 2026-08-04 from 0017 (a duplicate — `0017-all-on-eks-topology.md`
+> already held that number). Content unchanged, filename/number only.
 
 ## Status
 

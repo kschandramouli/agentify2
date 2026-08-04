@@ -134,7 +134,7 @@ Tool iterations recorded in Prometheus: **0**.
 
 ## 4. Pattern A — DiagnoseSkill (`diagnose`), including fleet-cluster fan-out
 
-**Superseded 2026-06-11 ([ADR 0017](../context-mesh/decisions/0017-pattern-a-skills-standardisation.md)):**
+**Superseded 2026-06-11 ([ADR 0026](../context-mesh/decisions/0026-pattern-a-skills-standardisation.md)):**
 this used to be an agentic Sonnet-executor/Opus-advisor loop (same shape as
 Diagram 5 below). `DiagnoseSkill` is now Pattern A like `HealthSkill`/
 `CertAuditSkill`: every predictable signal is pre-fetched in parallel, then
@@ -269,6 +269,8 @@ sequenceDiagram
     loop Every SCAN_INTERVAL_SECONDS — Discovery-initiated, independent of the connection above
         Disc->>Hub: POST /api/cluster-inventory (namespaces + services)
         Disc->>Hub: POST /api/service-dependencies (mined edges)
+        Disc->>Hub: POST /api/cluster-ingress (Ingress/Gateway+HTTPRoute/Route entry points, P18 #3)
+        Disc->>Hub: POST /api/cluster-health (pod-readiness + K8s version snapshot, P18 #5)
     end
 
     Note over Agent,Disc: On-demand relay (as many times as needed, over the one open connection) — Agent only ever talks to the Hub
