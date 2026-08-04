@@ -1107,14 +1107,27 @@ work across every K8s distribution, not just EKS. This item is the concrete
    host/backend flattening is a cross product of a rule's hosts against its
    backends (not exact per-rule pairing, which `list_ingresses` doesn't
    preserve) — fine for an entry-point *map*, not a precise routing table.
-4. **Cross-cluster dependency edges** — once `service_dependencies` carries
-   `cluster_id`, the *existing* `get_service_dependencies` chat tool and
-   `DiagnoseSkill` prefetch need **no code change** to start surfacing
-   cross-cluster edges — they just start appearing in the same query once
-   more than one of a tenant's clusters has pushed data. `DiagnoseSkill`'s
-   prompt guidance (already written to consider upstream/downstream
-   services) extends naturally to "downstream service lives in a different
-   cluster," not just a different namespace in the same one.
+4. **Cross-cluster dependency edges — confirmed 2026-08-04, no code
+   change.** The claim that `service_dependencies` carrying `cluster_id`
+   is sufficient on its own was verified end-to-end rather than left as an
+   architectural assumption: a new Go test
+   (`postgres_test.go`, "ROADMAP P18 use case #4") proves
+   `ListServiceDependencies` surfaces two of one tenant's clusters' edges
+   for the same namespace together, each correctly tagged with its own
+   `cluster_id` (it's scoped by tenant+namespace only, never by cluster —
+   nothing to change there); a new Python test
+   (`test_service_topology.py`,
+   `test_fetch_service_dependencies_passes_cross_cluster_edges_through_untouched`)
+   proves `fetch_service_dependencies` forwards `cluster_id` verbatim
+   rather than dropping it. So the `get_service_dependencies` chat tool and
+   `DiagnoseSkill`'s prefetch (`tasks["service_dependencies"] =
+   fetch_service_dependencies(...)`, injected directly into the Claude
+   prompt) really do start surfacing cross-cluster edges automatically once
+   more than one of a tenant's clusters has pushed data for a namespace —
+   confirmed, not just claimed. `DiagnoseSkill`'s prompt guidance (already
+   written to consider upstream/downstream services) extends naturally to
+   "downstream service lives in a different cluster," not just a different
+   namespace in the same one.
 5. **Fleet-wide health/capacity/version snapshots** — extends P3c
    (self-observability) from one pipeline to the whole fleet; feeds a
    future fleet dashboard without the Hub needing live per-cluster access

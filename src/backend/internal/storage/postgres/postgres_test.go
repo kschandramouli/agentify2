@@ -427,6 +427,39 @@ func TestPostgresStores(t *testing.T) {
 			t.Errorf("payments entries after replace: want just the ingress entry, got %v", entries)
 		}
 	})
+
+	t.Run("ROADMAP P18 use case #4: two of one tenant's clusters' service_dependencies edges surface together, each tagged with its own cluster_id", func(t *testing.T) {
+		// Verifies the ROADMAP's "no code change needed" claim for cross-
+		// cluster dependency edges: ListServiceDependencies is scoped by
+		// (tenant, namespace) only, never by cluster, so once more than one
+		// of a tenant's clusters has pushed evidence for the same namespace,
+		// both edges appear in the same query — this is what makes them
+		// "just start appearing" in get_service_dependencies/DiagnoseSkill's
+		// prefetch without any Python-side change.
+		tenantID := uuid.New().String()
+
+		if err := client.UpsertServiceDependency(ctx, uuid.New().String(), tenantID, "cluster-a", "payments", "checkout-ui", "checkout-api"); err != nil {
+			t.Fatalf("upsert cluster-a dependency: %v", err)
+		}
+		// Same namespace, same from/to service *names* but a different
+		// cluster — the realistic "downstream service lives in a different
+		// cluster" scenario use case #4 names explicitly.
+		if err := client.UpsertServiceDependency(ctx, uuid.New().String(), tenantID, "cluster-b", "payments", "checkout-ui", "checkout-api"); err != nil {
+			t.Fatalf("upsert cluster-b dependency: %v", err)
+		}
+
+		deps, err := client.ListServiceDependencies(ctx, tenantID, "payments")
+		if err != nil {
+			t.Fatalf("list dependencies: %v", err)
+		}
+		if len(deps) != 2 {
+			t.Fatalf("want both clusters' edges surfaced together, got %d: %v", len(deps), deps)
+		}
+		gotClusters := map[string]bool{deps[0].ClusterID: true, deps[1].ClusterID: true}
+		if !gotClusters["cluster-a"] || !gotClusters["cluster-b"] {
+			t.Errorf("want edges tagged cluster-a and cluster-b, got %v", gotClusters)
+		}
+	})
 }
 
 // TestServiceDependencyTenantIsolation is the RLS test that actually

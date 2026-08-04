@@ -112,6 +112,25 @@ async def test_fetch_service_dependencies_returns_list(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_service_dependencies_passes_cross_cluster_edges_through_untouched(monkeypatch):
+    """ROADMAP P18 use case #4: fetch_service_dependencies is a thin pass-
+    through (Client.ListServiceDependencies already returns every cluster's
+    edges for a tenant/namespace together — see the Go-side test in
+    postgres_test.go) — so once the Hub starts including entries from more
+    than one cluster, this function must forward cluster_id verbatim rather
+    than dropping it, with zero code change here."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            {"from_service": "checkout-ui", "to_service": "checkout-api", "cluster_id": "cluster-a"},
+            {"from_service": "checkout-ui", "to_service": "checkout-api", "cluster_id": "cluster-b"},
+        ])
+    monkeypatch.setattr(httpx, "AsyncClient", _client_factory(httpx.MockTransport(handler)))
+
+    deps = await st.fetch_service_dependencies("payments", "http://backend")
+    assert {d["cluster_id"] for d in deps} == {"cluster-a", "cluster-b"}
+
+
+@pytest.mark.asyncio
 async def test_fetch_service_dependencies_degrades_to_empty_on_error(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")
